@@ -23,6 +23,74 @@ The system goal is unified execution and lifecycle orchestration, not forced uni
 
 ## Architecture Summary
 
+### Complete Architecture
+
+```text
++-----------------------------------------------------------------------------------+
+| Clients / Interfaces                                                              |
+| SQL / HTTP API / admin operations                                                 |
++------------------------------------------+----------------------------------------+
+                                           |
+                                           v
++-----------------------------------------------------------------------------------+
+| BrewDB Coordinator                                                                |
+| - SQL frontend                                                                    |
+| - query / mutation / maintenance planner                                          |
+| - distributed scheduler                                                           |
+| - transaction and commit coordinator                                              |
+| - recovery manager                                                                |
++---------------------------+--------------------------+----------------------------+
+                            |                          |
+                            | catalog / auth / creds   | runtime state / recovery
+                            v                          v
+        +--------------------------------+   +--------------------------------------+
+        | Lakekeeper + BrewDB extensions |   | BrewDB Runtime Store                 |
+        | - namespace / table identity   |   | - jobs / stages / task attempts      |
+        | - ACL / governance             |   | - txn intents / commit journal       |
+        | - warehouse / credentials      |   | - staged artifact manifests          |
+        | - native Paimon catalog        |   | - recovery checkpoints               |
+        +----------------+---------------+   +------------------+-------------------+
+                         |                                      |
+                         v                                      v
+              +------------------------+             +------------------------+
+              | PostgreSQL             |             | PostgreSQL             |
+              | control-plane store    |             | runtime metadata store |
+              +------------------------+             +------------------------+
+                                          
+                                          
++-----------------------------------------------------------------------------------+
+| Distributed Execution Plane                                                       |
+| DataFusion + BrewDB runtime                                                       |
+| - stage/task execution                                                            |
+| - exchange / shuffle                                                              |
+| - query / insert / mutation compute / compaction                                  |
++-----------------------------+-------------------------------+---------------------+
+                              |                               |
+                              v                               v
+                   +--------------------+          +--------------------+
+                   | Worker             |          | Worker             |
+                   | - fragment exec    |          | - fragment exec    |
+                   | - local spill      |          | - local spill      |
+                   | - staged outputs   |          | - staged outputs   |
+                   +---------+----------+          +----------+---------+
+                             \                                /
+                              \                              /
+                               +----------------------------+
+                               | Object Storage             |
+                               | - table data               |
+                               | - snapshots / manifests    |
+                               | - staged write artifacts   |
+                               +-------------+--------------+
+                                             |
+                                             v
+                               +----------------------------+
+                               | Format Semantics Layer     |
+                               | - Paimon adapter           |
+                               | - Iceberg adapter          |
+                               | - future adapters          |
+                               +----------------------------+
+```
+
 ### Control Plane
 
 Lakekeeper is the control-plane foundation. BrewDB extends it instead of introducing a separate catalog stack for each format.
@@ -37,6 +105,8 @@ Lakekeeper is expected to own:
 
 For Paimon, the intended direction is native support in Lakekeeper rather than generic-table-only registration.
 
+The current metadata backend choice for the control plane is `PostgreSQL`.
+
 ### Execution Plane
 
 DataFusion is treated as the unified execution substrate, not only as a query engine.
@@ -48,6 +118,8 @@ The execution plane should eventually cover:
 - mutation compute paths for delete / update / merge
 - compaction and rewrite jobs
 - analyze and cleanup jobs
+
+The current metadata backend choice for BrewDB runtime state is also `PostgreSQL`, kept logically separate from the control-plane store even if the first deployment shares one PostgreSQL instance.
 
 ### Storage Semantics Plane
 
@@ -70,7 +142,8 @@ The topology is:
 - multiple workers for DataFusion fragment execution and staged artifact generation
 - object storage for table data and staged outputs
 - Lakekeeper as the control-plane base
-- a dedicated BrewDB runtime metadata store for jobs, transaction intents, and recovery state
+- PostgreSQL for Lakekeeper control-plane metadata
+- a dedicated PostgreSQL-backed BrewDB runtime metadata store for jobs, transaction intents, and recovery state
 
 This is a shared-storage distributed architecture with ClickHouse-style lifecycle ambitions, not a query-only coordinator model.
 
@@ -105,6 +178,12 @@ Metadata is split across four domains:
    - jobs, task attempts, transaction intents, commit journal, recovery state
 4. `Object storage`
    - data files, metadata objects, staged artifacts
+
+Current storage decision:
+
+- `Lakekeeper metadata store`: PostgreSQL
+- `BrewDB runtime metadata store`: PostgreSQL
+- first deployment may share one PostgreSQL instance, but with separate logical schemas or databases
 
 This separation is a core architecture rule.
 
