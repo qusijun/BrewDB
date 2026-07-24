@@ -206,3 +206,4 @@ Not first-priority:
 ## Repository Docs
 
 - [Architecture Constraints](docs/architecture-constraints.md)
+- [Coordinator Phase 1](docs/coordinator-phase1.md)
