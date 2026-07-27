@@ -207,3 +207,9 @@ Not first-priority:
 
 - [Architecture Constraints](docs/architecture-constraints.md)
 - [Coordinator Phase 1](docs/coordinator-phase1.md)
+- [Catalog Model](docs/catalog-model.md)
+- [Mutation Framework Phase 1](docs/mutation-framework-phase1.md)
+- [Distributed Execution Phase 1](docs/distributed-execution-phase1.md)
+- [Format Adapter Kernel](docs/format-adapter-kernel.md)
+- [Maintenance Kernel Phase 1](docs/maintenance-kernel-phase1.md)
+- [Artifact Lifecycle Kernel](docs/artifact-lifecycle-kernel.md)
