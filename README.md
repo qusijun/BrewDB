@@ -213,3 +213,4 @@ Not first-priority:
 - [Format Adapter Kernel](docs/format-adapter-kernel.md)
 - [Maintenance Kernel Phase 1](docs/maintenance-kernel-phase1.md)
 - [Artifact Lifecycle Kernel](docs/artifact-lifecycle-kernel.md)
+- [Development Architecture](docs/development-architecture.md)
