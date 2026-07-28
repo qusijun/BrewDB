@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::diagnostics::{DiagnosticError, ErrorCode};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreError {
     InvalidStateTransition {
@@ -30,3 +32,22 @@ impl fmt::Display for CoreError {
 }
 
 impl Error for CoreError {}
+
+impl CoreError {
+    pub const fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::InvalidStateTransition { .. } => ErrorCode::CoreInvalidStateTransition,
+            Self::InvalidIdentifier { .. } => ErrorCode::CoreInvalidIdentifier,
+        }
+    }
+}
+
+impl DiagnosticError for CoreError {
+    fn error_code(&self) -> ErrorCode {
+        self.error_code()
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.core"
+    }
+}

@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use brewdb_core::diagnostics::{DiagnosticError, ErrorCode};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageError {
     MissingField {
@@ -29,3 +31,22 @@ impl fmt::Display for StorageError {
 }
 
 impl Error for StorageError {}
+
+impl StorageError {
+    pub const fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::MissingField { .. } => ErrorCode::StorageMissingField,
+            Self::Unsupported { .. } => ErrorCode::StorageUnsupported,
+        }
+    }
+}
+
+impl DiagnosticError for StorageError {
+    fn error_code(&self) -> ErrorCode {
+        self.error_code()
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.storage"
+    }
+}

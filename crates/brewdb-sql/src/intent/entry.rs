@@ -98,12 +98,59 @@ pub trait IntentPlanner {
     fn build_intent(&self, request: FrontendSqlRequest) -> Result<FrontendSqlResult, SqlError>;
 }
 
+/// Phase 1 query-first planner shell.
+///
+/// This planner intentionally recognizes only query-shaped statements so the
+/// first closed loop can stay focused on the read path.
+#[derive(Clone, Debug, Default)]
+pub struct QueryOnlyIntentPlanner;
+
+impl IntentPlanner for QueryOnlyIntentPlanner {
+    fn build_intent(&self, request: FrontendSqlRequest) -> Result<FrontendSqlResult, SqlError> {
+        let sql = request.sql.trim();
+        if sql.is_empty() {
+            return Err(SqlError::MissingField {
+                entity: "frontend_sql_request",
+                field: "sql",
+            });
+        }
+
+        let normalized = sql.to_ascii_lowercase();
+        if !normalized.starts_with("select") && !normalized.starts_with("with") {
+            return Err(SqlError::Unsupported {
+                operation: "non_query_statement",
+                reason: "phase 1 query skeleton only accepts query-shaped SQL".to_owned(),
+            });
+        }
+
+        let intent = SqlIntent::Query(QueryIntent {
+            statement_label: statement_label(sql),
+            reads: Vec::new(),
+        });
+
+        Ok(FrontendSqlResult {
+            statement_class: intent.statement_class(),
+            intent,
+        })
+    }
+}
+
+fn statement_label(sql: &str) -> String {
+    sql.split_whitespace()
+        .next()
+        .map(|token| token.to_ascii_lowercase())
+        .unwrap_or_else(|| "query".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use brewdb_core::catalog::LogicalTableName;
     use brewdb_core::common::RequestContext;
 
-    use super::{FrontendSqlRequest, QueryIntent, SqlIntent, StatementClass};
+    use super::{
+        FrontendSqlRequest, IntentPlanner, QueryIntent, QueryOnlyIntentPlanner, SqlIntent,
+        StatementClass,
+    };
 
     #[test]
     fn sql_intent_reports_statement_class() {
@@ -130,5 +177,36 @@ mod tests {
 
         assert_eq!(request.default_catalog.as_deref(), Some("brew"));
         assert_eq!(request.default_database.as_deref(), Some("analytics"));
+    }
+
+    #[test]
+    fn query_only_planner_accepts_select() {
+        let planner = QueryOnlyIntentPlanner;
+        let result = planner
+            .build_intent(FrontendSqlRequest {
+                sql: "SELECT * FROM orders".to_owned(),
+                request_context: RequestContext::new(),
+                default_catalog: None,
+                default_database: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.statement_class, StatementClass::Query);
+        assert!(matches!(result.intent, SqlIntent::Query(_)));
+    }
+
+    #[test]
+    fn query_only_planner_rejects_insert() {
+        let planner = QueryOnlyIntentPlanner;
+        let error = planner
+            .build_intent(FrontendSqlRequest {
+                sql: "INSERT INTO orders VALUES (1)".to_owned(),
+                request_context: RequestContext::new(),
+                default_catalog: None,
+                default_database: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, SqlError::Unsupported { .. }));
     }
 }

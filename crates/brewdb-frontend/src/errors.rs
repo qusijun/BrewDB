@@ -1,4 +1,4 @@
-//! Execution-layer error surface.
+//! Frontend protocol error surface.
 
 use std::error::Error;
 use std::fmt;
@@ -6,44 +6,47 @@ use std::fmt;
 use brewdb_core::diagnostics::{DiagnosticError, ErrorCode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExecutionError {
+pub enum FrontendError {
     MissingField {
         entity: &'static str,
         field: &'static str,
     },
-    InvalidPlan {
+    Unsupported {
+        operation: &'static str,
         reason: String,
     },
 }
 
-impl fmt::Display for ExecutionError {
+impl fmt::Display for FrontendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingField { entity, field } => {
                 write!(f, "missing required field `{field}` for {entity}")
             }
-            Self::InvalidPlan { reason } => write!(f, "invalid execution plan: {reason}"),
+            Self::Unsupported { operation, reason } => {
+                write!(f, "unsupported frontend operation `{operation}`: {reason}")
+            }
         }
     }
 }
 
-impl Error for ExecutionError {}
+impl Error for FrontendError {}
 
-impl ExecutionError {
+impl FrontendError {
     pub const fn error_code(&self) -> ErrorCode {
         match self {
-            Self::MissingField { .. } => ErrorCode::ExecutionMissingField,
-            Self::InvalidPlan { .. } => ErrorCode::ExecutionInvalidPlan,
+            Self::MissingField { .. } => ErrorCode::FrontendMissingField,
+            Self::Unsupported { .. } => ErrorCode::FrontendUnsupported,
         }
     }
 }
 
-impl DiagnosticError for ExecutionError {
+impl DiagnosticError for FrontendError {
     fn error_code(&self) -> ErrorCode {
         self.error_code()
     }
 
     fn log_target(&self) -> &'static str {
-        "brewdb.execution"
+        "brewdb.frontend"
     }
 }

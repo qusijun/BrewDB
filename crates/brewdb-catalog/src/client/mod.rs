@@ -1,5 +1,8 @@
 //! Internal control-plane client implementations.
 
+pub mod local;
+pub mod rest;
+
 use brewdb_core::ids::{TableId, WarehouseId};
 
 use crate::errors::CatalogError;
@@ -14,3 +17,8 @@ pub trait CatalogClient {
         warehouse_id: &WarehouseId,
     ) -> Result<WarehouseProfile, CatalogError>;
 }
+
+/// Reserved expansion slot for a future typed RPC client implementation.
+///
+/// Keep this boundary in `client/` so transport shape stays below facade/normalize.
+pub trait CatalogRpcClient: CatalogClient {}

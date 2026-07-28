@@ -1,5 +1,5 @@
 [package]
-name = "brewdb-storage"
+name = "brewdb-frontend"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 brewdb-core = { path = "../brewdb-core" }
-brewdb-catalog = { path = "../brewdb-catalog" }
 brewdb-execution = { path = "../brewdb-execution" }
-paimon.workspace = true
+brewdb-runtime = { path = "../brewdb-runtime" }
+brewdb-sql = { path = "../brewdb-sql" }

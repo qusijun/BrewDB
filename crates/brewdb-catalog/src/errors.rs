@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use brewdb_core::diagnostics::{DiagnosticError, ErrorCode};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogError {
     MissingField {
@@ -34,3 +36,23 @@ impl fmt::Display for CatalogError {
 }
 
 impl Error for CatalogError {}
+
+impl CatalogError {
+    pub const fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::MissingField { .. } => ErrorCode::CatalogMissingField,
+            Self::NotFound { .. } => ErrorCode::CatalogNotFound,
+            Self::Unsupported { .. } => ErrorCode::CatalogUnsupported,
+        }
+    }
+}
+
+impl DiagnosticError for CatalogError {
+    fn error_code(&self) -> ErrorCode {
+        self.error_code()
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.catalog"
+    }
+}

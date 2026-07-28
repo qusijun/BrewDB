@@ -8,3 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 brewdb-core = { path = "../brewdb-core" }
+lakekeeper_local = { package = "lakekeeper", path = "../../../lakekeeper/crates/lakekeeper", default-features = false }
+reqwest.workspace = true
+serde.workspace = true
+url.workspace = true

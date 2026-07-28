@@ -10,7 +10,7 @@ The crate layout is intentionally not based on deployment roles such as coordina
 
 ## 2. Crate Layout
 
-Phase 1 uses six primary crates.
+Phase 1 uses seven primary crates.
 
 ### `brewdb-core`
 
@@ -43,6 +43,16 @@ Language frontend:
 - SQL rewrites
 - intent generation
 - SQL-surface capability gating
+
+### `brewdb-frontend`
+
+External SQL ingress:
+
+- PostgreSQL wire protocol handling
+- session and authentication entry
+- prepared statement / portal lifecycle shells
+- result encoding back to clients
+- protocol-facing error mapping
 
 ### `brewdb-execution`
 
@@ -78,7 +88,7 @@ Lifecycle and control kernel:
 
 ## 2.1 Crate Responsibility Matrix
 
-To keep the six crates from drifting into each other, each crate should be judged by four questions:
+To keep the seven crates from drifting into each other, each crate should be judged by four questions:
 
 - what truth does it own
 - what inputs it consumes
@@ -162,6 +172,33 @@ Must not own:
 - physical execution plans
 - adapter-native semantics
 - runtime-state persistence
+
+### `brewdb-frontend`
+
+Owns:
+
+- client protocol handling
+- SQL session entry and statement flow
+- pgwire message translation
+- result-shape encoding toward clients
+
+Consumes:
+
+- `brewdb-core`
+- `brewdb-sql`
+- `brewdb-runtime`
+
+Produces:
+
+- protocol-neutral request handoff into BrewDB internals
+- protocol-specific response frames back to clients
+
+Must not own:
+
+- SQL semantic planning
+- distributed scheduling
+- storage semantics
+- transaction truth
 
 ### `brewdb-execution`
 
@@ -257,13 +294,14 @@ Must not own:
 - task execution internals
 - raw control-plane client details
 - SQL syntax concerns
+- external client wire protocols
 
 ## 2.2 Crate Collaboration Paths
 
 The main allowed call paths should stay narrow:
 
-1. SQL path:
-   `brewdb-sql -> brewdb-catalog -> brewdb-runtime -> brewdb-execution / brewdb-storage`
+1. SQL ingress path:
+   `brewdb-frontend -> brewdb-sql -> brewdb-catalog -> brewdb-runtime -> brewdb-execution / brewdb-storage`
 2. Commit path:
    `brewdb-runtime -> brewdb-catalog -> brewdb-storage`
 3. Execution path:
@@ -274,6 +312,8 @@ The main allowed call paths should stay narrow:
 The main disallowed shortcuts are:
 
 - `brewdb-sql -> brewdb-storage`
+- `brewdb-frontend -> brewdb-storage`
+- `brewdb-frontend -> brewdb-execution`
 - `brewdb-execution -> brewdb-runtime`
 - `brewdb-execution -> brewdb-catalog`
 - `brewdb-storage -> brewdb-runtime`
@@ -348,6 +388,27 @@ Recommended internal-only details:
 Public API rule:
 
 - the most important stable outputs are intent objects, not parser internals
+
+### `brewdb-frontend`
+
+Recommended public surface:
+
+- `pgwire`
+- `session`
+- `auth`
+- `portal`
+- `result`
+- `errors`
+
+Recommended internal-only details:
+
+- protocol parser internals
+- frame codec helpers
+- transport-server bindings
+
+Public API rule:
+
+- upper layers should see session and request handoff contracts, not raw socket or codec details
 
 ### `brewdb-execution`
 
@@ -1085,6 +1146,7 @@ src/
 ├── execution.rs
 ├── txn.rs
 ├── artifacts.rs
+├── diagnostics.rs
 ├── errors.rs
 └── common.rs
 ```
@@ -1149,6 +1211,23 @@ src/
 Rule:
 
 - parser internals should stay behind `parse/`; upper layers should mostly see AST, bound forms, and intent outputs
+
+### `crates/brewdb-frontend`
+
+```text
+src/
+├── lib.rs
+├── errors.rs
+├── pgwire/
+├── session/
+├── auth/
+├── portal/
+└── result/
+```
+
+Rule:
+
+- external SQL protocol handling lives here; SQL semantics remain in `brewdb-sql`
 
 ### `crates/brewdb-execution`
 
@@ -1534,6 +1613,7 @@ Recommended policy:
 - each crate owns a small crate-local error surface
 - cross-crate contracts should prefer structured errors over ad hoc strings
 - `brewdb-core` may define shared error categories when they are genuinely common domain concepts
+- stable error codes should live in `brewdb-core::diagnostics` even when error enums stay crate-local
 
 Rules:
 
@@ -1541,6 +1621,15 @@ Rules:
 - `brewdb-storage` should not leak format-vendor error types as its stable public contract
 - `brewdb-runtime` should translate storage/catalog/execution failures into runtime-relevant orchestration errors
 - binaries may further wrap errors for CLI/server reporting, but should not become the canonical home of shared error semantics
+- logging should emit structured events with stable `target`, `event_name`, `error_code`, and request/runtime identity context
+- the process-global tracing subscriber should also be the collection point for upstream engine logs such as DataFusion targets
+
+Dependency direction for the first external integrations:
+
+- `brewdb-catalog` may depend on `reqwest`/`url` to talk to Lakekeeper HTTP APIs, but must still normalize responses before exposing them upward
+- `brewdb-storage` may depend directly on `paimon` for adapter-native table/catalog access
+- BrewDB should bind to the locally customized sibling-repo Lakekeeper source, because the community/public Lakekeeper line does not provide the required Paimon catalog support
+- within `brewdb-catalog::client`, `local` and `rest` are current implementation forms; `rpc` is a reserved future slot, not the current default
 
 ## 7.16 Serialization Boundary Policy
 
@@ -1626,47 +1715,110 @@ Should own the main orchestration interfaces:
 - commit orchestration
 - recovery entry points
 
-## 9. Bring-Up Order
+## 9. System Bring-Up Order
 
-Recommended implementation order:
+After the framework shell exists, implementation should advance by closed system loops rather than by crate.
 
-1. `brewdb-core`
-2. `brewdb-catalog`
-3. `brewdb-storage` adapter kernel
-4. `brewdb-execution` task contract and local runtime skeleton
-5. `brewdb-runtime` job/txn/commit skeleton
-6. `brewdb-sql`
-7. binary assembly and end-to-end integration
+The main system lines are:
+
+- request entry
+- control plane
+- planning
+- execution
+- storage/format
+- txn/lifecycle
+
+Horizontal infrastructure must follow every loop, not be deferred to the end:
+
+- logging
+- error translation
+- config
+- metrics and observability
+- request correlation
+- test harness
+- external dependency strategy
+
+Recommended loop order:
+
+1. minimal query closed loop
+2. distributed query dispatch loop
+3. result return and coordinator aggregation loop
+4. mutation finalization and txn loop
+5. storage-format deepening loop
+6. recovery and reconciliation loop
 
 Rationale:
 
-- `brewdb-core` establishes language and state vocabulary
-- `brewdb-catalog` and `brewdb-storage` define table and format boundaries early
-- `brewdb-execution` can then shape task/result contracts around real artifact needs
-- `brewdb-runtime` can orchestrate with fewer moving abstractions
-- `brewdb-sql` should bind into already-stable lifecycle intents rather than forcing them prematurely
+- loop 1 proves that BrewDB can accept a request and drive it through the full coordinator-worker skeleton
+- loop 2 makes the system truly MPP-shaped instead of local-runtime-shaped
+- loop 3 closes user-visible query semantics before mutation complexity is added
+- loop 4 introduces commit-bearing lifecycle logic after the non-commit query path is stable
+- loop 5 deepens format-aware planning only after upper-layer orchestration is real
+- loop 6 hardens the system once normal-path ownership boundaries are already proven
+
+Crate bring-up still matters, but it is now subordinate to the system loop order above.
 
 ## 10. Phase 1 Walking Skeleton
 
-The first end-to-end development milestone should be a minimal append path, not full query completeness.
+The first end-to-end development milestone should be a minimal query closed loop, not an append-first path.
 
-Recommended walking skeleton:
+### Goal
 
-1. coordinator accepts a single `INSERT SELECT`-like request
-2. SQL layer produces an insert intent
-3. catalog resolves table identity and warehouse profile
-4. storage adapter returns append requirements for the target table format
-5. execution layer runs a local or single-worker materialization stage
-6. workers emit staged append artifact references
-7. kernel records job, txn, and commit-attempt state in the runtime store
-8. storage adapter validates and publishes the final commit
-9. recovery path can inspect unknown commit outcome and reconcile it
+Prove that one SQL query can enter BrewDB, become a distributed execution graph, run through the coordinator-worker contract, and return a result shell to the caller.
 
-This path exercises every major architecture plane with the smallest useful surface.
+### In scope
+
+1. `brewdb` or `brewdbd` accepts one query request
+2. `brewdb-sql` produces a query intent
+3. `brewdb-runtime` admits the request and allocates runtime identity
+4. `brewdb-catalog` resolves table and warehouse metadata needed for planning
+5. `brewdb-storage` provides scan-facing planning inputs and statistics shells
+6. `brewdb-execution` turns the DataFusion physical plan into a `StageGraph`
+7. the scheduler admits the full graph at once and dispatches runnable tasks by dependency readiness
+8. workers execute plan slices and cross exchange boundaries
+9. worker task results return through the execution protocol
+10. the coordinator aggregates final query outputs and returns a result stream or result-batch shell
+
+### Out of scope
+
+- final table commit
+- mutation artifact publish
+- recovery after coordinator loss
+- durable shuffle as a recovery contract
+- long-running resumability
+- full cost-based optimization
+
+### Ownership boundary by step
+
+1. request parsing and statement entry: `brewdb`, `brewdbd`, `brewdb-sql`
+2. request admission, job identity, correlation context: `brewdb-runtime`
+3. table and warehouse resolution: `brewdb-catalog`
+4. format-aware scan requirements: `brewdb-storage`
+5. physical-to-stage planning and task contracts: `brewdb-execution`
+6. graph admission, dependency-driven dispatch, worker assignment: `brewdb-runtime`
+7. operator execution and exchange behavior: `brewdb-execution`
+8. result shaping and return path: `brewdb-execution` plus `brewdb-runtime`
+
+### Why query first
+
+- it validates the main MPP control loop without dragging commit truth into the first milestone
+- it keeps BrewDB aligned with DataFusion's strongest native path first
+- it forces coordinator, scheduler, worker, and protocol boundaries to become real before mutation shortcuts appear
+- it creates the cleanest baseline for later append, rewrite, and maintenance job families
+
+### Validation milestone
+
+Phase 1 query skeleton is complete when one query can:
+
+- enter through the server or CLI boundary
+- produce a runtime job context
+- build a full `StageGraph`
+- dispatch tasks to at least one worker path
+- return a final query result shell with correlated diagnostics
 
 ## 11. Testing Strategy by Layer
 
-Phase 1 should test by boundary, not only by crate.
+Phase 1 should test by closed loop and by boundary, not only by crate.
 
 Recommended test emphasis:
 
@@ -1675,9 +1827,9 @@ Recommended test emphasis:
 - `brewdb-storage`: adapter contract tests per format
 - `brewdb-execution`: task contract, boundary, and artifact result tests
 - `brewdb-runtime`: job lifecycle, txn state, commit retry, and recovery tests
-- workspace integration tests: append skeleton, failed commit, and coordinator-loss reconciliation
+- workspace integration tests: query skeleton, dispatch-path failure, and result aggregation correctness
 
-The first integration tests should focus on staged artifact correctness and commit truth recovery, because those are the main non-query risks in the architecture.
+The first integration tests should focus on the minimal query closed loop, because it is the first system truth that all later mutation and recovery work will build on.
 
 ## 12. Early Non-Goals for Code Structure
 
@@ -1709,6 +1861,7 @@ The following development decisions should be treated as the default Phase 1 bas
 - coordinator and worker remain runtime responsibilities, not package boundaries
 - Phase 1 may host those responsibilities inside one server binary
 - distributed boundaries must still exist in code even when local execution is used
+- the first production-shaped milestone is query-first and MPP-first in scheduling behavior
 
 ### Metadata split
 
@@ -1743,7 +1896,7 @@ Before implementation starts, the development architecture should be considered 
 2. Is the ownership split between `brewdb-runtime`, `brewdb-execution`, and `brewdb-storage` clear enough that commit, task execution, and format semantics will not mix?
 3. Is `CatalogFacade` the only control-plane entry used by planning and commit flows?
 4. Is the runtime metadata store explicitly separate in role from Lakekeeper?
-5. Is the first walking skeleton agreed to be append-first rather than query-first?
+5. Is the first walking skeleton agreed to be query-first rather than append-first?
 6. Are worker outputs defined as non-authoritative staged artifacts rather than direct table-visible commits?
 7. Are mutation and maintenance paths staying inside the same lifecycle framework instead of side tooling?
 

@@ -1,343 +1,307 @@
 # BrewDB Framework Rollout Tasks
 
-This document breaks the remaining framework-layer work into independent tasks so the codebase can be advanced top-down without prematurely diving into implementation detail.
+This document tracks the next rollout stage after the top-level framework shells have been scaffolded.
 
-The scope here is framework assembly, not feature completion.
+The key rule has changed:
 
-## 1. Task Breakdown Principles
+- framework assembly was crate-oriented
+- framework advancement from here is system-loop-oriented
 
-Each task should:
+The goal is to keep BrewDB moving as one coherent distributed system, not as a pile of locally complete crates.
 
-- have one clear ownership boundary
-- produce one visible top-level module or contract family
-- avoid deep implementation detail
-- improve main-path completeness from entry to execution to finalization
+## 1. Rollout Principles
 
-The tasks below are designed to be advanced independently, but they still have a recommended order.
+Each rollout task should:
 
-## 2. Task List
+- close one end-to-end system loop
+- touch every required architecture plane in that loop
+- keep DataFusion-native planning and execution semantics intact
+- avoid deepening one subsystem in isolation without proving whole-path movement
 
-### Task A: Runtime Admission Shell
+The main system planes are:
 
-Goal:
+- request entry
+- control plane
+- planning
+- execution
+- storage/format
+- txn/lifecycle
 
-- establish the coordinator entry pipeline from request admission into planning and dispatch startup
+Horizontal infrastructure that should be wired through each task:
 
-Primary landing zone:
+- logging
+- error translation
+- config
+- metrics and observability
+- request correlation
+- test harness
 
-- `crates/brewdb-runtime/src/admission/`
+## 2. Current Status
 
-Should define:
+Already scaffolded at framework-shell level:
 
-- admission command types
-- admission service trait
-- request-to-job bootstrap flow
-- handoff into planning and dispatcher registration
-
-Should not define yet:
-
-- auth detail
-- transport detail
-- durable queueing
-- retry heuristics
-
-Expected output:
-
-- top-level coordinator request lifecycle shell
-
-Dependencies:
-
-- existing `jobs`
-- existing `planning`
-- existing `dispatcher`
-
-### Task B: Execution Graph Builder Shell
-
-Goal:
-
-- turn execution-side planning into a first-class top-level pipeline instead of a single trait file
-
-Primary landing zone:
-
-- `crates/brewdb-execution/src/stage_graph_builder/`
-
-Should define:
-
-- physical-plan-root shell
-- build pipeline stages
-- boundary detection shell
-- stage split shell
-- task split shell
-
-Should not define yet:
-
-- real DataFusion slicing logic
-- cost tuning
-- worker-local runtime
-
-Expected output:
-
-- clear execution-side graph-construction architecture
-
-Dependencies:
-
-- existing `plan`
-- existing `boundaries`
-- existing `task`
-
-### Task C: Storage Planning and Statistics Shell
-
-Goal:
-
-- make `brewdb-storage` participate in optimizer and execution assembly through explicit planning contracts
-
-Primary landing zone:
-
-- `crates/brewdb-storage/src/statistics/`
-- existing `scan/`, `append/`, `rewrite/`, `commit/`
-
-Should define:
-
-- scan planning input/output shell
-- append planning shell
-- rewrite planning shell
-- commit preparation shell
-- statistics provider shell
-
-Should not define yet:
-
-- format-specific optimization detail
-- real file pruning logic
-- commit publish implementation
-
-Expected output:
-
-- storage-facing planning and statistics boundary for upper layers
-
-Dependencies:
-
-- existing storage adapter model
-- catalog route/model shell
-
-### Task D: Runtime Finalization Shell
-
-Goal:
-
-- unify execution-complete to commit/abort/reconcile flow under one top-level framework
-
-Primary landing zone:
-
-- `crates/brewdb-runtime/src/finalization/`
-
-Should define:
-
-- finalize command types
-- finalize service trait
-- commit-path handoff shell
-- abort-path handoff shell
-- reconcile entry shell
-
-Should not define yet:
-
-- exact retry loops
-- storage-specific publish detail
-- reconciliation algorithms
-
-Expected output:
-
-- one clear finalization boundary instead of scattered commit/txn coordination only
-
-Dependencies:
-
-- existing `txns`
-- existing `locks`
-- existing `commit`
-
-### Task E: Worker Runtime Shell
-
-Goal:
-
-- make worker responsibilities explicit as a top-level framework, not only implied by task contracts
-
-Primary landing zone:
-
-- `crates/brewdb-execution/src/worker/`
-
-Should define:
-
-- task executor shell
-- stage output writer shell
-- local data plane shell
-- task report path shell
-
-Should not define yet:
-
-- actual execution engine logic
-- spill internals
-- transport server details
-
-Expected output:
-
-- explicit worker runtime architecture
-
-Dependencies:
-
-- existing `task`
-- existing `artifacts`
-
-### Task F: Catalog Facade Completion Shell
-
-Goal:
-
-- make catalog access a stable upper-layer facade instead of a loose set of modules
-
-Primary landing zone:
-
-- existing `crates/brewdb-catalog/src/facade.rs`
-- supporting `cache/`, `client/`, `normalize/`
-
-Should define:
-
-- resolve table shell
-- resolve warehouse/profile shell
-- route lookup shell
-- normalized metadata access shell
-
-Should not define yet:
-
-- concrete Lakekeeper client behavior
-- cache invalidation policy detail
-
-Expected output:
-
-- stable catalog control-plane entry boundary
-
-Dependencies:
-
-- existing catalog model and route shells
-
-### Task G: SQL Intent Entry Shell
-
-Goal:
-
-- turn SQL modules into one explicit frontend-to-intent pipeline
-
-Primary landing zone:
-
-- `crates/brewdb-sql/src/intent/`
-- optional `frontend/` or `planner_entry/`
-
-Should define:
-
-- statement-to-intent entry trait or service
-- query / insert / mutation / maintenance / DDL intent families
-- capability gate shell
-
-Should not define yet:
-
-- parser detail rewrites
-- optimizer detail
-- execution planning detail
-
-Expected output:
-
-- one clean SQL frontend output boundary
-
-Dependencies:
-
-- existing parse/bind/analyze/rewrite modules
-
-### Task H: Execution Protocol Shell
-
-Goal:
-
-- reserve a clear transport boundary between coordinator and worker without freezing RPC too early
-
-Primary landing zone:
-
-- `crates/brewdb-execution/src/protocol/`
-
-Should define:
-
-- coordinator-to-worker DTO shell
-- worker-to-coordinator DTO shell
-- stage-plan wire shell
-- task result wire shell
-
-Should not define yet:
-
-- gRPC/HTTP choice
-- transport encoding finalization
-- version-negotiation detail
-
-Expected output:
-
-- stable internal protocol boundary
-
-Dependencies:
-
-- existing `task`
-- future `stage_graph_builder`
-
-## 3. Recommended Order
-
-The independent tasks should still be advanced in this order:
-
-1. Task A: Runtime Admission Shell
-2. Task B: Execution Graph Builder Shell
-3. Task C: Storage Planning and Statistics Shell
-4. Task D: Runtime Finalization Shell
-5. Task E: Worker Runtime Shell
-6. Task F: Catalog Facade Completion Shell
-7. Task G: SQL Intent Entry Shell
-8. Task H: Execution Protocol Shell
-
-Rationale:
-
-- A closes the coordinator entry gap
-- B closes the execution graph construction gap
-- C gives optimizer and execution real upstream planning contracts
-- D closes the post-execution lifecycle gap
-- E makes the worker side explicit
-- F and G stabilize upper-layer entry boundaries
-- H is best done after task and stage-graph shells are clearer
-
-## 4. Definition of Done Per Task
-
-A task is framework-complete when:
-
-- the top-level module exists
-- service or trait boundaries are explicit
-- command/input/output types are explicit
-- ownership boundaries are consistent with existing architecture docs
-- workspace compiles
-
-A task is not required to:
-
-- contain full logic
-- connect to external systems
-- finalize storage- or transport-specific behavior
-
-## 5. Current Status
-
-Already scaffolded before this task breakdown:
-
-- planning shell
+- runtime admission shell
 - scheduler shell
 - dispatcher shell
-- stage graph shell
 - execution graph builder shell
 - execution protocol shell
+- worker runtime shell
 - storage planning shell
 - storage statistics shell
 - runtime finalization shell
-- worker runtime shell
 - catalog facade shell
-- sql intent entry shell
-- task contract shell
+- SQL intent entry shell
 - runtime metadata shell
-- runtime admission shell
 
-Immediate next task:
+That means the next step is no longer "add another shell".
 
-- none; framework rollout tasks A-H are now scaffolded
+The next step is "close real system loops on top of the shells that now exist".
+
+## 3. System Rollout Tasks
+
+### Task 1: Minimal Query Closed Loop
+
+Goal:
+
+- make one query travel from request entry to final result return
+
+Suggested rollout steps:
+
+1. request entry to SQL intent
+2. SQL intent to runtime admission bootstrap
+3. execution graph registration to first dispatch wave
+4. worker execution to task result return
+5. coordinator result shaping and final query response
+
+Protocol baseline for this task:
+
+- SQL clients talk to BrewDB through PostgreSQL wire protocol
+- protocol handling lives in `brewdb-frontend`
+- `brewdb-sql` remains SQL semantics, not client wire handling
+
+In scope:
+
+- request admission
+- query intent output
+- catalog resolve
+- storage scan planning input
+- DataFusion physical planning handoff
+- `StageGraph` build
+- scheduler graph admission
+- worker task execution
+- result return to coordinator
+- final query result shell
+
+Primary landing zones:
+
+- `bin/brewdb/`
+- `bin/brewdbd/`
+- `crates/brewdb-sql/`
+- `crates/brewdb-runtime/`
+- `crates/brewdb-catalog/`
+- `crates/brewdb-storage/`
+- `crates/brewdb-execution/`
+
+Should not define yet:
+
+- mutation commit
+- recovery after coordinator loss
+- durable shuffle
+- transport finalization
+
+Expected output:
+
+- one query path that proves the coordinator-worker control loop is real
+
+### Task 2: Distributed Dispatch and Exchange Loop
+
+Goal:
+
+- make the query path genuinely MPP-shaped rather than local-only
+
+In scope:
+
+- full-graph admission
+- dependency-driven task dispatch
+- exchange-aware task dependencies
+- worker-side exchange buffering
+- task completion propagation
+- coordinator-side release of downstream runnable tasks
+
+Primary landing zones:
+
+- `crates/brewdb-runtime/src/scheduler/`
+- `crates/brewdb-runtime/src/dispatcher/`
+- `crates/brewdb-execution/src/worker/`
+- `crates/brewdb-execution/src/protocol/`
+
+Should not define yet:
+
+- BSP barriers as the only policy
+- resumable durable exchange
+- cluster elasticity logic
+
+Expected output:
+
+- the runtime behaves like an MPP engine while still leaving room for future BSP policies
+
+### Task 3: Result Delivery and Observability Loop
+
+Goal:
+
+- make query completion visible, diagnosable, and user-facing
+
+In scope:
+
+- final result shaping
+- result streaming or batch shell
+- correlated request/job/stage/task identifiers
+- structured logs across coordinator and worker paths
+- user-facing error translation
+- basic execution metrics hooks
+
+Primary landing zones:
+
+- `crates/brewdb-core/`
+- `crates/brewdb-runtime/`
+- `crates/brewdb-execution/`
+- `bin/brewdb/`
+- `bin/brewdbd/`
+
+Should not define yet:
+
+- full metrics backend
+- production-grade tracing export
+- rich client protocol negotiation
+
+Expected output:
+
+- a query loop that is not only runnable, but also inspectable
+
+### Task 4: Mutation Finalization and Transaction Loop
+
+Goal:
+
+- extend the proven query skeleton into commit-bearing job families
+
+In scope:
+
+- insert and mutation intent families
+- runtime txn context
+- lock acquisition boundary
+- artifact-bearing execution results
+- finalization entry
+- commit/abort handoff
+- unknown-outcome reconciliation shell
+
+Primary landing zones:
+
+- `crates/brewdb-runtime/src/txns/`
+- `crates/brewdb-runtime/src/locks/`
+- `crates/brewdb-runtime/src/finalization/`
+- `crates/brewdb-storage/src/commit/`
+- `crates/brewdb-execution/src/artifacts/`
+
+Should not define yet:
+
+- full failure recovery algorithms
+- lease rebalancing
+- maintenance-policy tuning
+
+Expected output:
+
+- mutation jobs reuse the same main lifecycle instead of creating a side path
+
+### Task 5: Storage-Format Deepening Loop
+
+Goal:
+
+- make real table formats participate in planning and finalization without breaking upper-layer ownership
+
+In scope:
+
+- Lakekeeper-backed catalog resolve path
+- Paimon and format adapter binding path
+- scan statistics refinement
+- format-aware append/rewrite planning
+- commit preparation and publish contracts
+
+Primary landing zones:
+
+- `crates/brewdb-catalog/`
+- `crates/brewdb-storage/`
+- local sibling `lakekeeper` source integration
+
+Should not define yet:
+
+- alternate control-plane transports beyond current local and REST shapes
+- all table formats at once
+
+Expected output:
+
+- the system loop can run against real external metadata and format boundaries
+
+### Task 6: Recovery and Reconciliation Loop
+
+Goal:
+
+- harden lifecycle truth after normal-path ownership is already clear
+
+In scope:
+
+- runtime metadata inspection
+- commit-attempt state reconciliation
+- task/job terminal-state repair entry
+- restart-safe read models
+- fault-injection integration tests
+
+Primary landing zones:
+
+- `crates/brewdb-runtime/src/jobs/`
+- `crates/brewdb-runtime/src/txns/`
+- `crates/brewdb-runtime/src/finalization/`
+- `tests/integration/`
+
+Should not define yet:
+
+- transparent in-flight execution resume
+- durable BSP checkpointing
+
+Expected output:
+
+- BrewDB can explain and repair uncertain lifecycle truth instead of only succeeding on the happy path
+
+## 4. Recommended Order
+
+The recommended order is:
+
+1. Task 1: Minimal Query Closed Loop
+2. Task 2: Distributed Dispatch and Exchange Loop
+3. Task 3: Result Delivery and Observability Loop
+4. Task 4: Mutation Finalization and Transaction Loop
+5. Task 5: Storage-Format Deepening Loop
+6. Task 6: Recovery and Reconciliation Loop
+
+Why this order:
+
+- query-first proves the main control loop early
+- MPP dispatch must become real before mutation complexity arrives
+- observability should be attached to the first live path, not bolted on afterward
+- transaction and commit semantics should extend a proven execution path
+- external metadata and format truth should deepen once the control path is stable
+- recovery should harden already-proven ownership boundaries rather than define them
+
+## 5. Definition of Done
+
+A rollout task is complete when:
+
+- one end-to-end path is executable through the intended system boundary
+- the ownership split across crates is still clear
+- diagnostics and error translation follow the path
+- at least one integration test proves the loop
+
+A rollout task is not required to:
+
+- complete every detail inside each touched crate
+- freeze transport or external protocol choices too early
+- solve future BSP or resumability goals ahead of need

@@ -57,6 +57,20 @@ pub trait AdmissionService {
     fn start_dispatch(&self, command: StartDispatch) -> Result<DispatchWave, RuntimeError>;
 }
 
+/// Phase 1 direct admission service that keeps the first query loop explicit.
+#[derive(Clone, Debug, Default)]
+pub struct DirectAdmissionService;
+
+impl AdmissionService for DirectAdmissionService {
+    fn admit_request(&self, command: AdmitRequest) -> Result<AdmissionBootstrap, RuntimeError> {
+        command.bootstrap()
+    }
+
+    fn start_dispatch(&self, command: StartDispatch) -> Result<DispatchWave, RuntimeError> {
+        Ok(command.into_dispatch_wave())
+    }
+}
+
 impl AdmitRequest {
     pub fn into_submit_job(&self) -> SubmitJob {
         self.build_plan.into_submit_job()
@@ -93,7 +107,7 @@ mod tests {
     use crate::scheduler::{SchedulingSnapshot, WorkerSlot};
     use brewdb_execution::task::TaskDependency;
 
-    use super::{AdmitRequest, StartDispatch};
+    use super::{AdmissionService, AdmitRequest, DirectAdmissionService, StartDispatch};
 
     fn sample_graph(job_id: JobId) -> StageGraph {
         let stage_id = StageId::parse_str("550e8400-e29b-41d4-a716-446655440701").unwrap();
@@ -155,5 +169,26 @@ mod tests {
 
         assert_eq!(wave.workers.len(), 1);
         assert_eq!(wave.workers[0].available_slots, 4);
+    }
+
+    #[test]
+    fn direct_admission_service_delegates_bootstrap() {
+        let job_id = JobId::parse_str("550e8400-e29b-41d4-a716-446655440720").unwrap();
+        let service = DirectAdmissionService;
+
+        let bootstrap = service
+            .admit_request(AdmitRequest {
+                build_plan: BuildPlan {
+                    job_id: job_id.clone(),
+                    request_context: RequestContext::new(),
+                    spec: PlanSpec::Query {
+                        stage_graph: sample_graph(job_id.clone()),
+                    },
+                },
+            })
+            .unwrap();
+
+        assert_eq!(bootstrap.job_record.job_id, job_id);
+        assert!(bootstrap.register_execution_graph.is_some());
     }
 }
