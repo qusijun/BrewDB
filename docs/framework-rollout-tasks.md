@@ -60,11 +60,10 @@ Goal:
 Primary landing zone:
 
 - `crates/brewdb-execution/src/stage_graph_builder/`
-- `crates/brewdb-execution/src/fragments/`
 
 Should define:
 
-- fragment shell types
+- physical-plan-root shell
 - build pipeline stages
 - boundary detection shell
 - stage split shell
@@ -262,7 +261,7 @@ Should define:
 
 - coordinator-to-worker DTO shell
 - worker-to-coordinator DTO shell
-- fragment wire shell
+- plan-segment wire shell
 - task result wire shell
 
 Should not define yet:
@@ -278,7 +277,7 @@ Expected output:
 Dependencies:
 
 - existing `task`
-- future `fragments`
+- future `stage_graph_builder`
 
 ## 3. Recommended Order
 
@@ -301,7 +300,7 @@ Rationale:
 - D closes the post-execution lifecycle gap
 - E makes the worker side explicit
 - F and G stabilize upper-layer entry boundaries
-- H is best done after task and fragment shells are clearer
+- H is best done after task and stage-graph shells are clearer
 
 ## 4. Definition of Done Per Task
 
@@ -327,10 +326,11 @@ Already scaffolded before this task breakdown:
 - scheduler shell
 - dispatcher shell
 - stage graph shell
+- execution graph builder shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task B: Execution Graph Builder Shell
+- Task C: Storage Planning and Statistics Shell

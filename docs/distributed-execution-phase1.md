@@ -71,7 +71,7 @@ Used when execution must first stabilize an intermediate selection result, inclu
 
 ### `Stage`
 
-A stage is a distributed execution fragment terminated by a defined boundary.
+A stage is a distributed execution slice terminated by a defined boundary.
 
 Useful stage kinds in Phase 1 are:
 
@@ -212,7 +212,7 @@ Maintenance jobs may use a selection boundary before rewrite:
 
 Workers are responsible for:
 
-- executing DataFusion-aligned physical fragments
+- executing DataFusion-aligned physical plan slices
 - local shuffle and spill
 - staged artifact writing
 - task result packaging
@@ -229,11 +229,11 @@ Workers are execution engines, not control-plane owners.
 
 ## 8. Worker Runtime
 
-Phase 1 workers are enhanced executors rather than passive fragment runners.
+Phase 1 workers are enhanced executors rather than passive stage workers.
 
 They may understand:
 
-- fragment execution
+- stage-slice execution
 - local exchange and spill
 - staged artifact writing
 - task-local result shaping
@@ -248,7 +248,7 @@ They do not own:
 
 Useful internal worker responsibilities are:
 
-- `TaskExecutor` for fragment execution
+- `TaskExecutor` for stage-slice execution
 - `LocalDataPlane` for in-memory flow, shuffle, buffering, and spill
 - `ArtifactWriter` for staged artifact persistence
 - `TaskResultBuilder` for packaging task outputs
@@ -265,7 +265,7 @@ The task contract is the execution framework's minimum distributed protocol.
 A task request should carry:
 
 - identity: `job_id`, `stage_id`, `task_id`, `attempt_id`
-- execution fragment
+- execution plan segment reference
 - input partition or shard assignment
 - upstream dependency references when needed
 - stage boundary kind
@@ -302,7 +302,7 @@ Artifact-bearing task results are first-class in BrewDB and must not be treated 
 
 - append materialization tasks return staged append artifact references and summaries
 - rewrite materialization tasks return staged mutation artifact references plus affected-scope summaries
-- selection tasks return candidate-set fragments and summaries
+- selection tasks return candidate-set slices and summaries
 
 Task contracts remain execution-scoped and must not include transaction, lease, or final commit truth.
 
@@ -341,6 +341,6 @@ Phase 1 materialization does not imply resumable execution semantics. The system
 6. The scheduler admits the full execution graph but dispatches only dependency-ready work.
 7. `Task` is the dispatch unit; `Stage` remains the orchestration and observability unit.
 8. Boundary semantics must be typed as pipelined, materialized, or barriered rather than implied by one fixed scheduler mode.
-9. Task requests carry execution fragments plus boundary-aware output contracts.
+9. Task requests carry execution plan segment references plus boundary-aware output contracts.
 10. Task results report execution status plus boundary outputs.
 11. Execution outputs remain non-authoritative until the control plane validates and publishes them.
