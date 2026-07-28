@@ -1152,6 +1152,17 @@ Rule:
 
 - contract modules stay at top level; executor/runtime implementation details go into subdirectories
 
+Suggested worker substructure:
+
+```text
+worker/
+├── mod.rs
+├── task_executor.rs
+├── stage_output_writer.rs
+├── exchange_buffer_manager.rs
+└── task_status_reporter.rs
+```
+
 ### `crates/brewdb-storage`
 
 ```text

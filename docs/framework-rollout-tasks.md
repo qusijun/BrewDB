@@ -166,7 +166,7 @@ Primary landing zone:
 Should define:
 
 - task executor shell
-- artifact writer shell
+- stage output writer shell
 - local data plane shell
 - task report path shell
 
@@ -330,10 +330,11 @@ Already scaffolded before this task breakdown:
 - storage planning shell
 - storage statistics shell
 - runtime finalization shell
+- worker runtime shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task E: Worker Runtime Shell
+- Task F: Catalog Facade Completion Shell

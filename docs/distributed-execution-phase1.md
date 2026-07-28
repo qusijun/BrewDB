@@ -249,10 +249,10 @@ They do not own:
 Useful internal worker responsibilities are:
 
 - `TaskExecutor` for stage-slice execution
-- `LocalDataPlane` for in-memory flow, shuffle, buffering, and spill
-- `ArtifactWriter` for staged artifact persistence
+- `ExchangeBufferManager` for exchange channels, buffering, and exchange-side reservations
+- `StageOutputWriter` for staged output persistence
 - `TaskResultBuilder` for packaging task outputs
-- `ReportPath` for task state and completion reporting
+- `TaskStatusReporter` for task state and completion reporting
 
 Worker-local state is disposable. Durable truth remains in runtime metadata and external format state.
 
