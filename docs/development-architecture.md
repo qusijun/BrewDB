@@ -172,6 +172,7 @@ Owns:
 - task request/result contract
 - materialization and boundary output contracts
 - executor runtime behavior
+- execution-graph boundary semantics
 
 Consumes:
 
@@ -233,6 +234,7 @@ Owns:
 - commit orchestration shell
 - lease and recovery framework
 - mutation and maintenance orchestration
+- scheduler policy and dispatch coordination
 
 Consumes:
 
@@ -855,6 +857,31 @@ Holds:
 - mutation/maintenance job shaping
 - bundle and commit handoff planning
 
+The coordinator-side optimizer selection baseline for this layer is defined in `docs/coordinator-cbo-optimizer-selection.md`.
+
+### Scheduler baseline
+
+Phase 1 scheduler should be treated as:
+
+- MPP-first in runtime behavior
+- graph-wide in admission
+- dependency-driven in dispatch
+- boundary-aware in release conditions
+- policy-extensible toward future BSP or superstep execution
+
+Recommended ownership split:
+
+- `brewdb-execution`
+  - `StageGraph`
+  - task dependency descriptors
+  - boundary semantics such as `pipelined | materialized | barriered`
+- `brewdb-runtime`
+  - worker assignment
+  - dispatch throttling
+  - runnable-set release
+  - retry policy
+  - future scheduling policy selection
+
 ### `brewdb-execution`
 
 Holds:
@@ -1153,6 +1180,7 @@ Rule:
 src/
 ├── lib.rs
 ├── errors.rs
+├── admission/
 ├── jobs/
 ├── txns/
 ├── locks/

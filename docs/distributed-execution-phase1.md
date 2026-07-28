@@ -93,6 +93,72 @@ Task attempts may return:
 - execution progress only
 - artifact-bearing outputs
 
+## 4.1 Scheduling Model
+
+Phase 1 scheduler should be MPP-first in runtime behavior, while preserving room for future BSP-style policies.
+
+Baseline:
+
+- the coordinator builds and admits the full `StageGraph` at once
+- the scheduler dispatches work incrementally according to dependency readiness
+- `Task` is the dispatch unit
+- `Stage` is the orchestration, observability, and future recovery unit
+
+This is not a strict stage-by-stage BSP scheduler.
+
+It is also not a blind fire-everything-at-once scheduler.
+
+It is a dependency-driven DAG scheduler with typed boundaries.
+
+### `ExecutionGraph`
+
+The execution graph should represent:
+
+- stages
+- tasks
+- stage/task dependencies
+- boundary semantics
+- release conditions
+
+The graph itself should not hard-code one scheduling mode.
+
+### `SchedulingPolicy`
+
+Scheduling policy decides:
+
+- which runnable tasks become dispatchable
+- how worker slots are assigned
+- how backpressure delays new dispatch
+- whether a boundary behaves as pipelined or barriered
+
+Phase 1 default policy:
+
+- `dependency-driven MPP`
+
+Future-compatible policy slots:
+
+- `frontier-based multi-stage scheduling`
+- `stage-barrier policy`
+- `BSP/superstep policy`
+
+### Boundary Semantics
+
+Boundary semantics should be explicit rather than implied by stage count alone.
+
+Useful execution-time semantics are:
+
+- `pipelined`
+- `materialized`
+- `barriered`
+
+Default direction in Phase 1:
+
+- `ExchangeBoundary` prefers `pipelined`
+- `MaterializationBoundary` is `materialized`
+- `SelectionBoundary` is chosen per workflow and may become `barriered`
+
+This lets BrewDB run like an MPP engine today without blocking a later BSP-like control policy.
+
 ## 5. Execution Skeleton
 
 All Phase 1 job types follow the same high-level shape:
@@ -272,6 +338,9 @@ Phase 1 materialization does not imply resumable execution semantics. The system
 3. Selection/candidate boundaries are first-class execution outcomes for maintenance-style jobs.
 4. Workers may return artifact-bearing outputs, not only execution completion.
 5. Worker runtimes are execution-rich but control-plane-thin.
-6. Task requests carry execution fragments plus boundary-aware output contracts.
-7. Task results report execution status plus boundary outputs.
-8. Execution outputs remain non-authoritative until the control plane validates and publishes them.
+6. The scheduler admits the full execution graph but dispatches only dependency-ready work.
+7. `Task` is the dispatch unit; `Stage` remains the orchestration and observability unit.
+8. Boundary semantics must be typed as pipelined, materialized, or barriered rather than implied by one fixed scheduler mode.
+9. Task requests carry execution fragments plus boundary-aware output contracts.
+10. Task results report execution status plus boundary outputs.
+11. Execution outputs remain non-authoritative until the control plane validates and publishes them.

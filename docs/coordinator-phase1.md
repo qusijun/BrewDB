@@ -47,6 +47,13 @@ This is a peer-admission, single-owner, no-resume model.
 - warehouse and credential lookup
 - format routing
 
+### `Admission`
+
+- request admission into runtime ownership
+- request-to-job bootstrap
+- planning handoff
+- dispatcher registration handoff
+
 ### `Planner`
 
 - query / mutation / maintenance / DDL planning
@@ -54,12 +61,25 @@ This is a peer-admission, single-owner, no-resume model.
 - stage/task graph construction
 - resource-lane requirements
 
+The coordinator optimizer selection and CBO ownership baseline are defined in `docs/coordinator-cbo-optimizer-selection.md`.
+
 ### `Dispatcher`
 
 - stage/task scheduling
 - worker assignment
 - task retry
 - stage progress aggregation
+
+Phase 1 dispatcher policy is:
+
+- admit the full execution graph once planning completes
+- dispatch only dependency-ready tasks
+- treat `Task` as the dispatch unit
+- treat `Stage` as the orchestration and observability unit
+- prefer pipelined progress across exchange boundaries
+- require explicit release conditions for materialized or barriered boundaries
+
+This keeps BrewDB MPP-first while preserving room for a future BSP-style policy layer.
 
 ### `JobManager`
 
@@ -127,6 +147,31 @@ States:
 - `canceled`
 
 Commit is not a stage/task concern. Commit is modeled at job/transaction level.
+
+## 4.1 Scheduling Semantics
+
+Coordinator scheduling should not be hard-coded as either:
+
+- strict stage-by-stage barrier execution
+- all-task fire-and-forget execution
+
+Instead, the scheduler should operate over a full DAG and let policy decide how runnable work is released.
+
+Default Phase 1 behavior:
+
+- build the complete `StageGraph`
+- register all stages and tasks into runtime metadata
+- release source tasks immediately
+- release downstream tasks when dependency and boundary conditions are satisfied
+- use worker capacity and backpressure to throttle dispatch
+
+Future-compatible extension points should remain explicit:
+
+- stage barrier policy
+- superstep / BSP policy
+- stronger phase-level release conditions
+
+The goal is to keep the scheduler framework extensible without sacrificing the MPP baseline.
 
 ## 5. Transaction and Commit Model
 

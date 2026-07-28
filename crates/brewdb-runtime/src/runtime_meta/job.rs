@@ -44,3 +44,13 @@ pub struct StageRecord {
     pub job_id: JobId,
     pub state: StageState,
 }
+
+impl StageRecord {
+    pub fn new(stage_id: StageId, job_id: JobId) -> Self {
+        Self {
+            stage_id,
+            job_id,
+            state: StageState::Pending,
+        }
+    }
+}
