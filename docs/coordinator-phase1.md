@@ -187,6 +187,26 @@ Phase 1 uses conservative serialization in critical sections:
 - `maintenance` conflicts with `maintenance`
 - `mutation` and `maintenance` are separate lanes, but still conflict in Phase 1 critical sections
 
+### `TxnManagementLock`
+
+Phase 1 should distinguish transaction management locking from table resource leasing.
+
+`TxnManagementLock` is a per-transaction logical coordination lock used to serialize:
+
+- txn state transitions
+- commit-attempt creation
+- external publish ownership
+- abort vs commit races
+- reconciliation vs retry races
+
+It is not:
+
+- a table-concurrency lock
+- a worker/execution lock
+- a database transaction held open across the whole job
+
+The intent is simple: one actor may drive one txn lifecycle at a time.
+
 ### `ClusterHousekeepingLease`
 
 Used for cluster-wide background duties such as:
@@ -214,6 +234,89 @@ Lane acquisition policy is:
 - timeout fail
 - no built-in persistent queue
 
+## 7.1 Transaction Lock Timing
+
+`TxnManagementLock` should be acquired only after a job has entered txn-bearing finalization work.
+
+Typical order:
+
+1. acquire table lane when the job enters its critical section
+2. create or load the txn record
+3. acquire `TxnManagementLock`
+4. create or advance the active `CommitAttempt`
+5. validate, publish, or abort under the txn lock
+6. resolve the txn to `committed`, `aborted`, or `unknown_outcome`
+7. release `TxnManagementLock`
+8. release table lane after final convergence
+
+Design rule:
+
+- table lane protects table-level conflict scope
+- txn lock protects transaction-lifecycle ownership
+
+They solve different races and must not be collapsed into one mechanism.
+
+## 7.2 Transaction Lock Shape
+
+Phase 1 should model the txn lock as a runtime-store logical lease with fencing semantics, not as a long-lived database row lock.
+
+Useful fields:
+
+- `txn_id`
+- `holder_kind` such as owner, retry, reconciler
+- `holder_id`
+- `fencing_epoch`
+- `acquired_at`
+- `expires_at`
+- `heartbeat_at`
+
+Rules:
+
+- lock acquisition uses compare-and-set semantics in runtime metadata
+- every successful reacquire increments `fencing_epoch`
+- lock holders heartbeat while driving external publish or reconciliation
+- stale lock holders lose authority once a newer fencing epoch is observed
+
+This keeps external commit work serialized without relying on open SQL transactions across network calls.
+
+## 7.3 When the Transaction Lock Is Required
+
+`TxnManagementLock` is required for:
+
+- creating the first `CommitAttempt`
+- changing `TxnState` between `open`, `validating`, `committing`, `aborting`, `unknown_outcome`, `committed`, and `aborted`
+- marking a publish attempt as `succeeded`, `failed`, or `unknown_outcome`
+- retrying a failed commit attempt
+- reconciliation of unknown-outcome transactions
+- final abort after validation or publish failure
+
+It is not required for:
+
+- task execution
+- staged artifact writing
+- artifact statistics aggregation
+- read-only job inspection
+
+The lock should cover lifecycle truth changes, not compute work.
+
+## 7.4 Deadlock and Ordering Rules
+
+Phase 1 should keep lock ordering strict:
+
+1. `JobOwnerRecord` authority check
+2. `TableResourceLease` acquisition when needed
+3. `TxnManagementLock` acquisition
+
+Never invert this order inside normal commit flow.
+
+Additional rules:
+
+- no job may wait on a second table lane while holding a txn lock
+- no worker path may attempt to acquire a txn lock
+- reconciliation may reacquire a txn lock without a live job owner, but only after ownership-loss handling has converged
+
+This keeps the system conservative and understandable in Phase 1.
+
 ## 8. Runtime Metadata Families
 
 ### Lifecycle
@@ -232,6 +335,7 @@ Lane acquisition policy is:
 
 - `JobOwnerRecord`
 - `ResourceLeaseRecord`
+- `TxnLockRecord`
 - `ClusterLeaseRecord`
 
 ### Artifacts
@@ -246,6 +350,7 @@ Primary-writer rule:
 - worker/dispatcher paths write `TaskAttemptRecord`
 - `TxnManager` writes `TxnRecord`
 - `CommitManager` writes `CommitAttemptRecord`
+- txn-owner or reconciler paths write `TxnLockRecord`
 
 ## 9. Consistency Boundaries
 
@@ -253,6 +358,7 @@ Strong atomic updates are required for:
 
 - job creation with owner registration
 - job-to-txn association
+- txn-lock acquisition with fencing update
 - attempt creation with txn state transition
 - `publishing` attempt with `TxnState=committing`
 - successful attempt with `TxnState=committed`
@@ -274,8 +380,9 @@ Eventually consistent or async-updated data is acceptable for:
 2. run distributed stages and produce staged outputs
 3. acquire `mutation` lane
 4. create txn
-5. validate and publish through commit attempts
-6. finalize as success, failure, or unknown outcome
+5. acquire `TxnManagementLock`
+6. validate and publish through commit attempts
+7. finalize as success, failure, or unknown outcome
 
 ### `COMPACT`
 
@@ -283,14 +390,16 @@ Eventually consistent or async-updated data is acceptable for:
 2. acquire `maintenance` lane
 3. run distributed rewrite
 4. create txn
-5. validate replacement set and publish
+5. acquire `TxnManagementLock`
+6. validate replacement set and publish
 
 ### `ALTER TABLE`
 
 1. plan DDL
 2. acquire `ddl` lane
 3. create txn
-4. publish metadata change
+4. acquire `TxnManagementLock`
+5. publish metadata change
 
 ## 11. Recovery Rules
 
@@ -309,6 +418,7 @@ Recovery responsibilities:
 - mark jobs failed when ownership is lost
 - resolve transaction truth
 - create reconciliation work for unknown outcomes
+- reacquire txn locks with a newer fencing epoch when reconciliation needs ownership
 - release dangling leases after state convergence
 - clean up staged artifacts according to final txn outcome
 
