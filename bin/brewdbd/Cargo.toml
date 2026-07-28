@@ -1,0 +1,14 @@
+[package]
+name = "brewdbd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+brewdb-catalog = { path = "../../crates/brewdb-catalog" }
+brewdb-execution = { path = "../../crates/brewdb-execution" }
+brewdb-runtime = { path = "../../crates/brewdb-runtime" }
+brewdb-sql = { path = "../../crates/brewdb-sql" }
+brewdb-storage = { path = "../../crates/brewdb-storage" }

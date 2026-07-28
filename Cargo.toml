@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/brewdb-core",
+    "crates/brewdb-catalog",
+    "crates/brewdb-sql",
+    "crates/brewdb-execution",
+    "crates/brewdb-storage",
+    "crates/brewdb-runtime",
+    "bin/brewdbd",
+    "bin/brewdb",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/qusijun/BrewDB"
+rust-version = "1.88"
+
+[workspace.dependencies]
+uuid = { version = "1.18.1", features = ["v4"] }

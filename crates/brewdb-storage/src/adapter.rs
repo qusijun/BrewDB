@@ -1,0 +1,1 @@
+//! Table-level adapter contracts.

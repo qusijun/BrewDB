@@ -955,7 +955,7 @@ Crates are capability-oriented, and binary assembly should follow product or int
 Phase 1 may expose binaries such as:
 
 - `brewdbd`
-- `brewdbctl`
+- `brewdb`
 
 ## 7. Workspace Bootstrap
 
@@ -970,7 +970,7 @@ Recommended top-level layout:
 - `crates/brewdb-storage`
 - `crates/brewdb-runtime`
 - `bin/brewdbd`
-- `bin/brewdbctl`
+- `bin/brewdb`
 
 Non-crate top-level directories may include:
 
@@ -1003,7 +1003,7 @@ BrewDB/
 │   └── brewdb-runtime/
 ├── bin/
 │   ├── brewdbd/
-│   └── brewdbctl/
+│   └── brewdb/
 ├── tests/
 │   ├── integration/
 │   ├── fixtures/
@@ -1188,12 +1188,12 @@ bin/brewdbd/
     └── wiring/
 ```
 
-### `bin/brewdbctl`
+### `bin/brewdb`
 
 Recommended structure:
 
 ```text
-bin/brewdbctl/
+bin/brewdb/
 ├── Cargo.toml
 └── src/
     ├── main.rs
@@ -1787,7 +1787,7 @@ What this decision rules out:
 
 If the project wants a concrete development-architecture freeze position today, the recommended Phase 1 answers are:
 
-1. Repository layout: `crates/*` for shared libraries, `bin/*` for product-facing binaries such as `brewdbd` and `brewdbctl`
+1. Repository layout: `crates/*` for shared libraries, `bin/*` for product-facing binaries such as `brewdbd` and `brewdb`
 2. RPC timing: internal Rust contracts first, no early wire-schema freeze
 3. Local mode: supported and encouraged, but must preserve runtime responsibility boundaries
 4. Initial format target: Paimon first, Iceberg second

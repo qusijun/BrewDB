@@ -1,0 +1,1 @@
+//! Paimon adapter implementation shell.

@@ -1,0 +1,1 @@
+//! Catalog-layer error surface.

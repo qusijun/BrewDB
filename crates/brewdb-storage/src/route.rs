@@ -1,0 +1,1 @@
+//! Adapter route resolution helpers.
