@@ -102,6 +102,12 @@ This keeps BrewDB MPP-first while preserving room for a future BSP-style policy 
 - commit-attempt history
 - adapter commit execution
 
+### `Finalization`
+
+- execution-complete to commit/abort handoff
+- txn-bearing finalization bootstrap
+- reconcile entry for unknown outcomes
+
 ## 4. State Objects
 
 ### `Job`

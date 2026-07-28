@@ -329,10 +329,11 @@ Already scaffolded before this task breakdown:
 - execution graph builder shell
 - storage planning shell
 - storage statistics shell
+- runtime finalization shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task D: Runtime Finalization Shell
+- Task E: Worker Runtime Shell

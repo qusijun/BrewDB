@@ -5,6 +5,7 @@ pub mod commit;
 pub mod contexts;
 pub mod dispatcher;
 pub mod errors;
+pub mod finalization;
 pub mod jobs;
 pub mod leases;
 pub mod locks;
