@@ -327,10 +327,12 @@ Already scaffolded before this task breakdown:
 - dispatcher shell
 - stage graph shell
 - execution graph builder shell
+- storage planning shell
+- storage statistics shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task C: Storage Planning and Statistics Shell
+- Task D: Runtime Finalization Shell

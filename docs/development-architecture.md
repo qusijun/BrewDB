@@ -1166,6 +1166,7 @@ src/
 ├── rewrite/
 ├── maintenance/
 ├── commit/
+├── statistics/
 └── formats/
     ├── paimon/
     └── iceberg/

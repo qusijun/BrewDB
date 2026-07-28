@@ -10,5 +10,6 @@ pub mod commit;
 pub mod maintenance;
 pub mod rewrite;
 pub mod scan;
+pub mod statistics;
 
 pub(crate) mod formats;

@@ -265,7 +265,7 @@ The task contract is the execution framework's minimum distributed protocol.
 A task request should carry:
 
 - identity: `job_id`, `stage_id`, `task_id`, `attempt_id`
-- execution plan segment reference
+- `stage_plan_id` as the execution plan segment reference for one stage-scoped DataFusion plan slice
 - input partition or shard assignment
 - upstream dependency references when needed
 - stage boundary kind
