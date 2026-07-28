@@ -1112,6 +1112,17 @@ Rule:
 
 - stable caller-facing APIs stay near the top; transport and cache machinery move into subdirectories
 
+Suggested catalog substructure responsibilities:
+
+```text
+facade.rs      -> resolve table / route / normalized metadata entry
+route.rs       -> format and adapter dispatch lookup
+warehouse.rs   -> warehouse profile resolution
+client/        -> control-plane client boundary
+cache/         -> normalized metadata cache boundary
+normalize/     -> normalization boundary into BrewDB models
+```
+
 ### `crates/brewdb-sql`
 
 ```text

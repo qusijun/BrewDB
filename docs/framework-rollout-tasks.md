@@ -331,10 +331,11 @@ Already scaffolded before this task breakdown:
 - storage statistics shell
 - runtime finalization shell
 - worker runtime shell
+- catalog facade shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task F: Catalog Facade Completion Shell
+- Task G: SQL Intent Entry Shell
