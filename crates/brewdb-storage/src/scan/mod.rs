@@ -34,12 +34,15 @@ mod tests {
     use super::{ScanPlanningInput, ScanPlanningOutput};
 
     fn table_ref() -> TableRef {
-        TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440910").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655440911").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440912").unwrap(),
-            format_type: FormatType::Paimon,
-        }
+        TableRef::new(
+            "brew",
+            "analytics",
+            "events",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440912").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440910").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655440911").unwrap(),
+            FormatType::Paimon,
+        )
     }
 
     #[test]

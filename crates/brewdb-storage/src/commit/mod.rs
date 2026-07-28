@@ -36,12 +36,15 @@ mod tests {
     use super::{CommitPreparation, PrepareCommit};
 
     fn table_ref() -> TableRef {
-        TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440940").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655440941").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440942").unwrap(),
-            format_type: FormatType::Iceberg,
-        }
+        TableRef::new(
+            "brew",
+            "analytics",
+            "orders",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440942").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440940").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655440941").unwrap(),
+            FormatType::Iceberg,
+        )
     }
 
     #[test]

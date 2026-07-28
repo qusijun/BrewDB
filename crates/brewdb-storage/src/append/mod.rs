@@ -36,12 +36,15 @@ mod tests {
     use super::{AppendPlanningInput, AppendPlanningOutput};
 
     fn table_ref() -> TableRef {
-        TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440920").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655440921").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440922").unwrap(),
-            format_type: FormatType::Iceberg,
-        }
+        TableRef::new(
+            "brew",
+            "analytics",
+            "orders",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440922").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440920").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655440921").unwrap(),
+            FormatType::Iceberg,
+        )
     }
 
     #[test]

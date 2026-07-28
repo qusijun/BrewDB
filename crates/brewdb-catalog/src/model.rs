@@ -7,6 +7,7 @@ use brewdb_core::ids::{NamespaceId, TableId, WarehouseId};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamespaceRecord {
     pub namespace_id: NamespaceId,
+    pub database_name: String,
     pub namespace_name: String,
 }
 
@@ -23,27 +24,33 @@ pub struct WarehouseProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRecord {
     pub table_ref: TableRef,
-    pub table_name: String,
+    pub warehouse_name: String,
     pub namespace_name: String,
 }
 
 impl TableRecord {
     pub fn new(
+        catalog_name: impl Into<String>,
         namespace_id: NamespaceId,
+        database_name: impl Into<String>,
         namespace_name: impl Into<String>,
         table_id: TableId,
         table_name: impl Into<String>,
         warehouse_id: WarehouseId,
+        warehouse_name: impl Into<String>,
         format_type: FormatType,
     ) -> Self {
         Self {
-            table_ref: TableRef {
+            table_ref: TableRef::new(
+                catalog_name,
+                database_name,
+                table_name,
+                warehouse_id,
                 namespace_id,
                 table_id,
-                warehouse_id,
                 format_type,
-            },
-            table_name: table_name.into(),
+            ),
+            warehouse_name: warehouse_name.into(),
             namespace_name: namespace_name.into(),
         }
     }
@@ -59,15 +66,21 @@ mod tests {
     #[test]
     fn table_record_builds_shared_table_ref() {
         let table = TableRecord::new(
+            "brew",
             NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441200").unwrap(),
+            "analytics",
             "analytics",
             TableId::parse_str("550e8400-e29b-41d4-a716-446655441201").unwrap(),
             "orders",
             WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441202").unwrap(),
+            "warehouse-a",
             FormatType::Iceberg,
         );
 
-        assert_eq!(table.table_name, "orders");
+        assert_eq!(table.table_ref.logical_name.table_name, "orders");
+        assert_eq!(table.table_ref.logical_name.catalog_name, "brew");
+        assert_eq!(table.table_ref.logical_name.database_name, "analytics");
+        assert_eq!(table.warehouse_name, "warehouse-a");
         assert_eq!(table.namespace_name, "analytics");
         assert_eq!(table.table_ref.format_type, FormatType::Iceberg);
     }

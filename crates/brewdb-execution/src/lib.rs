@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod boundaries;
 pub mod errors;
 pub mod plan;
+pub mod protocol;
 pub mod stage_graph_builder;
 pub mod task;
 pub mod worker;

@@ -265,7 +265,7 @@ The task contract is the execution framework's minimum distributed protocol.
 A task request should carry:
 
 - identity: `job_id`, `stage_id`, `task_id`, `attempt_id`
-- `stage_plan_id` as the execution plan segment reference for one stage-scoped DataFusion plan slice
+- `stage_plan_id` as the stage-scoped plan reference for one DataFusion plan slice
 - input partition or shard assignment
 - upstream dependency references when needed
 - stage boundary kind
@@ -341,6 +341,6 @@ Phase 1 materialization does not imply resumable execution semantics. The system
 6. The scheduler admits the full execution graph but dispatches only dependency-ready work.
 7. `Task` is the dispatch unit; `Stage` remains the orchestration and observability unit.
 8. Boundary semantics must be typed as pipelined, materialized, or barriered rather than implied by one fixed scheduler mode.
-9. Task requests carry execution plan segment references plus boundary-aware output contracts.
+9. Task requests carry stage-scoped plan references plus boundary-aware output contracts.
 10. Task results report execution status plus boundary outputs.
 11. Execution outputs remain non-authoritative until the control plane validates and publishes them.

@@ -58,14 +58,15 @@ mod tests {
     #[test]
     fn table_statistics_keep_confidence_and_columns() {
         let stats = TableStatistics {
-            table: TableRef {
-                namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440900")
-                    .unwrap(),
-                table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655440901").unwrap(),
-                warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440902")
-                    .unwrap(),
-                format_type: FormatType::Iceberg,
-            },
+            table: TableRef::new(
+                "brew",
+                "analytics",
+                "orders",
+                WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440902").unwrap(),
+                NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440900").unwrap(),
+                TableId::parse_str("550e8400-e29b-41d4-a716-446655440901").unwrap(),
+                FormatType::Iceberg,
+            ),
             row_count: Some(42),
             total_bytes: Some(4096),
             confidence: StatisticsConfidence::Approximate,

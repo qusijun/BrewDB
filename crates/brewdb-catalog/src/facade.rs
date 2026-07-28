@@ -55,11 +55,14 @@ mod tests {
             table_id: table_id.clone(),
         };
         let record = TableRecord::new(
+            "brew",
             NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441231").unwrap(),
+            "analytics",
             "analytics",
             table_id.clone(),
             "events",
             WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441232").unwrap(),
+            "warehouse-a",
             FormatType::Iceberg,
         );
         let route = RouteResolution {
@@ -73,6 +76,9 @@ mod tests {
 
         assert_eq!(resolve_table.table_id, table_id);
         assert_eq!(resolve_metadata.table_id, table_id);
-        assert_eq!(route_request.table.table_id, route.table.table_id);
+        assert_eq!(
+            route_request.table.control_plane_ref.table_id,
+            route.table.control_plane_ref.table_id
+        );
     }
 }

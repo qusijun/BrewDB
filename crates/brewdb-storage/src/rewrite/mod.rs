@@ -37,12 +37,15 @@ mod tests {
     use super::{RewritePlanningInput, RewritePlanningOutput};
 
     fn table_ref() -> TableRef {
-        TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440930").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655440931").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440932").unwrap(),
-            format_type: FormatType::Paimon,
-        }
+        TableRef::new(
+            "brew",
+            "analytics",
+            "events",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655440932").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655440930").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655440931").unwrap(),
+            FormatType::Paimon,
+        )
     }
 
     #[test]

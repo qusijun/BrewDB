@@ -112,12 +112,15 @@ mod tests {
     use super::{AbortPath, CommitPathBootstrap, FinalizationPlan, FinalizeExecution};
 
     fn table_ref() -> TableRef {
-        TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441000").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655441001").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441002").unwrap(),
-            format_type: FormatType::Iceberg,
-        }
+        TableRef::new(
+            "brew",
+            "analytics",
+            "orders",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441002").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441000").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655441001").unwrap(),
+            FormatType::Iceberg,
+        )
     }
 
     #[test]

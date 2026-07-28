@@ -1123,6 +1123,12 @@ cache/         -> normalized metadata cache boundary
 normalize/     -> normalization boundary into BrewDB models
 ```
 
+Catalog naming and routing should stay split:
+
+- SQL-facing logical identity uses `catalog.database.table`
+- Lakekeeper/control-plane routing uses `warehouse.namespace.table`
+- `brewdb-catalog` owns the normalized mapping between those two views
+
 ### `crates/brewdb-sql`
 
 ```text
@@ -1132,7 +1138,9 @@ src/
 ├── bind.rs
 ├── analyze.rs
 ├── rewrite.rs
-├── intent.rs
+├── intent/
+│   ├── mod.rs
+│   └── entry.rs
 ├── capabilities.rs
 ├── errors.rs
 └── parse/
@@ -1148,6 +1156,7 @@ Rule:
 src/
 ├── lib.rs
 ├── plan.rs
+├── protocol/
 ├── task.rs
 ├── boundaries.rs
 ├── artifacts.rs
@@ -1172,6 +1181,15 @@ worker/
 ├── stage_output_writer.rs
 ├── exchange_buffer_manager.rs
 └── task_status_reporter.rs
+```
+
+Suggested protocol substructure:
+
+```text
+protocol/
+├── mod.rs
+├── coordinator_to_worker.rs
+└── worker_to_coordinator.rs
 ```
 
 ### `crates/brewdb-storage`

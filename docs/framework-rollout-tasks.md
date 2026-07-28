@@ -261,7 +261,7 @@ Should define:
 
 - coordinator-to-worker DTO shell
 - worker-to-coordinator DTO shell
-- plan-segment wire shell
+- stage-plan wire shell
 - task result wire shell
 
 Should not define yet:
@@ -327,15 +327,17 @@ Already scaffolded before this task breakdown:
 - dispatcher shell
 - stage graph shell
 - execution graph builder shell
+- execution protocol shell
 - storage planning shell
 - storage statistics shell
 - runtime finalization shell
 - worker runtime shell
 - catalog facade shell
+- sql intent entry shell
 - task contract shell
 - runtime metadata shell
 - runtime admission shell
 
 Immediate next task:
 
-- Task G: SQL Intent Entry Shell
+- none; framework rollout tasks A-H are now scaffolded

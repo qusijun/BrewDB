@@ -32,12 +32,15 @@ mod tests {
 
     #[test]
     fn route_resolution_keeps_dispatch_key() {
-        let table = TableRef {
-            namespace_id: NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441210").unwrap(),
-            table_id: TableId::parse_str("550e8400-e29b-41d4-a716-446655441211").unwrap(),
-            warehouse_id: WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441212").unwrap(),
-            format_type: FormatType::Paimon,
-        };
+        let table = TableRef::new(
+            "brew",
+            "db1",
+            "orders",
+            WarehouseId::parse_str("550e8400-e29b-41d4-a716-446655441212").unwrap(),
+            NamespaceId::parse_str("550e8400-e29b-41d4-a716-446655441210").unwrap(),
+            TableId::parse_str("550e8400-e29b-41d4-a716-446655441211").unwrap(),
+            FormatType::Paimon,
+        );
         let resolution = RouteResolution {
             table: table.clone(),
             format_type: table.format_type,
@@ -45,7 +48,7 @@ mod tests {
         };
         let request = ResolveRoute { table };
 
-        assert_eq!(request.table.format_type, FormatType::Paimon);
+        assert_eq!(request.table.logical_name.catalog_name, "brew");
         assert_eq!(resolution.route_key, "warehouse-a/paimon");
     }
 }
