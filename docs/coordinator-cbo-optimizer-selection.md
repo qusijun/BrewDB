@@ -10,11 +10,11 @@ BrewDB needs a coordinator-side optimizer that can:
 
 - produce good join order and join algorithm choices
 - reason about distributed stage boundaries and data movement
-- consume table and column statistics from catalog and storage adapters
+- consume table and column statistics from catalog and table engines
 - remain compatible with BrewDB's Rust-first architecture
 - support query, insert-select, and later mutation / maintenance planning
 
-The optimizer decision must not force BrewDB into a Java control plane, a split-language planner core, or a parallel metadata model that fights the storage adapters.
+The optimizer decision must not force BrewDB into a Java control plane, a split-language planner core, or a parallel metadata model that fights the table-engine boundary.
 
 ## 2. Decision
 
@@ -22,9 +22,10 @@ Phase 1 and Phase 2 baseline:
 
 - use `Apache DataFusion` as the primary optimizer framework
 - keep SQL frontend planning in `brewdb-sql`
-- keep coordinator CBO ownership in `brewdb-runtime::planning`
-- keep physical operator and stage shaping in `brewdb-execution`
-- extend DataFusion with BrewDB-specific logical / physical optimizer rules instead of introducing a second optimizer kernel
+- keep DataFusion logical optimization ahead of BrewDB distributed planning
+- keep distributed CBO ownership inside `DistributedPlanner`
+- keep fragment-local physical operator planning in the DataFusion-backed fragment physical planner
+- extend DataFusion with BrewDB-specific logical / physical optimizer rules where fragment-local execution needs them instead of introducing a second optimizer kernel
 
 This means BrewDB does **not** adopt Apache Calcite as the primary coordinator optimizer, and does **not** build a fully custom optimizer from scratch.
 
@@ -154,7 +155,7 @@ Owns:
 - binding
 - semantic rewrites
 - statement classification
-- frontend intent generation
+- frontend statement classification and planner-handoff generation
 
 Must not own:
 
@@ -162,29 +163,29 @@ Must not own:
 - distributed exchange placement
 - stage graph generation
 
-### `brewdb-runtime::planning`
+### `DistributedPlanner`
 
 Owns:
 
-- coordinator-visible CBO policy
+- distributed CBO policy
 - planning session assembly
-- statistics acquisition and normalization orchestration
-- lane and commit-path planning
-- dispatch-facing plan packaging
+- statistics acquisition and normalization orchestration for distributed planning
+- distributed exchange placement and fragment boundary generation
+- dispatch-facing distributed plan packaging
 
 Must not own:
 
 - low-level physical operator implementations
-- storage-format truth
+- storage-format publish truth
 - worker-local execution decisions
 
-### `brewdb-execution`
+### `FragmentPhysicalPlanner`
 
 Owns:
 
 - DataFusion physical planning integration
-- stage graph generation
-- partitioning / exchange shaping
+- fragment-local physical operator generation
+- fragment-local physical optimization
 - execution-operator-specific costing extensions
 
 Must not own:
@@ -195,12 +196,12 @@ Must not own:
 
 ## 6. What "Coordinator CBO" Means In BrewDB
 
-In BrewDB, coordinator CBO is not a second full optimizer that competes with DataFusion. It is the coordinator-side decision framework that combines:
+In BrewDB, coordinator CBO is not a second full optimizer that competes with DataFusion. It is the distributed-planning decision framework that combines:
 
-- DataFusion logical and physical optimization
+- DataFusion logical optimization
 - BrewDB statistics inputs
 - BrewDB distributed planning policies
-- BrewDB storage-adapter capabilities
+- BrewDB table-engine capabilities
 
 Coordinator CBO makes or constrains decisions in five areas:
 
@@ -210,9 +211,9 @@ Coordinator CBO makes or constrains decisions in five areas:
 4. repartition / broadcast / exchange boundaries
 5. materialization and commit handoff boundaries
 
-The first two are mostly DataFusion-native with BrewDB statistics help.
+The first two begin with DataFusion-native optimization plus BrewDB statistics help.
 
-The latter three are where BrewDB-specific policy matters most.
+The latter three belong primarily to BrewDB distributed CBO inside `DistributedPlanner`.
 
 ## 7. Statistics Model
 
@@ -222,8 +223,8 @@ The optimizer choice is only useful if BrewDB can feed it good statistics.
 
 The coordinator should merge statistics from:
 
-- Lakekeeper-resolved table metadata
-- format-native metadata from storage adapters
+- BrewDB catalog-resolved table metadata
+- format-native metadata from table engines
 - object/file-level statistics when cheaply available
 - BrewDB runtime observations from previous executions
 
@@ -231,7 +232,7 @@ The coordinator should merge statistics from:
 
 Ownership should remain split:
 
-- `brewdb-catalog`: table identity, route, warehouse profile, normalized metadata access
+- `brewdb-catalog`: table identity, `catalog.database.table` resolution, storage binding, normalized metadata access
 - `brewdb-storage`: format-aware table/file/partition statistics extraction
 - `brewdb-runtime`: runtime feedback and plan-time statistics assembly
 
@@ -266,20 +267,20 @@ This feedback should improve future planning, but it is not required to block th
 Use DataFusion's optimizer framework as the kernel:
 
 - built-in logical optimizer rules remain enabled
-- built-in physical optimizer rules remain enabled
+- fragment-local physical optimizer rules remain enabled
 - BrewDB adds custom rules around distribution and table-format-aware planning
 
 ### 8.2 Plan flow
 
 Recommended flow:
 
-1. `brewdb-sql` parses SQL and builds BrewDB intent
-2. `brewdb-runtime::planning` opens a planning session and resolves catalog / adapter context
+1. `brewdb-sql` parses SQL and builds the planner handoff
+2. the planning stack opens a planning session and resolves catalog / table-engine context
 3. `brewdb-storage` provides scan and statistics inputs for referenced tables
 4. DataFusion logical optimization runs with BrewDB-aware table providers and statistics
-5. DataFusion physical optimization runs with BrewDB configuration and custom rules
-6. `brewdb-execution` converts the physical plan into a BrewDB `StageGraph`
-7. `brewdb-runtime::planning` wraps the result into an orchestration plan
+5. `DistributedPlanner` runs distributed CBO and produces a BrewDB distributed plan
+6. `FragmentPhysicalPlanner` runs fragment-local DataFusion physical planning and physical optimization
+7. runtime projects the distributed plan into scheduling and orchestration state
 
 ### 8.3 Extension points BrewDB should use
 
@@ -295,6 +296,28 @@ BrewDB should avoid:
 
 - forking DataFusion optimizer internals too early
 - embedding a parallel relational algebra model for the same query path
+
+### 8.4 `DistributedPlanner` internal responsibilities
+
+`DistributedPlanner` is the home of distributed CBO and should be internally organized around five responsibilities:
+
+1. boundary detection
+   - find where an optimized logical plan must be split into multiple fragments
+   - identify distributed boundaries for gather, repartition, multi-phase aggregation, and mutation publish transitions
+2. fragment cutting
+   - produce local logical subplans for each fragment
+   - preserve enough semantic structure for later fragment-local physical planning
+3. exchange planning
+   - build exchange edges between fragments
+   - choose gather, partitioned, broadcast, or passthrough exchange distribution
+4. parallelism and placement policy
+   - choose fragment parallelism
+   - choose fragment placement such as coordinator-preferred or worker-only
+5. distributed cost evaluation
+   - consume statistics and table-engine capabilities
+   - compare alternative distributed shapes such as broadcast versus repartition or single-stage versus multi-stage aggregation
+
+`DistributedPlanner` should not directly generate DataFusion local physical operator trees. That remains the responsibility of `FragmentPhysicalPlanner`.
 
 ## 9. Join and Distribution Policy
 
@@ -364,9 +387,10 @@ For compaction, rewrite, and analyze:
 Adopt:
 
 - DataFusion as optimizer kernel
-- built-in logical and physical optimizer pipelines
+- built-in logical optimizer pipeline plus fragment-local physical optimizer pipeline
 - BrewDB statistics normalization shell
-- minimal custom rules only where distributed stage shaping requires them
+- distributed CBO inside `DistributedPlanner`
+- minimal custom rules only where distributed planning or fragment-local execution requires them
 
 Do not adopt yet:
 
@@ -416,7 +440,7 @@ Rejected because:
 BrewDB should standardize on the following statement:
 
 - the BrewDB coordinator uses DataFusion as its primary optimizer kernel
-- BrewDB CBO is implemented as coordinator-owned planning policy plus DataFusion-native optimization
+- BrewDB CBO is implemented inside `DistributedPlanner` on top of DataFusion logical optimization plus fragment-local DataFusion physical optimization
 - BrewDB extends DataFusion through statistics, table providers, and custom rules instead of introducing Calcite or a second optimizer core
 
 This is the best fit for:
@@ -432,7 +456,7 @@ This is the best fit for:
 Current crate landing zones:
 
 - `brewdb-sql`
-  - SQL AST, bind, analyze, rewrite, intent
+  - SQL AST, bind, analyze, rewrite, statement, handoff
 - `brewdb-runtime::planning`
   - planning session
   - statistics assembly

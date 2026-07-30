@@ -8,9 +8,552 @@ Phase 1 implementation is organized as a monorepo with a small number of capabil
 
 The crate layout is intentionally not based on deployment roles such as coordinator or worker. Binary packaging should also avoid turning those roles into the primary repository boundary.
 
+This document now also fixes the top-down control flow for the real query mainline:
+
+`brewdb -> brewdbd -> frontend -> sql -> planner -> runtime -> execution`
+
+The key rule is that every layer must hand off one stable abstraction to the next layer rather than leaking local implementation details such as wire protocol fields, SQL parser details, or executor-specific task kinds.
+
+## 1.1 Top-Level Binaries
+
+### `brewdb`
+
+`brewdb` is the SQL client.
+
+It owns:
+
+- CLI interaction
+- remote session establishment
+- SQL request submission
+- client-side result rendering
+
+It must not own:
+
+- in-process runtime bootstrap
+- direct runtime or execution calls
+- coordinator-only planning shortcuts
+
+### `brewdbd`
+
+`brewdbd` is the server process host.
+
+It owns:
+
+- config and bootstrap
+- listener lifecycle
+- session ingress
+- service assembly
+- process-level observability
+
+It must not own:
+
+- SQL semantic planning
+- distributed scheduling semantics
+- execution fragment internals
+- client wire protocol details outside ingress adapters
+
+## 1.2 Top-Down Query Path
+
+The primary query path should remain explicit:
+
+1. `brewdb` sends SQL over PostgreSQL wire protocol
+2. `brewdbd` accepts the connection and hands it to a protocol-specific `SessionIngress`
+3. `brewdb-frontend` opens or resumes a client session and normalizes the SQL request
+4. `brewdb-sql` and `brewdb-planner` build:
+   - parsed statement
+   - bound statement
+   - logical plan
+   - distributed plan
+   - fragment-local execution plans
+5. `brewdb-runtime` admits the distributed plan, projects fragments into stage templates, and drives scheduling
+6. `brewdb-execution` runs worker task payloads and returns exchange outputs or terminal results
+
+The system should not skip directly from client entry to runtime with ad hoc fields such as:
+
+- raw SQL plus default database
+- task kinds that encode query semantics in names
+- profile enums that stand in for real execution structure
+
+## 1.3 Core Runtime Contracts
+
+The main cross-layer contracts should converge on the following objects.
+
+### Client-facing contracts
+
+- `ClientContext`
+- `RequestContext`
+- `ClientSqlRequest`
+- `OpenClientSession`
+- `OpenedClientSession`
+
+`ClientContext` carries client session, connection, defaults, identity, and capability metadata. `RequestContext` carries one request's tracing and correlation metadata. They must remain distinct.
+
+Context boundary note:
+
+- `SessionContext` belongs with request and runtime context flow, not inside `BoundStatement`
+- `QueryContext` and `JobContext` may carry session-derived execution context later, but their field sets should remain open for now
+
+### Compiler and planning contracts
+
+- `ParsedStatement`
+- `BoundStatement`
+- optimized `LogicalPlan`
+- `DistributedPlan`
+- `PlanFragment`
+- fragment-local `ExecutionPlan`
+
+### Runtime and execution contracts
+
+- `StageTemplate`
+- `TaskInstance`
+- `TaskPayload`
+- `ExchangeEdge`
+- `ExecutableFragment`
+
+The intended chain is:
+
+`ClientSqlRequest -> optimized LogicalPlan -> DistributedPlan -> StageTemplate -> TaskInstance -> TaskPayload`
+
+## 1.4 Plan Layers
+
+The system must keep four layers separate.
+
+### `SqlAst`
+
+Represents what the user wrote.
+
+### optimized `LogicalPlan`
+
+Represents query semantics after DataFusion logical optimization.
+
+### `DistributedPlan`
+
+Represents BrewDB's distributed decomposition of the optimized logical plan across exchange boundaries.
+
+### fragment-local `ExecutionPlan`
+
+Represents the DataFusion physical execution tree for one fragment after fragment-local physical planning and physical optimization.
+
+## 1.5 Fragment, Stage, and Task
+
+These terms must not be mixed.
+
+### `Fragment`
+
+A distributed execution unit bounded by exchange semantics and backed by one local logical subplan.
+
+### `Stage`
+
+A runtime scheduling template derived one-to-one from a fragment.
+
+### `Task`
+
+One concrete partition attempt of one stage.
+
+The intended expansion is:
+
+`optimized LogicalPlan -> DistributedPlan -> StageTemplate -> TaskInstance -> TaskPayload`
+
+`StageGraph` should not evolve as a second independent source of truth beside `DistributedPlan`. Runtime may project a lightweight stage view from `DistributedPlan`, but query semantics should continue to live in fragment structure plus exchange edges.
+
+## 1.6 Core Type Sketches
+
+The following sketches are not final Rust signatures. They define the intended shape and ownership of the main cross-layer contracts.
+
+### Client and request entry
+
+```rust
+struct ClientContext {
+    session: ClientSessionContext,
+    connection: Option<ClientConnectionContext>,
+    defaults: ClientDefaults,
+    identity: ClientIdentity,
+    capabilities: ClientCapabilities,
+}
+
+struct ClientSqlRequest {
+    client_context: ClientContext,
+    request_context: RequestContext,
+    sql: String,
+}
+```
+
+`ClientContext` is client-facing session truth. `RequestContext` is one-request correlation truth. Neither should absorb runtime job state.
+
+### Query planning handoff
+
+```rust
+struct PlannedQuery {
+    query_id: JobId,
+    context: PlannedQueryContext,
+    statement: QueryStatementInfo,
+    logical_plan: LogicalPlanHandle,
+    distributed_plan: DistributedPlan,
+    result_schema: TableSchema,
+    diagnostics: QueryPlanDiagnostics,
+}
+
+struct PlannedQueryContext {
+    client: ClientContext,
+    request: RequestContext,
+}
+
+struct QueryStatementInfo {
+    sql_text: String,
+    statement_class: StatementClass,
+    reads: Vec<LogicalTableName>,
+}
+```
+
+Rules:
+
+- `PlannedQuery` is the formal compiler-to-runtime query handoff
+- runtime scheduling decisions depend on `distributed_plan`, not on `sql_text`
+- DataFusion logical optimization runs before `DistributedPlanner`
+- DataFusion physical planning and physical optimization run per fragment after `DistributedPlanner`
+
+### Distributed plan
+
+```rust
+struct DistributedPlan {
+    fragments: Vec<PlanFragment>,
+    output_fragment_id: FragmentId,
+}
+
+struct PlanFragment {
+    fragment_id: FragmentId,
+    logical_plan: LogicalPlanHandle,
+    input: FragmentInputSpec,
+    output: FragmentOutputSpec,
+    parallelism: FragmentParallelism,
+    placement: FragmentPlacement,
+    upstreams: Vec<FragmentInputEdge>,
+}
+
+struct FragmentInputEdge {
+    upstream_fragment_id: FragmentId,
+    exchange: ExchangeEdge,
+}
+```
+
+```rust
+enum FragmentInputSpec {
+    Source,
+    Exchange,
+    Mixed,
+}
+
+enum FragmentOutputSpec {
+    Exchange,
+    Result,
+}
+
+enum FragmentParallelism {
+    Fixed(u32),
+    FollowSourcePartitions,
+    Singleton,
+}
+
+enum FragmentPlacement {
+    Anywhere,
+    CoordinatorPreferred,
+    WorkerOnly,
+}
+```
+
+Rules:
+
+- a fragment is a distributed execution unit bounded by exchange semantics
+- fragment boundaries come from exchange semantics, not from SQL statement class names
+- one fragment becomes one runtime stage template
+
+### Exchange edge
+
+```rust
+struct ExchangeEdge {
+    exchange_id: ExchangeId,
+    distribution: ExchangeDistribution,
+    ordering: ExchangeOrdering,
+}
+
+enum ExchangeDistribution {
+    Partitioned { keys: Vec<ExchangeKey> },
+    Broadcast,
+    Gather,
+    Passthrough,
+}
+
+enum ExchangeOrdering {
+    Unspecified,
+    Preserved,
+}
+```
+
+Rules:
+
+- `ExchangeEdge` is the fragment-to-fragment data movement contract
+- exchange semantics must be explicit in structure rather than implied by stage names
+
+### Fragment-local executable
+
+```rust
+struct ExecutableFragment {
+    backend: ExecutionBackend,
+    descriptor: FragmentDescriptor,
+}
+
+enum FragmentDescriptor {
+    Opaque {
+        format: FragmentFormat,
+        bytes: Vec<u8>,
+    },
+}
+```
+
+Rules:
+
+- the top-level architecture should not leak `DataFusion...` types in its main contracts
+- the descriptor must be transportable and recoverable
+- backend-local registry or handle shortcuts are allowed as implementation optimizations, not as the architecture boundary
+- `FragmentPhysicalPlanner` is responsible for turning `PlanFragment.logical_plan` into a fragment-local DataFusion `ExecutionPlan`
+
+### Runtime stage and task projection
+
+```rust
+struct StageTemplate {
+    stage_id: StageId,
+    fragment_id: FragmentId,
+    parallelism: u32,
+    placement: FragmentPlacement,
+    input_mode: StageInputMode,
+    output_mode: StageOutputMode,
+    dependencies: Vec<StageDependency>,
+}
+
+struct StageDependency {
+    upstream_stage_id: StageId,
+    exchange_id: ExchangeId,
+}
+```
+
+```rust
+enum StageInputMode {
+    Source,
+    Exchange,
+    Mixed,
+}
+
+enum StageOutputMode {
+    Exchange,
+    Result,
+}
+```
+
+Rules:
+
+- runtime projects `StageTemplate` from `DistributedPlan`
+- `StageTemplate` is a scheduling view, not a second semantic execution graph
+- `StageGraph` should remain a projection or convenience view only
+
+### Task instance and worker payload
+
+```rust
+struct TaskInstance {
+    task_id: TaskId,
+    stage_id: StageId,
+    fragment_id: FragmentId,
+    partition_id: u32,
+    attempt: u32,
+}
+
+struct TaskPayload {
+    task_id: TaskId,
+    stage_id: StageId,
+    fragment_id: FragmentId,
+    partition_id: u32,
+    attempt: u32,
+    executable: ExecutableFragment,
+    inputs: Vec<TaskInput>,
+    output: TaskOutput,
+}
+```
+
+```rust
+enum TaskInput {
+    SourcePartition {
+        partition_id: u32,
+    },
+    ExchangeInput {
+        exchange_id: ExchangeId,
+        partitions: Vec<ExchangePartitionRef>,
+    },
+}
+
+enum TaskOutput {
+    ExchangeSink {
+        exchange_id: ExchangeId,
+    },
+    ResultSink,
+}
+```
+
+Rules:
+
+- `TaskInstance` is runtime state
+- `TaskPayload` is worker-facing execution input
+- workers should receive structured payloads rather than SQL text plus profile hints
+
+## 1.6.1 Frontend Session and Statement Routing
+
+The frontend boundary should decide whether a statement stays inside session handling or enters the planning and runtime path.
+
+Recommended split:
+
+- session-local statements stay in `brewdb-frontend`
+- runtime-bound statements enter `brewdb-sql` and the planner stack
+
+Session-local statements typically include:
+
+- `SET`
+- `PREPARE`
+- `EXECUTE`
+- transaction control statements handled as session/runtime coordination entry
+- protocol or client-local statement flow that does not require distributed execution
+
+Runtime-bound statements typically include:
+
+- `SELECT`
+- `INSERT`
+- `UPDATE`
+- `DELETE`
+- `MERGE`
+- DDL statements that require catalog truth changes
+- maintenance statements that require distributed planning or storage interaction
+
+Frontend boundary rule:
+
+- `brewdb-frontend` owns session state and statement routing
+- `brewdb-sql` owns statement parsing, classification, and SQL-facing rewrites
+- `brewdb-planner` owns planning entry into optimized logical plans and distributed planning
+- only runtime-bound statements should enter the `DistributedPlanner` path
+
+## 1.6.2 SQL To Planner Handoff
+
+`brewdb-sql` and `brewdb-planner` should meet on one explicit handoff object rather than ad hoc parameter lists.
+
+Recommended layering:
+
+- `ParsedStatement`
+- `BoundStatement`
+- `StatementFamily`
+- `PlannerRequest`
+- `PlannerOutput`
+
+Type sketch:
+
+```rust
+struct PlannerRequest {
+    client: ClientContext,
+    request: RequestContext,
+    statement: BoundStatement,
+    statement_family: StatementFamily,
+    catalog_snapshot: PlannerCatalogSnapshot,
+    planning_options: PlanningOptions,
+}
+
+struct PlannerOutput {
+    statement: BoundStatement,
+    optimized_logical_plan: LogicalPlanHandle,
+    distributed_plan: DistributedPlan,
+    result_schema: TableSchema,
+    diagnostics: PlannerDiagnostics,
+}
+```
+
+Rules:
+
+- `brewdb-sql` stops at bound statement plus planner handoff assembly
+- `brewdb-planner` starts from `PlannerRequest`, not from raw SQL text
+- `BoundStatement` is a binder output, not a session container
+- `BoundStatement` may carry only the minimal `SessionSemantics` snapshot needed to freeze SQL meaning before planning
+- full `SessionContext` should stay with request and runtime context flow such as `ClientContext`, future `QueryContext`, and future `JobContext`
+- `PlannerRequest` may carry planning-visible catalog snapshot data, but should not embed runtime job state
+- `PlannerOutput` is the planner-to-runtime boundary for runtime-bound statements
+- runtime scheduling depends on `DistributedPlan`, while client result shaping may additionally depend on `result_schema` and `diagnostics`
+
+`StatementFamily` should stay coarse and routing-oriented.
+
+Recommended Phase 1 families:
+
+- `Query`
+- `Insert`
+- `Update`
+- `Delete`
+- `Merge`
+- `Ddl`
+- `Maintenance`
+
+Boundary rule:
+
+- statement family exists to route planner and runtime entry policy
+- operator-level execution shape still comes from optimized logical plan plus distributed planning, not from statement-family-specific runtime code paths
+
+## 1.7 Planner Layering
+
+The planner stack should be split into three distinct phases.
+
+1. DataFusion SQL parsing and binding:
+   - `Statement`
+   - relation and name resolution
+2. DataFusion logical optimization:
+   - global logical rewrites
+   - expression simplification
+   - predicate and projection pushdown
+3. BrewDB distributed planning:
+   - `DistributedPlanner` consumes the optimized `LogicalPlan`
+   - produces `DistributedPlan`
+   - owns distributed CBO
+   - decides exchange topology, fragment boundaries, parallelism, and placement
+4. Fragment-local physical planning:
+   - `FragmentPhysicalPlanner` consumes each `PlanFragment.logical_plan`
+   - invokes DataFusion physical planner and physical optimizer
+   - produces fragment-local `ExecutionPlan`
+
+This means BrewDB does not build a second SQL parser or a second general-purpose logical optimizer.
+It does own distributed planning and distributed CBO after DataFusion logical optimization and before fragment-local physical planning.
+
+### `DistributedPlanner` internal responsibilities
+
+`DistributedPlanner` should stay focused on distributed execution shape rather than local operator implementation details.
+
+Its main internal responsibilities are:
+
+1. boundary detection
+   - identify where the optimized logical plan must be split into multiple distributed fragments
+   - detect exchange-requiring transitions such as gather, repartition, multi-phase aggregation, and mutation publish boundaries
+2. fragment cutting
+   - carve one optimized global logical plan into multiple local logical subplans
+   - assign each local logical subplan to one `PlanFragment`
+3. exchange planning
+   - create `ExchangeEdge` links between fragments
+   - decide exchange distribution mode such as gather, partitioned, broadcast, or passthrough
+4. parallelism and placement policy
+   - choose fragment parallelism
+   - choose fragment placement such as coordinator-preferred or worker-only
+5. distributed cost-based optimization
+   - consume distributed planning statistics
+   - choose among competing distributed shapes such as broadcast versus repartition and one-stage versus multi-stage aggregation
+
+`DistributedPlanner` must not own:
+
+- DataFusion local physical operator generation
+- fragment-local physical optimizer execution
+- runtime task scheduling state
+- storage-format-native commit truth
+
 ## 2. Crate Layout
 
-Phase 1 uses seven primary crates.
+Phase 1 uses eight primary crates.
 
 ### `brewdb-core`
 
@@ -25,13 +568,14 @@ Shared domain language:
 
 ### `brewdb-catalog`
 
-Catalog control-plane access kernel:
+Catalog metadata kernel:
 
-- Lakekeeper-facing facade
+- BrewDB-owned catalog service
+- FoundationDB-backed catalog-store access
 - cache
 - normalization
-- route and handle resolution
-- warehouse/storage profile resolution
+- catalog/database/table resolution
+- table storage binding resolution
 
 ### `brewdb-sql`
 
@@ -41,35 +585,58 @@ Language frontend:
 - binding
 - statement analysis
 - SQL rewrites
-- intent generation
+- statement classification
+- planner handoff assembly
 - SQL-surface capability gating
+
+### `brewdb-planner`
+
+Planning kernel:
+
+- planning entry for runtime-bound statements
+- DataFusion logical optimization bridge
+- distributed planning
+- distributed CBO
+- fragment-local physical planning entry
+- `DistributedPlan` assembly
 
 ### `brewdb-frontend`
 
 External SQL ingress:
 
-- PostgreSQL wire protocol handling
+- protocol-neutral client session and request handling
 - session and authentication entry
-- prepared statement / portal lifecycle shells
-- result encoding back to clients
+- statement routing at the frontend boundary
+- planner/runtime handoff for runtime-bound statements
+- result shaping and encoding back to clients
+- protocol-specific ingress adapters such as PostgreSQL wire protocol
 - protocol-facing error mapping
 
 ### `brewdb-execution`
 
 Distributed execution kernel:
 
-- stage/task model
-- boundary kinds
-- task request/result contract
+- execution backend integration
+- executable fragment materialization
+- worker task request/result contract
 - worker runtime shared logic
+- exchange buffer and sink/source behavior
 - materialization contracts
 - execution-side data cache
+- Arrow as the in-memory execution format baseline
+
+Execution-format hard constraint:
+
+- inside `brewdb-execution`, operator state, task handoff, and exchange payloads stay Arrow-compatible
+- BrewDB does not define a second private execution row format alongside DataFusion
+- any row-oriented or protocol-oriented re-encoding belongs above execution, such as coordinator result shaping or `pgwire` response encoding
 
 ### `brewdb-storage`
 
 Storage semantics kernel:
 
-- table-level adapters
+- storage engine entry
+- per-table storage engines
 - scan/append/rewrite/maintenance/commit semantics
 - format truth interpretation
 - concrete format implementations such as Paimon and Iceberg
@@ -80,15 +647,19 @@ Lifecycle and control kernel:
 
 - job orchestration
 - transaction orchestration
-- commit orchestration
+- fragment scheduling
+- transaction coordination
 - lease handling
 - recovery
 - mutation orchestration
 - maintenance orchestration
+- fragment-graph to stage-template projection
+- scheduler and dispatcher
+- task payload assembly
 
 ## 2.1 Crate Responsibility Matrix
 
-To keep the seven crates from drifting into each other, each crate should be judged by four questions:
+To keep the eight crates from drifting into each other, each crate should be judged by four questions:
 
 - what truth does it own
 - what inputs it consumes
@@ -122,20 +693,21 @@ Must not own:
 
 Owns:
 
-- control-plane access facade
-- normalized table envelope
+- catalog access service
+- normalized catalog objects
 - catalog cache and route resolution
+- catalog-store persistence boundary
 
 Consumes:
 
 - `brewdb-core`
-- Lakekeeper-facing clients and control-plane integrations
+- FoundationDB client and catalog-store integrations
 
 Produces:
 
-- normalized namespace/table metadata
-- warehouse and credential route information
-- format handle lookup results
+- normalized catalog/database/table metadata
+- storage binding lookup results
+- format-routing information
 
 Must not own:
 
@@ -150,36 +722,67 @@ Owns:
 
 - SQL parsing and binding
 - statement analysis
-- intent generation
+- statement classification
+- planner handoff assembly
 - SQL-surface capability checks
 
 Consumes:
 
 - `brewdb-core`
 - `brewdb-catalog`
-- `brewdb-runtime` planning entry points
 
 Produces:
 
-- query intent
-- insert intent
-- mutation intent
-- maintenance intent
-- DDL intent
+- statement-family outputs
+- parsed statements
+- bound statements
 
 Must not own:
 
-- physical execution plans
-- adapter-native semantics
+- table-engine-native semantics
 - runtime-state persistence
+- runtime scheduling state
+
+### `brewdb-planner`
+
+Owns:
+
+- planning entry for runtime-bound statements
+- DataFusion logical optimization bridge
+- distributed planning and distributed CBO
+- fragment-local physical planning entry
+- `DistributedPlan` and fragment planning artifacts
+
+Consumes:
+
+- `brewdb-core`
+- `brewdb-catalog`
+- `brewdb-sql`
+- `brewdb-storage`
+- `brewdb-execution`
+
+Produces:
+
+- optimized logical plans
+- `DistributedPlan`
+- fragment-local execution plan artifacts
+- planner diagnostics used by runtime and result shaping
+
+Must not own:
+
+- client session truth
+- runtime-state persistence
+- worker scheduling state
+- format-native publish truth
 
 ### `brewdb-frontend`
 
 Owns:
 
-- client protocol handling
+- protocol-neutral client session handling
 - SQL session entry and statement flow
-- pgwire message translation
+- statement routing between session-local and runtime-bound paths
+- protocol adapter entry such as pgwire translation
 - result-shape encoding toward clients
 
 Consumes:
@@ -191,6 +794,7 @@ Consumes:
 Produces:
 
 - protocol-neutral request handoff into BrewDB internals
+- planner/runtime handoff for runtime-bound statements
 - protocol-specific response frames back to clients
 
 Must not own:
@@ -204,21 +808,22 @@ Must not own:
 
 Owns:
 
-- stage graph and task model
-- execution-side physical planning
+- execution backend-specific full-plan handling
+- executable fragment materialization
 - task request/result contract
 - materialization and boundary output contracts
 - executor runtime behavior
 - execution-graph boundary semantics
+- Arrow-native in-memory batch and stream contracts for execution
 
 Consumes:
 
 - `brewdb-core`
-- selective execution-facing requirements from upper layers
+- selective execution-facing requirements from runtime and storage
 
 Produces:
 
-- stage graphs
+- executable fragments
 - task payloads
 - task results
 - staged artifact references
@@ -231,12 +836,14 @@ Must not own:
 - transaction state
 - commit journaling
 - catalog mutation
+- client-facing wire result encoding
 
 ### `brewdb-storage`
 
 Owns:
 
-- table-level adapter boundary
+- storage engine boundary
+- per-table storage engine boundary
 - scan/append/rewrite/maintenance/commit semantics
 - format truth interpretation
 - reconciliation truth lookup
@@ -259,7 +866,41 @@ Must not own:
 - SQL parsing
 - runtime orchestration
 - distributed scheduling
-- Lakekeeper facade ownership
+- catalog-store backend ownership outside its own crate boundary
+
+## 2.5.1 Storage Engine Framework
+
+The storage layer should be modeled around three levels:
+
+- `StorageEngine`
+- `TableEngine`
+
+Intended chain:
+
+`planner / FragmentScheduler / TxnCoordinator -> StorageEngine -> TableEngine`
+
+Role split:
+
+- `StorageEngine`
+  - the top-level storage entry for BrewDB
+  - opens one `TableCatalogEntry` into one `TableEngine`
+  - routes by table format and storage binding
+- `TableEngine`
+  - the storage-side capability object for one resolved table
+  - owns that table's scan, append, rewrite, statistics, and publish behavior
+
+Concrete implementations:
+
+- `PaimonTableEngine`
+- `IcebergTableEngine`
+
+Framework rules:
+
+- `StorageEngine` does not own catalog truth
+- `StorageEngine` does not own transaction truth
+- callers should not branch on format directly once they hold a `TableEngine`
+- format-native metadata interpretation stays inside concrete `TableEngine` implementations
+- `brewdb-catalog` may expose `TableFormat` for routing, but must not expose format-native internal metadata models
 
 ### `brewdb-runtime`
 
@@ -268,10 +909,13 @@ Owns:
 - job lifecycle
 - transaction lifecycle
 - transaction management locking
-- commit orchestration shell
+- fragment scheduling shell
+- transaction coordination shell
 - lease and recovery framework
 - mutation and maintenance orchestration
 - scheduler policy and dispatch coordination
+- stage-template projection
+- task instance lifecycle
 
 Consumes:
 
@@ -287,6 +931,9 @@ Produces:
 - runtime-state transitions
 - commit attempts
 - recovery actions
+- stage templates
+- task instances
+- worker assignments
 
 Must not own:
 
@@ -301,7 +948,7 @@ Must not own:
 The main allowed call paths should stay narrow:
 
 1. SQL ingress path:
-   `brewdb-frontend -> brewdb-sql -> brewdb-catalog -> brewdb-runtime -> brewdb-execution / brewdb-storage`
+   `brewdbd ingress -> brewdb-frontend -> brewdb-sql -> brewdb-planner -> brewdb-runtime -> brewdb-execution / brewdb-storage`
 2. Commit path:
    `brewdb-runtime -> brewdb-catalog -> brewdb-storage`
 3. Execution path:
@@ -314,10 +961,12 @@ The main disallowed shortcuts are:
 - `brewdb-sql -> brewdb-storage`
 - `brewdb-frontend -> brewdb-storage`
 - `brewdb-frontend -> brewdb-execution`
+- `brewdb-sql -> brewdb-runtime`
 - `brewdb-execution -> brewdb-runtime`
 - `brewdb-execution -> brewdb-catalog`
 - `brewdb-storage -> brewdb-runtime`
-- upper layers depending on raw Lakekeeper response types
+- `brewdbd` top-level server code reaching into runtime or execution internals directly
+- upper layers depending on raw catalog-store record layouts or backend-specific response types
 
 ## 2.3 Crate Public Surface
 
@@ -350,10 +999,10 @@ Public API rule:
 
 Recommended public surface:
 
-- `facade`
+- `service`
 - `model`
-- `route`
-- `warehouse`
+- `path`
+- `backend`
 - `errors`
 
 Recommended internal-only details:
@@ -361,11 +1010,11 @@ Recommended internal-only details:
 - `client`
 - `cache`
 - `normalize`
-- vendor- or Lakekeeper-specific transport modules
+- backend-specific catalog-store modules
 
 Public API rule:
 
-- callers should depend on catalog-facing models and facade entry points, never on raw control-plane client types
+- callers should depend on catalog-facing models and `CatalogService` entry points, never on raw catalog-store backend types
 
 ### `brewdb-sql`
 
@@ -375,7 +1024,7 @@ Recommended public surface:
 - `bind`
 - `analyze`
 - `rewrite`
-- `intent`
+- `statement`
 - `capabilities`
 - `errors`
 
@@ -387,7 +1036,27 @@ Recommended internal-only details:
 
 Public API rule:
 
-- the most important stable outputs are intent objects, not parser internals
+- the most important stable outputs are bound statement objects and planner handoff objects, not parser internals
+
+### `brewdb-planner`
+
+Recommended public surface:
+
+- `logical`
+- `distributed`
+- `physical`
+- `diagnostics`
+- `errors`
+
+Recommended internal-only details:
+
+- DataFusion planning glue
+- local planning skeletons used only inside `DistributedPlanner`
+- planner-side statistics plumbing
+
+Public API rule:
+
+- upper layers should depend on planner outputs such as optimized logical plans and `DistributedPlan`, not on DataFusion integration glue
 
 ### `brewdb-frontend`
 
@@ -419,6 +1088,7 @@ Recommended public surface:
 - `boundaries`
 - `artifacts`
 - `errors`
+- Arrow-facing batch/stream contracts once they become explicit types
 
 Conditionally public surface:
 
@@ -435,12 +1105,20 @@ Recommended internal-only details:
 Public API rule:
 
 - upper layers may see execution contracts, but should not bind to executor implementation structure
+- when execution data crosses a task or stage runtime boundary, the baseline in-memory shape is Arrow-compatible columnar data rather than a BrewDB-private row format
+
+Exchange transport rule:
+
+- exchange logical data stays Arrow-native at the execution contract level
+- local in-process exchange should prefer direct Arrow batch or stream handoff rather than forced serialization
+- remote cross-process or cross-node exchange should use Arrow IPC stream as the default wire format
+- BrewDB may define exchange control metadata such as stage, task, partition, sequence, and end-of-stream markers, but should not define a second private data payload format alongside Arrow
 
 ### `brewdb-storage`
 
 Recommended public surface:
 
-- `adapter`
+- `engine`
 - `model`
 - `route`
 - `errors`
@@ -453,7 +1131,7 @@ Conditionally public surface:
 - `maintenance`
 - `commit`
 
-These operation modules may remain public if they define stable adapter-facing contracts. If they become implementation-heavy, they should collapse behind `adapter`.
+These operation modules may remain public if they define stable engine-facing contracts. If they become implementation-heavy, they should collapse behind `engine`.
 
 Recommended internal-only details:
 
@@ -464,19 +1142,17 @@ Recommended internal-only details:
 
 Public API rule:
 
-- callers should depend on table-adapter contracts, not on per-format implementation modules
+- callers should depend on `StorageEngine` and `TableEngine` contracts, not on per-format implementation modules
 
 ### `brewdb-runtime`
 
 Recommended public surface:
 
-- `jobs`
+- `scheduler`
 - `txns`
 - `locks`
-- `commit`
 - `recovery`
-- `leases`
-- `planning`
+- `runtime_meta`
 - `errors`
 
 Conditionally public surface:
@@ -488,7 +1164,7 @@ Conditionally public surface:
 Recommended internal-only details:
 
 - orchestration step executors
-- persistence adapters
+- persistence backends
 - retry loops
 - background housekeeping internals
 
@@ -503,7 +1179,7 @@ To prevent public API drift, the workspace should follow a strict re-export poli
 Allowed:
 
 - re-exporting small, stable domain types that improve ergonomics
-- re-exporting crate-local facade entry points
+- re-exporting crate-local service entry points
 - re-exporting intentionally stable contract modules
 
 Avoid:
@@ -531,9 +1207,9 @@ Should own the canonical type definitions for:
 - `TxnId`
 - `CommitAttemptId`
 - `ArtifactId`
-- `NamespaceId`
+- `CatalogId`
+- `DatabaseId`
 - `TableId`
-- `WarehouseId`
 - `JobState`
 - `StageState`
 - `TaskAttemptState`
@@ -551,15 +1227,20 @@ Rule:
 
 Should own:
 
-- `NamespaceEnvelope`
-- `TableEnvelope`
-- `WarehouseProfile`
-- `CatalogRoute`
-- `FormatHandle`
+- `CatalogPath`
+- `DatabasePath`
+- `TablePath`
+- `CatalogRef`
+- `DatabaseRef`
+- `TableRef`
+- `CatalogEntry`
+- `DatabaseEntry`
+- `TableCatalogEntry`
+- `TableStorageSpec`
 
 Rule:
 
-- if a type represents normalized control-plane truth or control-plane routing, it belongs in `brewdb-catalog`
+- if a type represents normalized catalog truth or stable catalog routing inputs, it belongs in `brewdb-catalog`
 
 ### `brewdb-sql`
 
@@ -567,18 +1248,32 @@ Should own:
 
 - AST types
 - bound statement types
-- SQL intent types
+- statement-family and statement-routing types
 - frontend capability diagnostics
 
 Rule:
 
 - if a type is meaningful only before orchestration handoff, it belongs in `brewdb-sql`
 
+### `brewdb-planner`
+
+Should own:
+
+- optimized logical plan outputs
+- `DistributedPlan`
+- `PlanFragment`
+- planner diagnostics
+- fragment-local physical planning artifacts
+
+Rule:
+
+- if a type is meaningful only after SQL classification and before runtime scheduling, it belongs in `brewdb-planner`
+
 ### `brewdb-execution`
 
 Should own:
 
-- `StageGraph`
+- projected `StageGraph` helpers when needed
 - `StagePlan`
 - `TaskRequest`
 - `TaskResult`
@@ -595,7 +1290,8 @@ Rule:
 
 Should own:
 
-- table adapter interfaces
+- `StorageEngine`
+- `TableEngine`
 - scan requirement types
 - append/rewrite realization types
 - commit validation request/result types
@@ -604,7 +1300,7 @@ Should own:
 
 Rule:
 
-- if a type expresses format-aware semantics or adapter contracts, it belongs in `brewdb-storage`
+- if a type expresses format-aware semantics or storage-engine contracts, it belongs in `brewdb-storage`
 
 ### `brewdb-runtime`
 
@@ -625,6 +1321,33 @@ Rule:
 ## 2.6 Runtime Metadata Boundary
 
 Runtime metadata should be modeled as a first-class framework boundary, not just a persistence detail.
+
+At the system level, BrewDB has two metadata cores:
+
+- `CatalogMeta`
+- `RuntimeMeta`
+
+They are both authoritative metadata subsystems, but they own different truths.
+
+- `CatalogMeta` owns directory-style metadata:
+  - catalog, database, and table identity
+  - schema
+  - format and storage binding
+  - DDL object truth
+- `RuntimeMeta` owns state-style metadata:
+  - job lifecycle
+  - txn lifecycle
+  - lease and ownership state
+  - execution progress
+  - commit attempts and recovery truth
+
+Phase 1 backend choice for both subsystems is FoundationDB, but they must remain separated by:
+
+- service boundary
+- store boundary
+- backend trait boundary
+- keyspace boundary
+- transaction semantic boundary
 
 The runtime store should be owned by `brewdb-runtime`, but its records should connect cleanly to the rest of the workspace.
 
@@ -659,41 +1382,226 @@ Design rules:
 - `brewdb-runtime` owns write authority for runtime truth
 - `brewdb-execution` may emit task facts, but should not own authoritative runtime transitions
 - `brewdb-storage` may return validation/publish truth, but should not persist runtime orchestration truth directly
-- `brewdb-catalog` remains outside runtime metadata ownership even when backed by the same PostgreSQL instance
+- `brewdb-catalog` remains outside runtime metadata ownership even when both logical stores use FoundationDB
+
+## 2.6.1 RuntimeMeta Service Layering
+
+`RuntimeMeta` should follow the same high-level service/store/backend split as catalog, but with state-oriented rather than directory-oriented semantics.
+
+Recommended layers:
+
+- `RuntimeMetaService`
+- `RuntimeMetaStore`
+- `RuntimeMetaBackend`
+
+Intended chain:
+
+`brewdb-runtime orchestration -> RuntimeMetaService -> RuntimeMetaStore -> RuntimeMetaBackend -> FoundationDB`
+
+Role split:
+
+- `RuntimeMetaService`
+  - owns lifecycle actions and state transitions
+  - examples:
+    - create job
+    - claim owner
+    - register stages
+    - append task attempt
+    - transition txn state
+    - record commit attempt
+    - mark execution complete
+- `RuntimeMetaStore`
+  - owns record persistence and secondary-index maintenance
+  - exposes read and write transactions over runtime records
+- `RuntimeMetaBackend`
+  - owns backend KV and transaction mechanics
+  - hides FoundationDB transaction and keyspace details from upper runtime layers
+
+Design rules:
+
+- `RuntimeMetaService` is the only authoritative writer of runtime truth
+- scheduler, dispatcher, and finalization code should not write backend records directly
+- `RuntimeMetaStore` should expose runtime-domain records, not raw backend key-value shapes
+- `RuntimeMetaBackend` should stay infrastructure-only and must not acquire orchestration semantics
+
+## 2.6.1.1 Runtime Top-Level Framework
+
+At the runtime framework level, Phase 1 should converge on three primary runtime services:
+
+- `FragmentScheduler`
+- `TxnCoordinator`
+- `RuntimeMetaService`
+
+Role split:
+
+- `FragmentScheduler`
+  - accepts a `DistributedPlan`
+  - performs graph registration
+  - projects fragments into stages and tasks
+  - drives dispatch, progress, and stage completion
+- `TxnCoordinator`
+  - owns commit-bearing operation convergence
+  - creates txn shells when needed
+  - coordinates commit attempts, publish, and terminal txn resolution
+  - owns recovery-oriented txn outcome convergence
+- `RuntimeMetaService`
+  - owns authoritative runtime truth
+  - is the only runtime metadata writer seen by scheduler and transaction coordination flows
+
+Boundary rule:
+
+- `FragmentScheduler` owns distributed execution progress up to durable execution completion
+- `TxnCoordinator` begins only when an operation requires commit-bearing convergence or recovery-oriented transaction resolution
+- pure query operations should normally terminate inside `FragmentScheduler` without entering `TxnCoordinator`
+- commit-bearing mutation, maintenance, or DDL flows may pass through both components
+
+Naming rule:
+
+- admission is a phase inside runtime entry and graph registration, not a required top-level service name
+- finalization is a phase inside transaction coordination, not a required top-level service name
+
+## 2.6.2 RuntimeMeta Integration Points
+
+`RuntimeMeta` should connect to the execution chain at four explicit phases.
+
+### Runtime entry phase
+
+Before execution begins:
+
+- allocate job identity
+- persist initial `JobRecord`
+- create txn shell when the operation is commit-bearing
+- establish ownership and initial lease state
+
+Primary owner:
+
+- `FragmentScheduler` for execution entry
+- `TxnCoordinator` when txn-bearing initialization is required
+
+### Graph registration phase
+
+After `DistributedPlan` is produced and before dispatch starts:
+
+- register stage or fragment execution records
+- persist initial execution-progress scaffolding
+- make graph-wide admission visible to recovery
+
+Primary owner:
+
+- `FragmentScheduler`
+
+### Execution-progress phase
+
+While workers execute:
+
+- record task dispatch
+- append task-attempt facts
+- mark stage completion
+- persist exchange or artifact progress summaries when required
+
+This is the first runtime-meta contact point that is truly in the hot execution path. It should therefore stay structured and incremental rather than trying to persist every executor-local detail.
+
+Primary owner:
+
+- `FragmentScheduler`
+
+### Transaction convergence phase
+
+After execution is done:
+
+- transition job state into commit/finalization paths when applicable
+- persist commit attempts
+- converge txn state
+- mark the job terminal only after finalization truth is durable
+
+Primary owner:
+
+- `TxnCoordinator`
+
+Framework rule:
+
+- `RuntimeMeta` should be touched before execution, during execution progress, and after execution, but only through `RuntimeMetaService`
+
+## 2.6.3 Shared Schema and Type System
+
+BrewDB should use one shared schema language across catalog, planning, execution, and runtime metadata references.
+
+Recommended baseline:
+
+- shared schema types live in `brewdb-core::schema`
+- schema and column typing are Arrow-aligned
+- BrewDB does not define a second independent execution type algebra beside Arrow/DataFusion
+
+Shared core objects:
+
+- `TableSchema`
+- `ColumnSchema`
+- Arrow-aligned data type representation
+
+Ownership split:
+
+- `brewdb-catalog` stores table schema truth inside `TableCatalogEntry`
+- planning layers consume shared schema objects when building DataFusion plans
+- `brewdb-execution` runs on Arrow arrays and `RecordBatch`
+- `brewdb-runtime` may reference schema summaries, but should not invent a second schema model
+
+Design rules:
+
+- catalog and planner must not drift into separate schema vocabularies
+- execution-format alignment should remain Arrow-first
+- any thin BrewDB wrapper over Arrow data types must remain one-to-one aligned rather than becoming a second type system
 
 ## 2.7 Main Cross-Crate Framework Flows
 
 The architecture should keep a few primary end-to-end flows explicit so crate boundaries can be judged against real movement, not only static responsibility lists.
 
+### Session-local statement flow
+
+1. `brewdb-frontend` accepts one SQL statement under one client session
+2. `brewdb-sql` parses and classifies the statement
+3. `brewdb-frontend` keeps session-local statements inside the session path
+4. session state or protocol-local result shaping completes without entering distributed planning or execution
+
+Framework rule:
+
+- statement routing belongs at the frontend/session boundary before runtime-bound planning starts
+
 ### Query flow
 
-1. `brewdb-sql` parses, binds, and emits query intent
-2. `brewdb-catalog` resolves table envelopes and warehouse routes
-3. `brewdb-runtime` shapes orchestration and dispatch requirements
-4. `brewdb-execution` builds stage graphs and runs tasks
-5. results return through runtime-owned job truth, without creating txn/commit state
+1. `brewdb-sql` parses, binds, classifies, and produces planner input
+2. `brewdb-planner` runs DataFusion logical optimization and builds `DistributedPlan`
+3. `brewdb-catalog` resolves `TableCatalogEntry` objects and planning-visible metadata
+4. `FragmentScheduler` accepts the operation into runtime and initializes runtime metadata
+5. graph registration becomes visible through `RuntimeMetaService`
+6. `FragmentScheduler` shapes orchestration and dispatch requirements
+7. `brewdb-execution` runs tasks and reports execution progress through runtime-owned truth
+8. results return through runtime-owned job truth, without creating txn/commit state
 
 ### Append flow
 
-1. `brewdb-sql` emits insert intent
-2. `brewdb-catalog` resolves target table envelope
+1. `brewdb-sql` parses, binds, classifies, and produces planner input for `INSERT`
+2. `brewdb-catalog` resolves the target `TableCatalogEntry`
 3. `brewdb-storage` returns append requirements
-4. `brewdb-runtime` creates job and txn shell
-5. `brewdb-execution` materializes staged append artifacts
-6. `brewdb-runtime` acquires resource lane and txn lock
-7. `brewdb-storage` validates and publishes the final append
-8. `brewdb-runtime` resolves commit truth and cleanup eligibility
+4. `brewdb-planner` produces the distributed plan and fragment-local planning artifacts
+5. `FragmentScheduler` and `TxnCoordinator` create the job and txn shell through `RuntimeMetaService`
+6. execution truth is registered before dispatch
+7. `brewdb-execution` materializes staged append artifacts
+8. `TxnCoordinator` acquires resource lane and txn lock
+9. `brewdb-storage` validates and publishes the final append
+10. `TxnCoordinator` resolves commit truth and cleanup eligibility
 
 ### Rewrite mutation flow
 
-1. `brewdb-sql` emits rewrite mutation intent
-2. `brewdb-catalog` resolves target envelope
+1. `brewdb-sql` parses, binds, classifies, and produces planner input for rewrite mutation
+2. `brewdb-catalog` resolves the target `TableCatalogEntry`
 3. `brewdb-storage` returns rewrite realization requirements
-4. `brewdb-runtime` shapes job and critical-section timing
-5. `brewdb-execution` scans, matches, and materializes staged mutation artifacts
-6. `brewdb-runtime` enters mutation lane and txn finalization
-7. `brewdb-storage` validates and publishes format-native mutation results
-8. `brewdb-runtime` resolves txn and artifact lifecycle truth
+4. `brewdb-planner` produces the distributed plan and fragment-local planning artifacts
+5. `FragmentScheduler` and `TxnCoordinator` establish the job, txn shell, and critical-section timing through `RuntimeMetaService`
+6. execution truth is registered before dispatch
+7. `brewdb-execution` scans, matches, and materializes staged mutation artifacts
+8. `TxnCoordinator` enters the mutation lane, drives commit attempts, and coordinates publish
+9. `brewdb-storage` validates and publishes format-native mutation results
+10. `TxnCoordinator` resolves txn and artifact lifecycle truth
 
 ### Recovery flow
 
@@ -886,7 +1794,8 @@ Recommended dependency direction:
 - `brewdb-execution -> brewdb-core`
 - `brewdb-storage -> brewdb-core + brewdb-catalog + selective brewdb-execution contracts`
 - `brewdb-runtime -> brewdb-core + brewdb-catalog + brewdb-execution + brewdb-storage`
-- `brewdb-sql -> brewdb-core + brewdb-catalog + brewdb-runtime`
+- `brewdb-sql -> brewdb-core + brewdb-catalog`
+- `brewdb-planner -> brewdb-core + brewdb-catalog + brewdb-sql + brewdb-storage + brewdb-execution`
 
 Key rules:
 
@@ -909,14 +1818,15 @@ Holds:
 - frontend semantic rewrites
 - lightweight frontend optimization
 
-### `brewdb-runtime::planning`
+### `brewdb-planner`
 
 Holds:
 
-- intent-to-execution orchestration planning
-- lane timing and handoff planning
-- mutation/maintenance job shaping
-- bundle and commit handoff planning
+- planning entry for runtime-bound statements
+- DataFusion logical optimization bridge
+- distributed planning and distributed CBO
+- fragment-local physical planning bridge
+- planner diagnostics and distributed-plan assembly
 
 The coordinator-side optimizer selection baseline for this layer is defined in `docs/coordinator-cbo-optimizer-selection.md`.
 
@@ -973,12 +1883,11 @@ Recommended modules:
 
 Recommended modules:
 
-- `facade`
-- `client`
+- `service`
+- `path`
+- `backend`
 - `cache`
 - `normalize`
-- `route`
-- `warehouse`
 - `model`
 
 ### `brewdb-sql`
@@ -990,8 +1899,19 @@ Recommended modules:
 - `bind`
 - `analyze`
 - `rewrite`
-- `intent`
+- `statement`
+- `handoff`
 - `capabilities`
+- `errors`
+
+### `brewdb-planner`
+
+Recommended modules:
+
+- `logical`
+- `distributed`
+- `physical`
+- `diagnostics`
 - `errors`
 
 ### `brewdb-execution`
@@ -1011,15 +1931,14 @@ Recommended modules:
 
 Recommended modules:
 
-- `adapter`
+- `engine`
 - `scan`
 - `append`
 - `rewrite`
 - `maintenance`
 - `commit`
-- `route`
 - `model`
-- `formats`
+- `table_engine`
 
 ### `brewdb-runtime`
 
@@ -1028,13 +1947,12 @@ Recommended modules:
 - `jobs`
 - `txns`
 - `locks`
-- `commit`
 - `recovery`
 - `leases`
 - `mutation`
 - `maintenance`
-- `planning`
-- `runtime`
+- `scheduler`
+- `runtime_meta`
 
 ## 6. Binary Assembly
 
@@ -1054,6 +1972,7 @@ Recommended top-level layout:
 - `crates/brewdb-core`
 - `crates/brewdb-catalog`
 - `crates/brewdb-sql`
+- `crates/brewdb-planner`
 - `crates/brewdb-execution`
 - `crates/brewdb-storage`
 - `crates/brewdb-runtime`
@@ -1086,6 +2005,7 @@ BrewDB/
 │   ├── brewdb-core/
 │   ├── brewdb-catalog/
 │   ├── brewdb-sql/
+│   ├── brewdb-planner/
 │   ├── brewdb-execution/
 │   ├── brewdb-storage/
 │   └── brewdb-runtime/
@@ -1160,12 +2080,12 @@ Rule:
 ```text
 src/
 ├── lib.rs
-├── facade.rs
+├── service.rs
 ├── model.rs
-├── route.rs
-├── warehouse.rs
+├── path.rs
+├── backend.rs
 ├── errors.rs
-├── client/
+├── store/
 ├── cache/
 └── normalize/
 ```
@@ -1177,19 +2097,20 @@ Rule:
 Suggested catalog substructure responsibilities:
 
 ```text
-facade.rs      -> resolve table / route / normalized metadata entry
-route.rs       -> format and adapter dispatch lookup
-warehouse.rs   -> warehouse profile resolution
-client/        -> control-plane client boundary
+service.rs     -> resolve catalog / database / table objects
+path.rs        -> catalog.database.table naming and object-ref helpers
+backend.rs     -> catalog backend and store-facing contracts
+store/         -> FoundationDB catalog-store access boundary
 cache/         -> normalized metadata cache boundary
 normalize/     -> normalization boundary into BrewDB models
 ```
 
-Catalog naming and routing should stay split:
+Catalog naming should stay unified:
 
 - SQL-facing logical identity uses `catalog.database.table`
-- Lakekeeper/control-plane routing uses `warehouse.namespace.table`
-- `brewdb-catalog` owns the normalized mapping between those two views
+- `brewdb-catalog` should expose `TablePath` as the canonical table identity
+- `brewdb-catalog` should model stable object identity separately through UUID-backed refs
+- storage-binding details should stay inside table catalog entries rather than introducing a second public naming hierarchy
 
 ### `crates/brewdb-sql`
 
@@ -1211,6 +2132,22 @@ src/
 Rule:
 
 - parser internals should stay behind `parse/`; upper layers should mostly see AST, bound forms, and intent outputs
+
+### `crates/brewdb-planner`
+
+```text
+src/
+├── lib.rs
+├── logical/
+├── distributed/
+├── physical/
+├── diagnostics.rs
+└── errors.rs
+```
+
+Rule:
+
+- planning glue to DataFusion should stay inside this crate; upper layers should mostly see optimized logical plans, `DistributedPlan`, and fragment-local planning artifacts
 
 ### `crates/brewdb-frontend`
 
@@ -1276,9 +2213,8 @@ protocol/
 ```text
 src/
 ├── lib.rs
-├── adapter.rs
+├── engine.rs
 ├── model.rs
-├── route.rs
 ├── errors.rs
 ├── scan/
 ├── append/
@@ -1286,14 +2222,13 @@ src/
 ├── maintenance/
 ├── commit/
 ├── statistics/
-└── formats/
-    ├── paimon/
-    └── iceberg/
+├── paimon/
+└── iceberg/
 ```
 
 Rule:
 
-- format-neutral contracts stay at top level; format-specific implementations stay under `formats/`
+- format-neutral contracts stay at top level; concrete table-engine implementations stay in per-format modules
 
 ### `crates/brewdb-runtime`
 
@@ -1572,10 +2507,10 @@ Avoid:
 
 Recommended naming bias:
 
-- nouns for domain types such as `JobRecord`, `TableEnvelope`, `TaskResult`
-- verbs or verb phrases for operations such as `validate_commit`, `resolve_route`, `build_stage_graph`
+- nouns for domain types such as `JobRecord`, `TableCatalogEntry`, `TaskResult`
+- verbs or verb phrases for operations such as `validate_commit`, `resolve_table`, `build_distributed_plan`
 - plural module names for grouped domains such as `jobs`, `txns`, `leases`
-- singular module names for narrow contract surfaces such as `adapter`, `route`, `model`
+- singular module names for narrow contract surfaces such as `engine`, `path`, `model`
 
 Avoid:
 
@@ -1596,9 +2531,9 @@ Recommended internal layering shape:
 
 Examples:
 
-- `brewdb-runtime`: records and state types -> orchestration services -> runtime-store adapters
-- `brewdb-catalog`: normalized models -> facade -> cache/client integrations
-- `brewdb-storage`: adapter contracts -> operation realizations -> format implementations
+- `brewdb-runtime`: records and state types -> orchestration services -> runtime-meta backend integrations
+- `brewdb-catalog`: normalized models -> `CatalogService` -> cache/store integrations
+- `brewdb-storage`: engine contracts -> operation realizations -> concrete `TableEngine` implementations
 
 Rule:
 
@@ -1617,7 +2552,7 @@ Recommended policy:
 
 Rules:
 
-- `brewdb-catalog` should not leak raw Lakekeeper client errors as its stable public error type
+- `brewdb-catalog` should not leak raw FoundationDB client errors or record-layout details as its stable public error type
 - `brewdb-storage` should not leak format-vendor error types as its stable public contract
 - `brewdb-runtime` should translate storage/catalog/execution failures into runtime-relevant orchestration errors
 - binaries may further wrap errors for CLI/server reporting, but should not become the canonical home of shared error semantics
@@ -1626,10 +2561,10 @@ Rules:
 
 Dependency direction for the first external integrations:
 
-- `brewdb-catalog` may depend on `reqwest`/`url` to talk to Lakekeeper HTTP APIs, but must still normalize responses before exposing them upward
-- `brewdb-storage` may depend directly on `paimon` for adapter-native table/catalog access
-- BrewDB should bind to the locally customized sibling-repo Lakekeeper source, because the community/public Lakekeeper line does not provide the required Paimon catalog support
-- within `brewdb-catalog::client`, `local` and `rest` are current implementation forms; `rpc` is a reserved future slot, not the current default
+- `brewdb-catalog` may depend on FoundationDB client libraries for catalog persistence, but must still normalize stored records before exposing them upward
+- `brewdb-storage` may depend directly on `paimon` for table-engine-native table/catalog access
+- `brewdb-catalog` is not architecturally coupled to an external catalog service
+- within `brewdb-catalog::store`, the primary direction is FoundationDB-backed persistence rather than remote REST mediation
 
 ## 7.16 Serialization Boundary Policy
 
@@ -1655,7 +2590,7 @@ Before detailed Rust traits are frozen, Phase 1 should preserve these interface 
 
 Must define stable shared types for:
 
-- ids for job, stage, task, txn, artifact, table, warehouse
+- ids for job, stage, task, txn, artifact, catalog, database, and table objects
 - lifecycle enums
 - error families
 - basic capability descriptors
@@ -1663,26 +2598,25 @@ Must define stable shared types for:
 
 ### `brewdb-catalog`
 
-Should expose a facade-oriented API for:
+Should expose a `CatalogService`-oriented API for:
 
-- namespace and table resolution
-- table envelope loading
-- warehouse/storage profile lookup
-- catalog handle routing
+- catalog/database/table resolution
+- `TableCatalogEntry` loading
+- table storage binding lookup
+- stable table-format routing inputs
 
-It should hide Lakekeeper-specific client details from upper layers.
+It should hide catalog-store-specific backend details from upper layers.
 
 ### `brewdb-sql`
 
-Should emit intent-level outputs rather than direct execution plans.
+Should emit statement and planner-handoff outputs rather than direct execution plans.
 
-Useful intent families:
+Useful output families:
 
-- query intent
-- insert intent
-- mutation intent
-- maintenance intent
-- DDL intent
+- parsed statement
+- bound statement
+- statement family
+- planner handoff for runtime-bound statements
 
 ### `brewdb-execution`
 
@@ -1694,10 +2628,11 @@ Useful contracts include:
 - task request / task result
 - stage boundary descriptors
 - artifact result descriptors
+- Arrow-native batch / stream result contracts for execution-time data movement
 
 ### `brewdb-storage`
 
-Should expose adapter-facing capabilities for:
+Should expose engine-facing capabilities for:
 
 - scan planning inputs
 - append/rewrite materialization contracts
@@ -1769,15 +2704,16 @@ Prove that one SQL query can enter BrewDB, become a distributed execution graph,
 ### In scope
 
 1. `brewdb` or `brewdbd` accepts one query request
-2. `brewdb-sql` produces a query intent
-3. `brewdb-runtime` admits the request and allocates runtime identity
-4. `brewdb-catalog` resolves table and warehouse metadata needed for planning
-5. `brewdb-storage` provides scan-facing planning inputs and statistics shells
-6. `brewdb-execution` turns the DataFusion physical plan into a `StageGraph`
-7. the scheduler admits the full graph at once and dispatches runnable tasks by dependency readiness
-8. workers execute plan slices and cross exchange boundaries
-9. worker task results return through the execution protocol
-10. the coordinator aggregates final query outputs and returns a result stream or result-batch shell
+2. `brewdb-sql` parses, binds, and classifies the statement
+3. `brewdb-catalog` resolves `TableCatalogEntry` objects needed for planning and execution
+4. `brewdb-planner` builds the optimized logical plan and `DistributedPlan`
+5. `brewdb-runtime` admits the request and allocates runtime identity
+6. `brewdb-storage` provides scan-facing planning inputs and statistics shells
+7. `brewdb-execution` turns each fragment-local logical plan into a DataFusion physical execution tree
+8. the scheduler admits the full graph at once and dispatches runnable tasks by dependency readiness
+9. workers execute plan slices and cross exchange boundaries
+10. worker task results return through the execution protocol
+11. the coordinator aggregates final query outputs and returns a result stream or result-batch shell
 
 ### Out of scope
 
@@ -1792,12 +2728,13 @@ Prove that one SQL query can enter BrewDB, become a distributed execution graph,
 
 1. request parsing and statement entry: `brewdb`, `brewdbd`, `brewdb-sql`
 2. request admission, job identity, correlation context: `brewdb-runtime`
-3. table and warehouse resolution: `brewdb-catalog`
+3. catalog/database/table resolution: `brewdb-catalog`
 4. format-aware scan requirements: `brewdb-storage`
-5. physical-to-stage planning and task contracts: `brewdb-execution`
-6. graph admission, dependency-driven dispatch, worker assignment: `brewdb-runtime`
-7. operator execution and exchange behavior: `brewdb-execution`
-8. result shaping and return path: `brewdb-execution` plus `brewdb-runtime`
+5. distributed planning and fragment shaping: `brewdb-planner`
+6. fragment-local physical planning and task contracts: `brewdb-execution`
+7. graph admission, dependency-driven dispatch, worker assignment: `brewdb-runtime`
+8. operator execution and exchange behavior: `brewdb-execution`
+9. result shaping and return path: `brewdb-execution` plus `brewdb-runtime`
 
 ### Why query first
 
@@ -1812,7 +2749,7 @@ Phase 1 query skeleton is complete when one query can:
 
 - enter through the server or CLI boundary
 - produce a runtime job context
-- build a full `StageGraph`
+- build a full `DistributedPlan` and its projected stage view
 - dispatch tasks to at least one worker path
 - return a final query result shell with correlated diagnostics
 
@@ -1823,8 +2760,8 @@ Phase 1 should test by closed loop and by boundary, not only by crate.
 Recommended test emphasis:
 
 - `brewdb-core`: pure unit tests for ids, state transitions, and invariants
-- `brewdb-catalog`: facade tests with mocked Lakekeeper responses
-- `brewdb-storage`: adapter contract tests per format
+- `brewdb-catalog`: `CatalogService` tests with mocked catalog-store reads and writes
+- `brewdb-storage`: `TableEngine` contract tests per format
 - `brewdb-execution`: task contract, boundary, and artifact result tests
 - `brewdb-runtime`: job lifecycle, txn state, commit retry, and recovery tests
 - workspace integration tests: query skeleton, dispatch-path failure, and result aggregation correctness
@@ -1837,7 +2774,7 @@ Phase 1 should avoid:
 
 - separate crates for every submodule too early
 - format-specific orchestration logic leaking into `brewdb-runtime`
-- direct SQL-layer dependence on concrete Lakekeeper or format clients
+- direct SQL-layer dependence on concrete catalog-store or format clients
 - worker binaries owning commit or catalog mutation logic
 - premature RPC schema freeze before task/result contracts stabilize
 
@@ -1865,27 +2802,29 @@ The following development decisions should be treated as the default Phase 1 bas
 
 ### Metadata split
 
-- Lakekeeper-backed control-plane metadata remains outside BrewDB runtime ownership
+- BrewDB-owned catalog metadata remains outside BrewDB runtime ownership
 - BrewDB runtime metadata is a separate logical store
-- format-native metadata remains adapter-owned truth
+- both logical stores use FoundationDB in Phase 1, but remain separate in role and keyspace
+- format-native metadata remains table-engine-owned truth
 - object storage remains artifact and data truth
 
 ### Planning split
 
-- SQL intent planning in `brewdb-sql`
+- SQL parsing, binding, and statement routing in `brewdb-sql`
+- distributed planning and distributed CBO in `brewdb-planner`
 - orchestration planning in `brewdb-runtime`
-- physical and stage planning in `brewdb-execution`
+- fragment-local physical planning in `brewdb-execution`
 
 ### Commit split
 
 - workers may produce artifact-bearing outputs
 - only the coordinator-side kernel may advance commit state
-- only storage adapters may interpret and publish format truth
+- only storage table engines may interpret and publish format truth
 
-### Adapter split
+### Table-engine split
 
-- one table-level adapter per table format route
-- adapters may hide sub-components internally
+- one `TableEngine` per resolved table format
+- table engines may hide sub-components internally
 - upper layers must not bind directly to format-specific metadata models
 
 ## 14. Architecture Freeze Checklist
@@ -1894,8 +2833,8 @@ Before implementation starts, the development architecture should be considered 
 
 1. Are crate boundaries final enough to prevent runtime-role code sprawl?
 2. Is the ownership split between `brewdb-runtime`, `brewdb-execution`, and `brewdb-storage` clear enough that commit, task execution, and format semantics will not mix?
-3. Is `CatalogFacade` the only control-plane entry used by planning and commit flows?
-4. Is the runtime metadata store explicitly separate in role from Lakekeeper?
+3. Is `CatalogService` the only catalog entry used by planning and commit flows?
+4. Is the runtime metadata store explicitly separate in role from the built-in catalog even though both use FoundationDB?
 5. Is the first walking skeleton agreed to be query-first rather than append-first?
 6. Are worker outputs defined as non-authoritative staged artifacts rather than direct table-visible commits?
 7. Are mutation and maintenance paths staying inside the same lifecycle framework instead of side tooling?
@@ -1983,29 +2922,29 @@ What this decision rules out:
 - an in-process shortcut that bypasses task contracts
 - folding execution runtime logic directly into orchestration modules
 
-### D. Initial adapter target
+### D. Initial table-engine target
 
 Recommended default:
 
-- make Paimon the first full adapter target
-- keep Iceberg as a planned second adapter surface
+- make Paimon the first full table-engine target
+- keep Iceberg as a planned second table-engine surface
 
-That aligns with the existing Lakekeeper-native Paimon direction and avoids pretending both formats will mature at the same speed on day one.
+That aligns with the current BrewDB-owned catalog plus Paimon-first table-engine direction and avoids pretending both formats will mature at the same speed on day one.
 
 Decision recommendation:
 
-- treat Paimon as the first complete adapter target and Iceberg as interface-following Phase 1 scope
+- treat Paimon as the first complete table-engine target and Iceberg as interface-following Phase 1 scope
 
 Why this should be the default:
 
-- current catalog direction already favors Lakekeeper-native Paimon support
-- one serious adapter is better for pressure-testing mutation, maintenance, and reconciliation boundaries than two partial adapters
-- Iceberg can still shape generic adapter contracts without forcing equal implementation depth
+- current catalog direction already favors BrewDB-owned catalog routing with Paimon as the first deep table-engine target
+- one serious table-engine target is better for pressure-testing mutation, maintenance, and reconciliation boundaries than two partial targets
+- Iceberg can still shape generic table-engine contracts without forcing equal implementation depth
 
 What this decision rules out:
 
 - false symmetry between Paimon and Iceberg in the first implementation wave
-- delaying architecture validation until two adapters advance in parallel
+- delaying architecture validation until two table engines advance in parallel
 
 ## 16. Freeze Draft
 
@@ -2023,7 +2962,7 @@ They also fit the existing architecture constraints:
 - capability-oriented crates stay primary
 - transport remains secondary to execution and commit semantics
 - distributed behavior is preserved even during local bring-up
-- adapter abstractions are validated against one deep target before being generalized too aggressively
+- table-engine abstractions are validated against one deep target before being generalized too aggressively
 
 ## 17. Approval Matrix
 
@@ -2047,11 +2986,11 @@ Use this matrix when you want to explicitly freeze the development architecture 
 - reject if you want distributed-only bring-up
 - effect of rejection: slower iteration and higher infrastructure cost early
 
-### Decision 4: initial adapter target
+### Decision 4: initial table-engine target
 
 - recommended: approve Paimon-first
 - reject if you want equal Paimon/Iceberg depth from the start
-- effect of rejection: slower adapter-kernel validation and wider early scope
+- effect of rejection: slower table-engine boundary validation and wider early scope
 
 ## 18. Implementation Gate
 
