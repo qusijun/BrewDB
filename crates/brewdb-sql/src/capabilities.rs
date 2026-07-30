@@ -1,1 +1,0 @@
-//! SQL-surface capability checks.

@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-brewdb-core = { path = "../brewdb-core" }
+brewdb-common = { path = "../brewdb-common" }
 brewdb-catalog = { path = "../brewdb-catalog" }
 brewdb-execution = { path = "../brewdb-execution" }
 brewdb-storage = { path = "../brewdb-storage" }

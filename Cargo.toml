@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/brewdb-core",
+    "crates/brewdb-common",
     "crates/brewdb-catalog",
     "crates/brewdb-frontend",
     "crates/brewdb-sql",
@@ -20,6 +20,7 @@ repository = "https://github.com/qusijun/BrewDB"
 rust-version = "1.88"
 
 [workspace.dependencies]
+arrow-schema = "58.4.0"
 paimon = "0.2.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["http2", "json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }

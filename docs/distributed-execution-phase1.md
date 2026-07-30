@@ -23,12 +23,35 @@ Phase 1 does not support:
 
 The execution framework is responsible for:
 
-- slicing physical plans into stages
+- receiving a BrewDB distributed plan from the planner stack
+- projecting distributed fragments into runtime stages
 - slicing stages into tasks
 - worker assignment and execution
 - exchange and shuffle
 - materialization of staged outputs
 - delivery of boundary results back to the control plane
+
+Planner boundary for Phase 1:
+
+- DataFusion parser, binder, and logical optimizer run before distributed planning
+- BrewDB `DistributedPlanner` consumes the optimized logical plan, owns distributed CBO, and produces the distributed plan
+- `FragmentPhysicalPlanner` then builds fragment-local DataFusion physical execution plans
+- runtime and execution do not own SQL parsing or global logical optimization
+
+Execution-time in-memory data format baseline:
+
+- worker-local operator execution should use Arrow-compatible columnar memory
+- DataFusion-aligned execution slices should exchange Arrow-native batch or stream shapes
+- BrewDB should not introduce a separate private row format inside `brewdb-execution`
+- client-facing protocols such as pgwire may re-encode results, but that happens after execution-layer result shaping
+- local in-process exchange should prefer direct Arrow batch or stream handoff
+- remote cross-process or cross-node exchange should use Arrow IPC stream as the default payload encoding
+
+This is a hard boundary rather than an implementation preference:
+
+- if a runtime contract sits below coordinator result shaping, it should remain Arrow-oriented
+- if a row/cell structure appears in frontend or protocol code, it is a post-execution presentation shell rather than an execution contract
+- BrewDB may add its own exchange envelope metadata, but should not add a second private execution data format next to Arrow
 
 It is not responsible for:
 
@@ -163,12 +186,14 @@ This lets BrewDB run like an MPP engine today without blocking a later BSP-like 
 
 All Phase 1 job types follow the same high-level shape:
 
-1. build an execution plan
-2. slice it into stages
-3. run tasks on workers
-4. cross exchange/materialization/selection boundaries
-5. aggregate stage outputs
-6. hand the resulting artifacts or boundary results back to the control plane
+1. optimize a global logical plan
+2. build a distributed plan
+3. build fragment-local physical execution plans
+4. project fragments into stages
+5. run tasks on workers
+6. cross exchange/materialization/selection boundaries
+7. aggregate stage outputs
+8. hand the resulting artifacts or boundary results back to the control plane
 
 Different job families have different terminal outputs:
 

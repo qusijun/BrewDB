@@ -1,5 +1,5 @@
 [package]
-name = "brewdb-core"
+name = "brewdb-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

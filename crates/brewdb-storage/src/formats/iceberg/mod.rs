@@ -1,1 +1,0 @@
-//! Iceberg adapter implementation shell.

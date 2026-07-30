@@ -1,216 +1,140 @@
 # BrewDB
 
-BrewDB is a distributed lakehouse database engine for multiple table formats.
+BrewDB is a distributed MPP lakehouse database engine built around a BrewDB-owned catalog, DataFusion-based planning and execution, and format-aware storage engines such as Paimon and Iceberg.
 
-It is not positioned as a query-only SQL layer. The target shape is closer to a ClickHouse-style data engine built on top of external table formats such as Paimon and Iceberg, with first-class support for:
+The current repository state is intentionally architecture-first:
 
-- query
-- insert / insert select
-- mutation
-- compaction / rewrite
-- analyze / cleanup
-- background maintenance
+- design documents are the source of truth
+- code has been reset to skeleton layout
+- implementation will be rebuilt from the documented crate boundaries
 
-## Positioning
+## Top-Level Shape
 
-BrewDB is organized around three planes:
+The main product entrypoints are:
 
-- `Control Plane`: Lakekeeper plus BrewDB extensions for catalog, auth, warehouse, and governance
-- `Execution Plane`: DataFusion plus BrewDB distributed runtime for query, mutation, and maintenance execution
-- `Storage Semantics Plane`: format-specific adapters such as Paimon and Iceberg for snapshot, commit, conflict detection, and maintenance rules
+- `brewdb`: SQL client
+- `brewdbd`: server process host
 
-The system goal is unified execution and lifecycle orchestration, not forced unification of format-native transaction semantics.
+The main query path is:
 
-## Architecture Summary
+`brewdb -> brewdbd -> brewdb-frontend -> brewdb-sql -> brewdb-planner -> brewdb-runtime -> brewdb-execution`
 
-### Complete Architecture
+## Architecture Diagram
 
 ```text
-+-----------------------------------------------------------------------------------+
-| Clients / Interfaces                                                              |
-| SQL / HTTP API / admin operations                                                 |
-+------------------------------------------+----------------------------------------+
-                                           |
-                                           v
-+-----------------------------------------------------------------------------------+
-| BrewDB Coordinator                                                                |
-| - SQL frontend                                                                    |
-| - query / mutation / maintenance planner                                          |
-| - distributed scheduler                                                           |
-| - transaction and commit coordinator                                              |
-| - recovery manager                                                                |
-+---------------------------+--------------------------+----------------------------+
-                            |                          |
-                            | catalog / auth / creds   | runtime state / recovery
-                            v                          v
-        +--------------------------------+   +--------------------------------------+
-        | Lakekeeper + BrewDB extensions |   | BrewDB Runtime Store                 |
-        | - namespace / table identity   |   | - jobs / stages / task attempts      |
-        | - ACL / governance             |   | - txn intents / commit journal       |
-        | - warehouse / credentials      |   | - staged artifact manifests          |
-        | - native Paimon catalog        |   | - recovery checkpoints               |
-        +----------------+---------------+   +------------------+-------------------+
-                         |                                      |
-                         v                                      v
-              +------------------------+             +------------------------+
-              | PostgreSQL             |             | PostgreSQL             |
-              | control-plane store    |             | runtime metadata store |
-              +------------------------+             +------------------------+
-                                          
-                                          
-+-----------------------------------------------------------------------------------+
-| Distributed Execution Plane                                                       |
-| DataFusion + BrewDB runtime                                                       |
-| - stage/task execution                                                            |
-| - exchange / shuffle                                                              |
-| - query / insert / mutation compute / compaction                                  |
-+-----------------------------+-------------------------------+---------------------+
-                              |                               |
-                              v                               v
-                   +--------------------+          +--------------------+
-                   | Worker             |          | Worker             |
-                   | - fragment exec    |          | - fragment exec    |
-                   | - local spill      |          | - local spill      |
-                   | - staged outputs   |          | - staged outputs   |
-                   +---------+----------+          +----------+---------+
-                             \                                /
-                              \                              /
-                               +----------------------------+
-                               | Object Storage             |
-                               | - table data               |
-                               | - snapshots / manifests    |
-                               | - staged write artifacts   |
-                               +-------------+--------------+
-                                             |
-                                             v
-                               +----------------------------+
-                               | Format Semantics Layer     |
-                               | - Paimon adapter           |
-                               | - Iceberg adapter          |
-                               | - future adapters          |
-                               +----------------------------+
++-----------+      +---------+      +------------------+      +------------+
+|  brewdb   | ---> | brewdbd | ---> | brewdb-frontend  | ---> | brewdb-sql |
++-----------+      +---------+      +------------------+      +------------+
+                                                                  |
+                                                                  v
+                                                           +---------------+
+                                                           | brewdb-planner|
+                                                           +---------------+
+                                                                  |
+                                                                  v
+                   +------------------+                   +---------------+                   +------------------+
+                   |  brewdb-catalog  | <---------------  | brewdb-runtime| ---------------> | brewdb-execution |
+                   +------------------+                   +---------------+                   +------------------+
+                           |                                      |                                      |
+                           v                                      v                                      v
+                   +------------------+                   +------------------+                   +------------------+
+                   | CatalogMeta/FDB  |                   | RuntimeMeta/FDB  |                   | Arrow/DataFusion |
+                   +------------------+                   +------------------+                   +------------------+
+                           |                                                                             |
+                           +-----------------------------------+-----------------------------------------+
+                                                               |
+                                                               v
+                                                       +----------------+
+                                                       | brewdb-storage |
+                                                       +----------------+
+                                                               |
+                                                               v
+                                         +---------------------------------------------+
+                                         | TableEngine implementations                 |
+                                         | - PaimonTableEngine                        |
+                                         | - IcebergTableEngine                       |
+                                         +---------------------------------------------+
 ```
 
-### Control Plane
+Read path:
 
-Lakekeeper is the control-plane foundation. BrewDB extends it instead of introducing a separate catalog stack for each format.
+`brewdb -> brewdbd -> frontend -> sql -> planner -> runtime -> execution`
 
-Lakekeeper is expected to own:
+Metadata and storage side paths:
 
-- namespace, database, and table identity
-- authn / authz
-- warehouse and storage credential vending
-- governance and audit
-- routing to native catalog modules
+- `sql / planner / runtime -> brewdb-catalog`
+- `runtime / execution -> brewdb-storage`
+- `runtime -> RuntimeMeta`
 
-For Paimon, the intended direction is native support in Lakekeeper rather than generic-table-only registration.
+## Crate Layout
 
-The current metadata backend choice for the control plane is `PostgreSQL`.
+Phase 1 is organized around capability-oriented crates rather than coordinator/worker repository splits.
 
-### Execution Plane
+- `brewdb-common`
+  Shared common infrastructure and foundational components. This crate replaces the old `brewdb-core` role and is now intended to hold reusable low-level building blocks rather than a large domain-kernel grab bag.
+- `brewdb-catalog`
+  BrewDB-owned catalog metadata kernel. Owns the `catalog.database.table` hierarchy, `Path / Ref / Entry` model, `CatalogService`, and the `CatalogStore / CatalogStoreBackend` split.
+- `brewdb-frontend`
+  Session ingress and client-facing protocol boundary.
+- `brewdb-sql`
+  SQL parsing, binding, statement routing, and `BoundStatement` handoff.
+- `brewdb-planner`
+  Distributed planning layer. Sits between SQL binding and runtime scheduling.
+- `brewdb-runtime`
+  Fragment scheduling, transaction coordination, and runtime metadata integration.
+- `brewdb-execution`
+  DataFusion-aligned fragment execution and exchange runtime. Arrow is the in-memory execution baseline.
+- `brewdb-storage`
+  Storage semantics kernel with `StorageEngine / TableEngine` boundaries.
 
-DataFusion is treated as the unified execution substrate, not only as a query engine.
+## Core Architecture Decisions
 
-The execution plane should eventually cover:
+- BrewDB owns its catalog directly; it does not depend on Lakekeeper as an architectural prerequisite.
+- Catalog naming is unified as `catalog.database.table`.
+- Catalog metadata and runtime metadata are separate logical subsystems, even if both use FoundationDB in Phase 1.
+- DataFusion is reused for:
+  - SQL parsing/binding bridge
+  - logical optimization
+  - fragment-local physical planning
+  - fragment-local physical optimization
+- BrewDB owns:
+  - distributed planning
+  - distributed CBO
+  - distributed runtime scheduling
+  - transaction and recovery coordination
+- Runtime consumes `DistributedPlan`, not raw SQL statements.
+- Execution data stays Arrow-compatible. BrewDB does not define a second private row format.
 
-- distributed query execution
-- insert and insert-select execution
-- mutation compute paths for delete / update / merge
-- compaction and rewrite jobs
-- analyze and cleanup jobs
+## Current Repository State
 
-The current metadata backend choice for BrewDB runtime state is also `PostgreSQL`, kept logically separate from the control-plane store even if the first deployment shares one PostgreSQL instance.
+The repository currently keeps:
 
-### Storage Semantics Plane
+- architecture and rollout docs under `docs/`
+- workspace and crate manifests
+- crate and binary directory skeletons
 
-Format adapters remain responsible for format-native truth:
+The repository intentionally does not currently keep the previous implementation code. The codebase is being rebuilt from the architecture baseline rather than incrementally patching the old scaffold.
 
-- snapshot lineage
-- metadata layout
-- commit protocol
-- optimistic conflict detection
-- row-level mutation strategy
-- maintenance correctness constraints
+## Important Docs
 
-## Distributed Shape
-
-BrewDB is intended to support distributed deployment from the start.
-
-The topology is:
-
-- a central coordinator for planning, scheduling, commit orchestration, and recovery
-- multiple workers for DataFusion fragment execution and staged artifact generation
-- object storage for table data and staged outputs
-- Lakekeeper as the control-plane base
-- PostgreSQL for Lakekeeper control-plane metadata
-- a dedicated PostgreSQL-backed BrewDB runtime metadata store for jobs, transaction intents, and recovery state
-
-This is a shared-storage distributed architecture with ClickHouse-style lifecycle ambitions, not a query-only coordinator model.
-
-## Capability Boundaries
-
-What BrewDB should unify:
-
-- SQL surface
-- job and task orchestration
-- distributed execution
-- lifecycle operations
-- recovery skeleton
-- observability
-
-What BrewDB should not force into one abstraction:
-
-- table-format metadata layout
-- snapshot structure
-- commit semantics
-- conflict detection rules
-- row-level change representation
-
-## Metadata Ownership
-
-Metadata is split across four domains:
-
-1. `Lakekeeper`
-   - control-plane and business metadata
-2. `Format-native metadata`
-   - Paimon / Iceberg catalog and format truth
-3. `BrewDB runtime store`
-   - jobs, task attempts, transaction intents, commit journal, recovery state
-4. `Object storage`
-   - data files, metadata objects, staged artifacts
-
-Current storage decision:
-
-- `Lakekeeper metadata store`: PostgreSQL
-- `BrewDB runtime metadata store`: PostgreSQL
-- first deployment may share one PostgreSQL instance, but with separate logical schemas or databases
-
-This separation is a core architecture rule.
-
-## Near-Term Scope
-
-The current architecture direction favors:
-
-- coordinator / worker separation from day one
-- Lakekeeper-native Paimon support
-- DataFusion as shared execution substrate
-- mutation and maintenance as built-in system abilities
-- centralized final commit with worker-generated staged outputs
-
-Not first-priority:
-
-- global TSO
-- cross-format atomic transactions
-- forced unification of all format-native transaction behavior
-
-## Repository Docs
-
-- [Architecture Constraints](docs/architecture-constraints.md)
-- [Coordinator Phase 1](docs/coordinator-phase1.md)
-- [Catalog Model](docs/catalog-model.md)
-- [Mutation Framework Phase 1](docs/mutation-framework-phase1.md)
-- [Distributed Execution Phase 1](docs/distributed-execution-phase1.md)
-- [Format Adapter Kernel](docs/format-adapter-kernel.md)
-- [Maintenance Kernel Phase 1](docs/maintenance-kernel-phase1.md)
-- [Artifact Lifecycle Kernel](docs/artifact-lifecycle-kernel.md)
 - [Development Architecture](docs/development-architecture.md)
+- [Catalog Model](docs/catalog-model.md)
+- [Distributed Execution Phase 1](docs/distributed-execution-phase1.md)
+- [Coordinator CBO Optimizer Selection](docs/coordinator-cbo-optimizer-selection.md)
+- [Framework Rollout Tasks](docs/framework-rollout-tasks.md)
+- [Architecture Constraints](docs/architecture-constraints.md)
+
+## Next Build Order
+
+The current rebuild order is:
+
+1. `brewdb-catalog`
+2. `brewdb-sql`
+3. `brewdb-planner`
+4. `brewdb-storage`
+5. `brewdb-runtime`
+6. `brewdb-execution`
+7. `brewdb-frontend`
+8. `brewdb` / `brewdbd`
+
+This order follows one rule: define the metadata and planning truth first, then reconnect runtime and execution on top of it.
