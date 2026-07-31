@@ -259,6 +259,51 @@ Rules:
 - `CatalogService` should remain the only component that accepts unresolved SQL object names
 - later backend-specific work in FoundationDB should stay below the service contract defined here
 
+## Query-Time Table Binding
+
+`CatalogService` does not by itself solve query-time metadata consistency.
+
+For MVCC table formats such as Iceberg and Paimon, worker execution must not re-read the latest table metadata from the live catalog once a query has already been planned. Otherwise schema, snapshot, or file-set drift may occur between coordinator-side planning and worker-side execution.
+
+BrewDB should therefore separate four layers of table state:
+
+```rust
+TableCatalogEntry -> BoundTableSnapshot -> BoundTableScan -> TableSplit
+```
+
+### TableCatalogEntry
+
+- catalog-owned table definition
+- answers which table the query targets
+- may evolve over time as DDL or metadata mutation happens
+
+### BoundTableSnapshot
+
+- query-scoped immutable binding
+- freezes the table version selected during planning
+- should carry stable execution identity such as table id, table path, format, frozen schema, and snapshot or version identifier
+
+### BoundTableScan
+
+- query-scoped scan plan for a specific `BoundTableSnapshot`
+- carries scan-level execution inputs such as projection, pushed predicates, pruning results, and scan options
+- is still higher level than worker-local splits
+
+### TableSplit
+
+- worker-consumable unit of scan work
+- references a subset of data files, row groups, partitions, or format-native scan tasks derived from the bound scan
+
+Rules:
+
+- the query-ingress node uses `CatalogService` to resolve names and load `TableCatalogEntry`
+- planning and binding freeze that metadata into `BoundTableSnapshot`
+- scan planning derives `BoundTableScan`
+- split planning derives `TableSplit`
+- distributed execution consumes `BoundTableSnapshot`, `BoundTableScan`, or `TableSplit`, not a fresh live catalog lookup by table name
+- worker execution must not read the latest catalog state to decide what snapshot or schema to scan
+- `CatalogService` remains node-local and role-agnostic; every `brewdbd` node constructs it at bootstrap, but query execution uses frozen bindings instead of re-resolving latest table metadata during scan execution
+
 ## Immediate Refactoring Implications
 
 The current `CatalogService` skeleton should eventually be reshaped to match this design:
