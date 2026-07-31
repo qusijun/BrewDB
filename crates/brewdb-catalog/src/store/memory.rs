@@ -8,6 +8,7 @@ use crate::errors::CatalogError;
 use crate::model::{CatalogEntry, DatabaseEntry, TableCatalogEntry};
 use crate::path::{CatalogPath, DatabasePath, TablePath};
 
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct MemoryCatalogStoreBackend {
     catalogs: RwLock<BTreeMap<String, CatalogEntry>>,
@@ -116,5 +117,20 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
             .expect("table lock poisoned")
             .insert(entry.path.to_string(), entry);
         Ok(())
+    }
+
+    fn delete_table(&self, path: &TablePath) -> Result<Option<TableCatalogEntry>, CatalogError> {
+        let removed = self
+            .tables
+            .write()
+            .expect("table lock poisoned")
+            .remove(&path.to_string());
+        if let Some(entry) = removed.as_ref() {
+            self.tables_by_id
+                .write()
+                .expect("table-by-id lock poisoned")
+                .remove(&entry.table_id);
+        }
+        Ok(removed)
     }
 }

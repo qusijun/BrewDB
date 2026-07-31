@@ -7,6 +7,7 @@ use crate::model::{
 };
 use crate::path::{CatalogPath, DatabasePath, TablePath};
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FdbCatalogStoreOptions {
     pub cluster_file: Option<String>,
@@ -22,20 +23,24 @@ impl Default for FdbCatalogStoreOptions {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FdbCatalogStoreBackend {
     options: FdbCatalogStoreOptions,
 }
 
 impl FdbCatalogStoreBackend {
+    #[allow(dead_code)]
     pub fn new(options: FdbCatalogStoreOptions) -> Self {
         Self { options }
     }
 
+    #[allow(dead_code)]
     pub fn options(&self) -> &FdbCatalogStoreOptions {
         &self.options
     }
 
+    #[allow(dead_code)]
     fn not_implemented() -> CatalogError {
         CatalogError::BackendNotImplemented { backend: "fdb" }
     }
@@ -84,6 +89,10 @@ impl CatalogStoreBackend for FdbCatalogStoreBackend {
     }
 
     fn put_table(&self, _entry: TableCatalogEntry) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn delete_table(&self, _path: &TablePath) -> Result<Option<TableCatalogEntry>, CatalogError> {
         Err(Self::not_implemented())
     }
 }

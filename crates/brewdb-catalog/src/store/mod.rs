@@ -8,6 +8,7 @@ use crate::config::{CatalogConfig, CatalogStoreBackendKind};
 pub mod fdb;
 pub mod memory;
 
+#[allow(dead_code)]
 pub fn open_catalog_store(config: &CatalogConfig) -> CatalogStore {
     match config.store_backend {
         CatalogStoreBackendKind::Fdb => CatalogStore::new(Arc::new(

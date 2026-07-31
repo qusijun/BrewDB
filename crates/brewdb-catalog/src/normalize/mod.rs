@@ -1,5 +1,7 @@
 //! Normalization boundary from catalog-store records into catalog-facing models.
 
+#![allow(dead_code)]
+
 use crate::backend::CatalogStore;
 use crate::errors::CatalogError;
 use crate::model::{

@@ -35,6 +35,8 @@ pub trait CatalogStoreBackend: Send + Sync {
     fn put_database(&self, entry: DatabaseEntry) -> Result<(), CatalogError>;
 
     fn put_table(&self, entry: TableCatalogEntry) -> Result<(), CatalogError>;
+
+    fn delete_table(&self, path: &TablePath) -> Result<Option<TableCatalogEntry>, CatalogError>;
 }
 
 #[derive(Clone)]
@@ -94,5 +96,9 @@ impl CatalogStore {
 
     pub fn put_table(&self, entry: TableCatalogEntry) -> Result<(), CatalogError> {
         self.backend.put_table(entry)
+    }
+
+    pub fn delete_table(&self, path: &TablePath) -> Result<Option<TableCatalogEntry>, CatalogError> {
+        self.backend.delete_table(path)
     }
 }

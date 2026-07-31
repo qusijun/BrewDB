@@ -34,8 +34,27 @@ pub enum CatalogError {
     TableRefNotFound {
         table_id: String,
     },
+    InvalidTableNameResolution {
+        name: String,
+        reason: String,
+    },
     BackendNotImplemented {
         backend: &'static str,
+    },
+    UnsupportedCatalogOperation {
+        operation: &'static str,
+    },
+    ConcurrentCatalogUpdate {
+        object: String,
+    },
+    Backend {
+        message: String,
+    },
+    Cache {
+        message: String,
+    },
+    Normalization {
+        message: String,
     },
     DuplicateCatalog {
         catalog: String,
@@ -76,8 +95,22 @@ impl fmt::Display for CatalogError {
             Self::TableRefNotFound { table_id } => {
                 write!(f, "table not found for ref: `{table_id}`")
             }
+            Self::InvalidTableNameResolution { name, reason } => {
+                write!(f, "failed to resolve table name `{name}`: {reason}")
+            }
             Self::BackendNotImplemented { backend } => {
                 write!(f, "catalog store backend not implemented: `{backend}`")
+            }
+            Self::UnsupportedCatalogOperation { operation } => {
+                write!(f, "catalog operation is not supported: `{operation}`")
+            }
+            Self::ConcurrentCatalogUpdate { object } => {
+                write!(f, "concurrent catalog update detected for `{object}`")
+            }
+            Self::Backend { message } => write!(f, "catalog backend error: {message}"),
+            Self::Cache { message } => write!(f, "catalog cache error: {message}"),
+            Self::Normalization { message } => {
+                write!(f, "catalog normalization error: {message}")
             }
             Self::DuplicateCatalog { catalog } => write!(f, "catalog already exists: `{catalog}`"),
             Self::DuplicateDatabase { catalog, database } => {
@@ -102,14 +135,22 @@ impl DiagnosticError for CatalogError {
     fn error_code(&self) -> ErrorCode {
         match self {
             Self::Common(error) => error.error_code(),
-            Self::InvalidPath { .. } => ErrorCode::InvalidConfiguration,
+            Self::InvalidPath { .. } | Self::InvalidTableNameResolution { .. } => {
+                ErrorCode::InvalidConfiguration
+            }
             Self::CatalogNotFound { .. }
             | Self::CatalogRefNotFound { .. }
             | Self::DatabaseNotFound { .. }
             | Self::DatabaseRefNotFound { .. }
             | Self::TableNotFound { .. }
             | Self::TableRefNotFound { .. } => ErrorCode::NotFound,
-            Self::BackendNotImplemented { .. } => ErrorCode::NotImplemented,
+            Self::BackendNotImplemented { .. } | Self::UnsupportedCatalogOperation { .. } => {
+                ErrorCode::NotImplemented
+            }
+            Self::ConcurrentCatalogUpdate { .. }
+            | Self::Backend { .. }
+            | Self::Cache { .. }
+            | Self::Normalization { .. } => ErrorCode::Internal,
             Self::DuplicateCatalog { .. }
             | Self::DuplicateDatabase { .. }
             | Self::DuplicateTable { .. } => ErrorCode::AlreadyExists,
@@ -147,7 +188,13 @@ impl CatalogError {
             Self::DatabaseRefNotFound { .. } => "DatabaseRefNotFound",
             Self::TableNotFound { .. } => "TableNotFound",
             Self::TableRefNotFound { .. } => "TableRefNotFound",
+            Self::InvalidTableNameResolution { .. } => "InvalidTableNameResolution",
             Self::BackendNotImplemented { .. } => "BackendNotImplemented",
+            Self::UnsupportedCatalogOperation { .. } => "UnsupportedCatalogOperation",
+            Self::ConcurrentCatalogUpdate { .. } => "ConcurrentCatalogUpdate",
+            Self::Backend { .. } => "Backend",
+            Self::Cache { .. } => "Cache",
+            Self::Normalization { .. } => "Normalization",
             Self::DuplicateCatalog { .. } => "DuplicateCatalog",
             Self::DuplicateDatabase { .. } => "DuplicateDatabase",
             Self::DuplicateTable { .. } => "DuplicateTable",
@@ -175,5 +222,29 @@ mod tests {
         assert_eq!(context.event_name, "catalog.resolve_table");
         assert_eq!(context.error_code, Some(ErrorCode::NotFound));
         assert_eq!(context.error_variant, Some("TableNotFound"));
+    }
+
+    #[test]
+    fn invalid_table_name_resolution_maps_to_invalid_configuration() {
+        let error = CatalogError::InvalidTableNameResolution {
+            name: "orders".to_owned(),
+            reason: "default database is not set".to_owned(),
+        };
+
+        assert_eq!(error.error_code(), ErrorCode::InvalidConfiguration);
+        assert_eq!(error.variant_name(), "InvalidTableNameResolution");
+    }
+
+    #[test]
+    fn cache_and_normalization_errors_map_to_internal() {
+        let cache = CatalogError::Cache {
+            message: "cache refresh failed".to_owned(),
+        };
+        let normalization = CatalogError::Normalization {
+            message: "missing table_id".to_owned(),
+        };
+
+        assert_eq!(cache.error_code(), ErrorCode::Internal);
+        assert_eq!(normalization.error_code(), ErrorCode::Internal);
     }
 }
