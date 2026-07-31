@@ -6,7 +6,7 @@ pub mod statement;
 
 pub use errors::SqlError;
 pub use ingress::{
-    FrontendStatementRoute, FrontendStatementRouteScope, SqlClientCapabilities, SqlFrontend,
+    FrontendStatementRoute, FrontendStatementRouteScope, SqlClientCapabilities, SqlDriver,
     SqlIngressRequest, SqlRequestContext, SqlSessionContext,
 };
 pub use statement::{
@@ -19,7 +19,7 @@ mod ingress_tests {
 
     use crate::errors::SqlError;
     use crate::ingress::{
-        FrontendStatementRoute, FrontendStatementRouteScope, SqlFrontend, SqlIngressRequest,
+        FrontendStatementRoute, FrontendStatementRouteScope, SqlDriver, SqlIngressRequest,
         SqlRequestContext, SqlSessionContext,
     };
     use crate::statement::{StatementCategory, StatementPayload};
@@ -46,8 +46,8 @@ mod ingress_tests {
 
     #[test]
     fn analyze_returns_session_statement_for_set_scope() {
-        let frontend = SqlFrontend::default();
-        let envelope = frontend
+        let driver = SqlDriver::default();
+        let envelope = driver
             .analyze(make_request(
                 "set search_path = brew",
                 FrontendStatementRouteScope::SessionLocal,
@@ -56,13 +56,13 @@ mod ingress_tests {
 
         assert_eq!(envelope.category, StatementCategory::Session);
         assert!(matches!(envelope.payload, StatementPayload::Session(_)));
-        assert_eq!(envelope.statement_name, "SET");
+        assert_eq!(envelope.statement_name, None);
     }
 
     #[test]
     fn analyze_returns_runtime_statement_for_select_scope() {
-        let frontend = SqlFrontend::default();
-        let envelope = frontend
+        let driver = SqlDriver::default();
+        let envelope = driver
             .analyze(make_request(
                 "select 1",
                 FrontendStatementRouteScope::RuntimeBound,
@@ -71,13 +71,13 @@ mod ingress_tests {
 
         assert_eq!(envelope.category, StatementCategory::Runtime);
         assert!(matches!(envelope.payload, StatementPayload::Runtime(_)));
-        assert_eq!(envelope.statement_name, "SELECT");
+        assert_eq!(envelope.statement_name, None);
     }
 
     #[test]
     fn analyze_rejects_empty_sql() {
-        let frontend = SqlFrontend::default();
-        let error = frontend
+        let driver = SqlDriver::default();
+        let error = driver
             .analyze(make_request(
                 "   ",
                 FrontendStatementRouteScope::RuntimeBound,
@@ -93,40 +93,13 @@ mod ingress_tests {
     }
 
     #[test]
-    fn analyze_rejects_route_conflict() {
-        let frontend = SqlFrontend::default();
-        let error = frontend
-            .analyze(make_request(
-                "select 1",
-                FrontendStatementRouteScope::SessionLocal,
-            ))
-            .unwrap_err();
+    fn analyze_preserves_frontend_statement_name_when_present() {
+        let driver = SqlDriver::default();
+        let mut request = make_request("select 1", FrontendStatementRouteScope::RuntimeBound);
+        request.route.statement_name = Some("SELECT".to_string());
 
-        assert_eq!(
-            error,
-            SqlError::RouteConflict {
-                sql_statement_name: "SELECT".to_string(),
-                frontend_scope: FrontendStatementRouteScope::SessionLocal,
-                sql_scope: FrontendStatementRouteScope::RuntimeBound,
-            }
-        );
-    }
+        let envelope = driver.analyze(request).unwrap();
 
-    #[test]
-    fn analyze_rejects_unsupported_statement() {
-        let frontend = SqlFrontend::default();
-        let error = frontend
-            .analyze(make_request(
-                "merge into brewdb",
-                FrontendStatementRouteScope::RuntimeBound,
-            ))
-            .unwrap_err();
-
-        assert_eq!(
-            error,
-            SqlError::UnsupportedStatement {
-                statement_name: "MERGE".to_string(),
-            }
-        );
+        assert_eq!(envelope.statement_name, Some("SELECT".to_string()));
     }
 }

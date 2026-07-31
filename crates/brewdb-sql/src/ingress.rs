@@ -49,9 +49,9 @@ pub struct SqlIngressRequest {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct SqlFrontend;
+pub struct SqlDriver;
 
-impl SqlFrontend {
+impl SqlDriver {
     pub fn analyze(&self, request: SqlIngressRequest) -> Result<SqlStatementEnvelope, SqlError> {
         let statement_text = request.sql.trim().to_string();
         if statement_text.is_empty() {
@@ -60,75 +60,23 @@ impl SqlFrontend {
             });
         }
 
-        let statement_name = classify_statement_name(&statement_text);
-        if statement_name == "UNKNOWN" || statement_name == "MERGE" {
-            return Err(SqlError::UnsupportedStatement {
-                statement_name: statement_name.to_string(),
-            });
-        }
-
-        let sql_scope = infer_scope(statement_name);
-        if request.route.scope != sql_scope {
-            return Err(SqlError::RouteConflict {
-                sql_statement_name: statement_name.to_string(),
-                frontend_scope: request.route.scope,
-                sql_scope,
-            });
-        }
-
-        let (category, payload) = match sql_scope {
+        let (category, payload) = match request.route.scope {
             FrontendStatementRouteScope::SessionLocal => (
                 StatementCategory::Session,
-                StatementPayload::Session(SessionStatement {
-                    statement_name: statement_name.to_string(),
-                }),
+                StatementPayload::Session(SessionStatement),
             ),
             FrontendStatementRouteScope::RuntimeBound => (
                 StatementCategory::Runtime,
-                StatementPayload::Runtime(RuntimeStatement {
-                    statement_name: statement_name.to_string(),
-                }),
+                StatementPayload::Runtime(RuntimeStatement),
             ),
         };
 
         Ok(SqlStatementEnvelope {
             statement_text,
-            statement_name: statement_name.to_string(),
+            statement_name: request.route.statement_name,
             category,
-            route_scope: sql_scope,
+            route_scope: request.route.scope,
             payload,
         })
-    }
-}
-
-fn classify_statement_name(sql: &str) -> &'static str {
-    match sql
-        .split_whitespace()
-        .next()
-        .unwrap_or("UNKNOWN")
-        .to_ascii_uppercase()
-        .as_str()
-    {
-        "SELECT" => "SELECT",
-        "SET" => "SET",
-        "SHOW" => "SHOW",
-        "USE" => "USE",
-        "BEGIN" => "BEGIN",
-        "COMMIT" => "COMMIT",
-        "ROLLBACK" => "ROLLBACK",
-        "INSERT" => "INSERT",
-        "UPDATE" => "UPDATE",
-        "DELETE" => "DELETE",
-        "MERGE" => "MERGE",
-        _ => "UNKNOWN",
-    }
-}
-
-fn infer_scope(statement_name: &str) -> FrontendStatementRouteScope {
-    match statement_name {
-        "SET" | "SHOW" | "USE" | "BEGIN" | "COMMIT" | "ROLLBACK" => {
-            FrontendStatementRouteScope::SessionLocal
-        }
-        _ => FrontendStatementRouteScope::RuntimeBound,
     }
 }

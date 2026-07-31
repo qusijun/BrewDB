@@ -149,7 +149,6 @@ pub enum StatementScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatementRoute {
     pub scope: StatementScope,
-    pub statement_name: &'static str,
 }
 
 pub trait StatementRouter {
@@ -228,7 +227,7 @@ impl FrontendService {
                     StatementScope::SessionLocal => FrontendStatementRouteScope::SessionLocal,
                     StatementScope::RuntimeBound => FrontendStatementRouteScope::RuntimeBound,
                 },
-                statement_name: Some(route.statement_name.to_string()),
+                statement_name: None,
             },
             client_capabilities: Some(SqlClientCapabilities {
                 supports_prepared_statements: request
@@ -264,34 +263,14 @@ impl StatementRouter for FrontendService {
         {
             StatementRoute {
                 scope: StatementScope::SessionLocal,
-                statement_name: classify_statement_name(&upper),
             }
         } else {
             StatementRoute {
                 scope: StatementScope::RuntimeBound,
-                statement_name: classify_statement_name(&upper),
             }
         };
 
         Ok(route)
-    }
-}
-
-fn classify_statement_name(sql: &str) -> &'static str {
-    match sql.split_whitespace().next().unwrap_or("UNKNOWN") {
-        "SELECT" => "SELECT",
-        "SET" => "SET",
-        "SHOW" => "SHOW",
-        "USE" => "USE",
-        "BEGIN" => "BEGIN",
-        "COMMIT" => "COMMIT",
-        "ROLLBACK" => "ROLLBACK",
-        "INSERT" => "INSERT",
-        "UPDATE" => "UPDATE",
-        "DELETE" => "DELETE",
-        "CREATE" => "CREATE",
-        "DROP" => "DROP",
-        _ => "UNKNOWN",
     }
 }
 
@@ -339,7 +318,6 @@ mod tests {
         let route = service.route("set search_path = brew").unwrap();
 
         assert_eq!(route.scope, StatementScope::SessionLocal);
-        assert_eq!(route.statement_name, "SET");
     }
 
     #[test]
@@ -348,7 +326,6 @@ mod tests {
         let route = service.route("select 1").unwrap();
 
         assert_eq!(route.scope, StatementScope::RuntimeBound);
-        assert_eq!(route.statement_name, "SELECT");
     }
 
     #[test]
@@ -416,7 +393,6 @@ mod sql_handoff_tests {
         let request = make_client_request("select 1");
         let route = StatementRoute {
             scope: StatementScope::RuntimeBound,
-            statement_name: "SELECT",
         };
 
         let sql_request = FrontendService
@@ -429,7 +405,11 @@ mod sql_handoff_tests {
         assert_eq!(sql_request.session.catalog_name.as_deref(), Some("main"));
         assert_eq!(sql_request.request.request_id, Uuid::nil());
         assert_eq!(sql_request.sql, "select 1");
-        assert_eq!(sql_request.route.scope, FrontendStatementRouteScope::RuntimeBound);
+        assert_eq!(
+            sql_request.route.scope,
+            FrontendStatementRouteScope::RuntimeBound
+        );
+        assert_eq!(sql_request.route.statement_name, None);
         assert_eq!(
             sql_request.client_capabilities,
             Some(SqlClientCapabilities {
@@ -445,15 +425,17 @@ mod sql_handoff_tests {
         let request = make_client_request("set search_path = brew");
         let route = StatementRoute {
             scope: StatementScope::SessionLocal,
-            statement_name: "SET",
         };
 
         let sql_request: SqlIngressRequest = FrontendService
             .build_sql_ingress_request(&request, &route)
             .unwrap();
 
-        assert_eq!(sql_request.route.scope, FrontendStatementRouteScope::SessionLocal);
-        assert_eq!(sql_request.route.statement_name.as_deref(), Some("SET"));
+        assert_eq!(
+            sql_request.route.scope,
+            FrontendStatementRouteScope::SessionLocal
+        );
+        assert_eq!(sql_request.route.statement_name, None);
         assert_eq!(std::mem::size_of_val(&sql_request.session.session_id), 16);
     }
 }

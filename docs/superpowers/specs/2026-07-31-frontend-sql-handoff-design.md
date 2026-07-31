@@ -100,7 +100,7 @@ Frontend does not hand raw protocol messages to SQL.
 - `SqlSessionContext`
 - `SqlRequestContext`
 - `FrontendStatementRoute`
-- `SqlFrontend`
+- `SqlDriver`
 
 Recommended minimal field shape for `SqlIngressRequest`:
 

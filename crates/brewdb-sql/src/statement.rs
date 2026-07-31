@@ -9,14 +9,10 @@ pub enum StatementCategory {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionStatement {
-    pub statement_name: String,
-}
+pub struct SessionStatement;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeStatement {
-    pub statement_name: String,
-}
+pub struct RuntimeStatement;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StatementPayload {
@@ -27,7 +23,7 @@ pub enum StatementPayload {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqlStatementEnvelope {
     pub statement_text: String,
-    pub statement_name: String,
+    pub statement_name: Option<String>,
     pub category: StatementCategory,
     pub route_scope: FrontendStatementRouteScope,
     pub payload: StatementPayload,
