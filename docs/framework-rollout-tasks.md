@@ -380,7 +380,7 @@ In scope:
 
 Primary landing zones:
 
-- `crates/brewdb-core/`
+- `crates/brewdb-common/`
 - `crates/brewdb-runtime/`
 - `crates/brewdb-execution/`
 - `bin/brewdb/`

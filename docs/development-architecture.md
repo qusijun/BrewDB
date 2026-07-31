@@ -184,7 +184,7 @@ struct ClientSqlRequest {
 
 ```rust
 struct PlannedQuery {
-    query_id: JobId,
+    job_id: JobId,
     context: PlannedQueryContext,
     statement: QueryStatementInfo,
     logical_plan: LogicalPlanHandle,
@@ -555,16 +555,23 @@ Its main internal responsibilities are:
 
 Phase 1 uses eight primary crates.
 
-### `brewdb-core`
+### `brewdb-common`
 
-Shared domain language:
+Shared foundation components:
 
-- ids
-- states
-- common errors
-- table envelope basics
-- capability model
-- job / stage / task / txn / artifact core concepts
+- logging bootstrap
+- diagnostics and error codes
+- base error helpers
+- job-config layering primitives
+- process-global tracing subscriber policy, including upstream DataFusion target collection
+- structured event helpers for stable event target fields, `event_name`, `error_code`, and `job_id`
+- future low-level config and utility components that are genuinely cross-crate
+
+Job-config precedence is fixed as:
+
+- `system < session < statement`
+- all job-config keys must use the `brewdb.` prefix
+- the registry is the whitelist source of truth for all legal job-config keys, defaults, types, and allowed scopes
 
 ### `brewdb-catalog`
 
@@ -666,13 +673,13 @@ To keep the eight crates from drifting into each other, each crate should be jud
 - what outputs it produces
 - what it must not own
 
-### `brewdb-core`
+### `brewdb-common`
 
 Owns:
 
-- shared domain vocabulary
-- identifiers and state enums
-- cross-crate error and context types
+- logging bootstrap and subscriber wiring
+- shared diagnostics and error-code vocabulary
+- low-level common helpers reused across crates
 
 Consumes:
 
@@ -680,13 +687,13 @@ Consumes:
 
 Produces:
 
-- stable shared types reused by all upper layers
+- stable foundational components reused by all upper layers
 
 Must not own:
 
 - orchestration
 - transport
-- format-specific semantics
+- query/catalog/runtime domain ownership
 - control-plane IO
 
 ### `brewdb-catalog`
@@ -700,7 +707,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - FoundationDB client and catalog-store integrations
 
 Produces:
@@ -728,7 +735,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - `brewdb-catalog`
 
 Produces:
@@ -755,7 +762,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - `brewdb-catalog`
 - `brewdb-sql`
 - `brewdb-storage`
@@ -787,7 +794,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - `brewdb-sql`
 - `brewdb-runtime`
 
@@ -818,7 +825,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - selective execution-facing requirements from runtime and storage
 
 Produces:
@@ -850,7 +857,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - `brewdb-catalog`
 - selective `brewdb-execution` contracts for artifact and scan shape requirements
 
@@ -919,7 +926,7 @@ Owns:
 
 Consumes:
 
-- `brewdb-core`
+- `brewdb-common`
 - `brewdb-catalog`
 - `brewdb-execution`
 - `brewdb-storage`
@@ -972,28 +979,24 @@ The main disallowed shortcuts are:
 
 Each crate should expose a small, intentional top-level surface. Public API design should optimize for stable collaboration boundaries, not convenience re-export sprawl.
 
-### `brewdb-core`
+### `brewdb-common`
 
 Recommended public surface:
 
-- `ids`
-- `state`
-- `catalog`
-- `execution`
-- `txn`
-- `artifacts`
+- `logging`
+- `diagnostics`
 - `errors`
-- `common`
+- `config`
 
 Recommended internal-only details:
 
-- state transition helpers that are purely crate-local
+- subscriber construction helpers that are purely crate-local
 - serialization glue that exists only for one caller
 - test-only builders and fixtures
 
 Public API rule:
 
-- `brewdb-core` may expose types freely, but should avoid exposing behavior that implies orchestration ownership
+- `brewdb-common` should expose only foundational components and must not become a second home for catalog/runtime/execution domain models
 
 ### `brewdb-catalog`
 
@@ -1196,32 +1199,17 @@ Default rule:
 
 The architecture should also be explicit about where the main system objects live. If a type is shared across crate boundaries, its home crate should be chosen by ownership truth, not convenience.
 
-### `brewdb-core`
+### `brewdb-common`
 
 Should own the canonical type definitions for:
 
-- `JobId`
-- `StageId`
-- `TaskId`
-- `TaskAttemptId`
-- `TxnId`
-- `CommitAttemptId`
-- `ArtifactId`
-- `CatalogId`
-- `DatabaseId`
-- `TableId`
-- `JobState`
-- `StageState`
-- `TaskAttemptState`
-- `TxnState`
-- `CommitAttemptState`
-- `ResourceLane`
-- `TxnLockRecord`
-- request/session context primitives
+- stable error-code enums
+- logging configuration primitives
+- tracing bootstrap options
 
 Rule:
 
-- if a type mainly expresses shared domain identity or shared lifecycle state, it belongs in `brewdb-core`
+- if a type is a low-level foundational primitive reused broadly and does not imply domain ownership, it belongs in `brewdb-common`
 
 ### `brewdb-catalog`
 
@@ -1528,7 +1516,7 @@ BrewDB should use one shared schema language across catalog, planning, execution
 
 Recommended baseline:
 
-- shared schema types live in `brewdb-core::schema`
+- shared schema types live in `brewdb-common::schema`
 - schema and column typing are Arrow-aligned
 - BrewDB does not define a second independent execution type algebra beside Arrow/DataFusion
 
@@ -1776,7 +1764,7 @@ The most important Phase 1 invariants are:
 
 Ownership should remain explicit:
 
-- `brewdb-core` owns the shared enums and identity types
+- `brewdb-common` owns the shared enums and identity types
 - `brewdb-runtime` owns the runtime records and allowed transition enforcement
 - `brewdb-storage` may influence transaction outcome through validation/publish truth, but does not own the runtime transition graph
 - `brewdb-execution` may complete tasks and emit artifacts, but does not advance txn or commit-attempt state directly
@@ -1789,17 +1777,17 @@ Framework rule:
 
 Recommended dependency direction:
 
-- `brewdb-core`
-- `brewdb-catalog -> brewdb-core`
-- `brewdb-execution -> brewdb-core`
-- `brewdb-storage -> brewdb-core + brewdb-catalog + selective brewdb-execution contracts`
-- `brewdb-runtime -> brewdb-core + brewdb-catalog + brewdb-execution + brewdb-storage`
-- `brewdb-sql -> brewdb-core + brewdb-catalog`
-- `brewdb-planner -> brewdb-core + brewdb-catalog + brewdb-sql + brewdb-storage + brewdb-execution`
+- `brewdb-common`
+- `brewdb-catalog -> brewdb-common`
+- `brewdb-execution -> brewdb-common`
+- `brewdb-storage -> brewdb-common + brewdb-catalog + selective brewdb-execution contracts`
+- `brewdb-runtime -> brewdb-common + brewdb-catalog + brewdb-execution + brewdb-storage`
+- `brewdb-sql -> brewdb-common + brewdb-catalog`
+- `brewdb-planner -> brewdb-common + brewdb-catalog + brewdb-sql + brewdb-storage + brewdb-execution`
 
 Key rules:
 
-- `brewdb-core` depends on no other BrewDB crate
+- `brewdb-common` depends on no other BrewDB crate
 - `brewdb-sql` does not directly depend on storage semantics
 - `brewdb-storage` does not depend on kernel orchestration
 - `brewdb-execution` does not depend on kernel orchestration
@@ -1864,7 +1852,7 @@ Holds:
 
 ## 5. Module Layout by Crate
 
-### `brewdb-core`
+### `brewdb-common`
 
 Recommended modules:
 
@@ -1877,7 +1865,7 @@ Recommended modules:
 - `errors`
 - `common`
 
-`brewdb-core` should remain a stable shared language layer and avoid orchestration logic.
+`brewdb-common` should remain a stable shared language layer and avoid orchestration logic.
 
 ### `brewdb-catalog`
 
@@ -1969,7 +1957,7 @@ Phase 1 should start as one Rust workspace with capability crates and thin binar
 
 Recommended top-level layout:
 
-- `crates/brewdb-core`
+- `crates/brewdb-common`
 - `crates/brewdb-catalog`
 - `crates/brewdb-sql`
 - `crates/brewdb-planner`
@@ -2002,7 +1990,7 @@ BrewDB/
 ├── rustfmt.toml
 ├── docs/
 ├── crates/
-│   ├── brewdb-core/
+│   ├── brewdb-common/
 │   ├── brewdb-catalog/
 │   ├── brewdb-sql/
 │   ├── brewdb-planner/
@@ -2055,25 +2043,20 @@ Rules:
 
 The repo should not stop at crate names. Each crate should start with a predictable source tree.
 
-### `crates/brewdb-core`
+### `crates/brewdb-common`
 
 ```text
 src/
 ├── lib.rs
-├── ids.rs
-├── state.rs
-├── catalog.rs
-├── execution.rs
-├── txn.rs
-├── artifacts.rs
+├── logging.rs
 ├── diagnostics.rs
 ├── errors.rs
-└── common.rs
+└── config.rs
 ```
 
 Rule:
 
-- keep `brewdb-core` flat unless one module becomes too large; it is the shared language crate, not a deep service tree
+- keep `brewdb-common` flat unless one module becomes too large; it is the shared foundation crate, not a deep service tree
 
 ### `crates/brewdb-catalog`
 
@@ -2399,7 +2382,7 @@ The workspace should encode architectural direction in Cargo layout as much as p
 
 Rules:
 
-- `brewdb-core` must not depend on any BrewDB crate
+- `brewdb-common` must not depend on any BrewDB crate
 - `brewdb-sql` must not depend directly on `brewdb-storage`
 - `brewdb-execution` must not depend on `brewdb-runtime`
 - `brewdb-storage` must not depend on `brewdb-runtime`
@@ -2407,7 +2390,7 @@ Rules:
 
 Practical policy:
 
-- when a dependency direction feels wrong, prefer moving a shared type downward into `brewdb-core` or narrowing a contract module rather than adding a reverse dependency
+- when a dependency direction feels wrong, prefer moving a shared type downward into `brewdb-common` or narrowing a contract module rather than adding a reverse dependency
 
 ## 7.10 Feature Flag Strategy
 
@@ -2547,8 +2530,8 @@ Recommended policy:
 
 - each crate owns a small crate-local error surface
 - cross-crate contracts should prefer structured errors over ad hoc strings
-- `brewdb-core` may define shared error categories when they are genuinely common domain concepts
-- stable error codes should live in `brewdb-core::diagnostics` even when error enums stay crate-local
+- `brewdb-common` may define shared error categories when they are genuinely common domain concepts
+- stable error codes should live in `brewdb-common::diagnostics` even when error enums stay crate-local
 
 Rules:
 
@@ -2556,7 +2539,7 @@ Rules:
 - `brewdb-storage` should not leak format-vendor error types as its stable public contract
 - `brewdb-runtime` should translate storage/catalog/execution failures into runtime-relevant orchestration errors
 - binaries may further wrap errors for CLI/server reporting, but should not become the canonical home of shared error semantics
-- logging should emit structured events with stable `target`, `event_name`, `error_code`, and request/runtime identity context
+- logging should emit structured events with stable `target`, `event_name`, `error_code`, and `job_id`
 - the process-global tracing subscriber should also be the collection point for upstream engine logs such as DataFusion targets
 
 Dependency direction for the first external integrations:
@@ -2578,7 +2561,7 @@ Recommended policy:
 
 Rules:
 
-- `brewdb-core` may carry serialization derives for true shared records and ids
+- `brewdb-common` may carry serialization derives for true shared records and ids
 - execution wire payload specifics should stay near `brewdb-execution` contracts or future transport modules
 - binary-layer API payload wrappers should not leak backward into crate ownership decisions
 
@@ -2586,7 +2569,7 @@ Rules:
 
 Before detailed Rust traits are frozen, Phase 1 should preserve these interface seams.
 
-### `brewdb-core`
+### `brewdb-common`
 
 Must define stable shared types for:
 
@@ -2759,7 +2742,7 @@ Phase 1 should test by closed loop and by boundary, not only by crate.
 
 Recommended test emphasis:
 
-- `brewdb-core`: pure unit tests for ids, state transitions, and invariants
+- `brewdb-common`: pure unit tests for logging config, diagnostics primitives, and foundational invariants
 - `brewdb-catalog`: `CatalogService` tests with mocked catalog-store reads and writes
 - `brewdb-storage`: `TableEngine` contract tests per format
 - `brewdb-execution`: task contract, boundary, and artifact result tests
@@ -3004,7 +2987,7 @@ Until then, this document should be treated as architecture work product, not im
 ## 19. Design Rules
 
 1. Crates are organized by stable kernel capability, not by deployment role.
-2. Shared domain objects belong in `brewdb-core`; orchestration does not.
+2. Shared domain objects belong in `brewdb-common`; orchestration does not.
 3. SQL frontend, lifecycle orchestration, execution, and storage semantics remain separate layers.
 4. `brewdb-storage` owns storage semantics, while `brewdb-execution` owns execution runtime behavior.
 5. Binaries assemble capabilities; they do not define capability boundaries.

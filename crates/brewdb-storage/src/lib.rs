@@ -1,0 +1,1 @@
+//! BrewDB storage skeleton crate.

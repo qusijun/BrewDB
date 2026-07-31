@@ -1,0 +1,1 @@
+//! BrewDB frontend skeleton crate.

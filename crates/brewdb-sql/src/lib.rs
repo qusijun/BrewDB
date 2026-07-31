@@ -1,0 +1,1 @@
+//! BrewDB SQL skeleton crate.
