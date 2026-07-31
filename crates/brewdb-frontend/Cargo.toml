@@ -11,3 +11,4 @@ brewdb-common = { path = "../brewdb-common" }
 brewdb-execution = { path = "../brewdb-execution" }
 brewdb-runtime = { path = "../brewdb-runtime" }
 brewdb-sql = { path = "../brewdb-sql" }
+uuid.workspace = true

@@ -487,6 +487,7 @@ dependencies = [
  "brewdb-execution",
  "brewdb-runtime",
  "brewdb-sql",
+ "uuid",
 ]
 
 [[package]]
@@ -506,6 +507,7 @@ dependencies = [
  "brewdb-catalog",
  "brewdb-common",
  "brewdb-runtime",
+ "uuid",
 ]
 
 [[package]]
