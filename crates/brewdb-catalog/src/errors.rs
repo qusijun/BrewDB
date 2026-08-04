@@ -34,8 +34,27 @@ pub enum CatalogError {
     TableRefNotFound {
         table_id: String,
     },
+    CatalogNotRegistered {
+        catalog: String,
+    },
+    CatalogBackend {
+        backend: &'static str,
+        message: String,
+    },
     BackendNotImplemented {
         backend: &'static str,
+    },
+    UnsupportedCatalogOperation {
+        operation: &'static str,
+    },
+    UnsupportedSchemaType {
+        backend: &'static str,
+        type_name: String,
+    },
+    CatalogFormatMismatch {
+        catalog: String,
+        expected: &'static str,
+        actual: &'static str,
     },
     DuplicateCatalog {
         catalog: String,
@@ -76,9 +95,29 @@ impl fmt::Display for CatalogError {
             Self::TableRefNotFound { table_id } => {
                 write!(f, "table not found for ref: `{table_id}`")
             }
+            Self::CatalogNotRegistered { catalog } => {
+                write!(f, "catalog implementation is not registered: `{catalog}`")
+            }
+            Self::CatalogBackend { backend, message } => {
+                write!(f, "catalog backend `{backend}` error: {message}")
+            }
             Self::BackendNotImplemented { backend } => {
                 write!(f, "catalog store backend not implemented: `{backend}`")
             }
+            Self::UnsupportedCatalogOperation { operation } => {
+                write!(f, "catalog operation is not supported: `{operation}`")
+            }
+            Self::UnsupportedSchemaType { backend, type_name } => {
+                write!(f, "unsupported schema type from `{backend}`: `{type_name}`")
+            }
+            Self::CatalogFormatMismatch {
+                catalog,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "table format mismatch for catalog `{catalog}`: expected `{expected}`, got `{actual}`"
+            ),
             Self::DuplicateCatalog { catalog } => write!(f, "catalog already exists: `{catalog}`"),
             Self::DuplicateDatabase { catalog, database } => {
                 write!(f, "database already exists: `{}.{}`", catalog, database)
@@ -104,12 +143,17 @@ impl DiagnosticError for CatalogError {
             Self::Common(error) => error.error_code(),
             Self::InvalidPath { .. } => ErrorCode::InvalidConfiguration,
             Self::CatalogNotFound { .. }
+            | Self::CatalogNotRegistered { .. }
             | Self::CatalogRefNotFound { .. }
             | Self::DatabaseNotFound { .. }
             | Self::DatabaseRefNotFound { .. }
             | Self::TableNotFound { .. }
             | Self::TableRefNotFound { .. } => ErrorCode::NotFound,
-            Self::BackendNotImplemented { .. } => ErrorCode::NotImplemented,
+            Self::CatalogBackend { .. } => ErrorCode::Internal,
+            Self::BackendNotImplemented { .. }
+            | Self::UnsupportedCatalogOperation { .. }
+            | Self::UnsupportedSchemaType { .. } => ErrorCode::NotImplemented,
+            Self::CatalogFormatMismatch { .. } => ErrorCode::InvalidConfiguration,
             Self::DuplicateCatalog { .. }
             | Self::DuplicateDatabase { .. }
             | Self::DuplicateTable { .. } => ErrorCode::AlreadyExists,
@@ -147,7 +191,12 @@ impl CatalogError {
             Self::DatabaseRefNotFound { .. } => "DatabaseRefNotFound",
             Self::TableNotFound { .. } => "TableNotFound",
             Self::TableRefNotFound { .. } => "TableRefNotFound",
+            Self::CatalogNotRegistered { .. } => "CatalogNotRegistered",
+            Self::CatalogBackend { .. } => "CatalogBackend",
             Self::BackendNotImplemented { .. } => "BackendNotImplemented",
+            Self::UnsupportedCatalogOperation { .. } => "UnsupportedCatalogOperation",
+            Self::UnsupportedSchemaType { .. } => "UnsupportedSchemaType",
+            Self::CatalogFormatMismatch { .. } => "CatalogFormatMismatch",
             Self::DuplicateCatalog { .. } => "DuplicateCatalog",
             Self::DuplicateDatabase { .. } => "DuplicateDatabase",
             Self::DuplicateTable { .. } => "DuplicateTable",

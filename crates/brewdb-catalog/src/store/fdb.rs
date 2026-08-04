@@ -3,7 +3,7 @@
 use crate::backend::CatalogStoreBackend;
 use crate::errors::CatalogError;
 use crate::model::{
-    CatalogEntry, CatalogRef, DatabaseEntry, DatabaseRef, TableCatalogEntry, TableRef,
+    CatalogEntry, CatalogRef, DatabaseCatalogEntry, DatabaseRef, TableCatalogEntry, TableRef,
 };
 use crate::path::{CatalogPath, DatabasePath, TablePath};
 
@@ -53,14 +53,17 @@ impl CatalogStoreBackend for FdbCatalogStoreBackend {
         Err(Self::not_implemented())
     }
 
-    fn get_database(&self, _path: &DatabasePath) -> Result<Option<DatabaseEntry>, CatalogError> {
+    fn get_database(
+        &self,
+        _path: &DatabasePath,
+    ) -> Result<Option<DatabaseCatalogEntry>, CatalogError> {
         Err(Self::not_implemented())
     }
 
     fn get_database_by_ref(
         &self,
         _database_ref: DatabaseRef,
-    ) -> Result<Option<DatabaseEntry>, CatalogError> {
+    ) -> Result<Option<DatabaseCatalogEntry>, CatalogError> {
         Err(Self::not_implemented())
     }
 
@@ -75,15 +78,53 @@ impl CatalogStoreBackend for FdbCatalogStoreBackend {
         Err(Self::not_implemented())
     }
 
-    fn put_catalog(&self, _entry: CatalogEntry) -> Result<(), CatalogError> {
+    fn create_catalog(&self, _entry: CatalogEntry) -> Result<(), CatalogError> {
         Err(Self::not_implemented())
     }
 
-    fn put_database(&self, _entry: DatabaseEntry) -> Result<(), CatalogError> {
+    fn create_database(&self, _entry: DatabaseCatalogEntry) -> Result<(), CatalogError> {
         Err(Self::not_implemented())
     }
 
-    fn put_table(&self, _entry: TableCatalogEntry) -> Result<(), CatalogError> {
+    fn create_table(&self, _entry: TableCatalogEntry) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn update_catalog(&self, _entry: CatalogEntry) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn update_database(&self, _entry: DatabaseCatalogEntry) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn update_table(&self, _entry: TableCatalogEntry) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn delete_catalog(&self, _path: &CatalogPath) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn delete_database(&self, _path: &DatabasePath) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn delete_table(&self, _path: &TablePath) -> Result<(), CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn list_databases(
+        &self,
+        _catalog_path: &CatalogPath,
+    ) -> Result<Vec<DatabaseCatalogEntry>, CatalogError> {
+        Err(Self::not_implemented())
+    }
+
+    fn list_tables(
+        &self,
+        _database_path: &DatabasePath,
+    ) -> Result<Vec<TableCatalogEntry>, CatalogError> {
         Err(Self::not_implemented())
     }
 }

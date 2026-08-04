@@ -5,15 +5,15 @@ use std::sync::RwLock;
 
 use crate::backend::CatalogStoreBackend;
 use crate::errors::CatalogError;
-use crate::model::{CatalogEntry, DatabaseEntry, TableCatalogEntry};
+use crate::model::{CatalogEntry, DatabaseCatalogEntry, TableCatalogEntry};
 use crate::path::{CatalogPath, DatabasePath, TablePath};
 
 #[derive(Default)]
 pub struct MemoryCatalogStoreBackend {
     catalogs: RwLock<BTreeMap<String, CatalogEntry>>,
     catalogs_by_id: RwLock<BTreeMap<uuid::Uuid, CatalogEntry>>,
-    databases: RwLock<BTreeMap<String, DatabaseEntry>>,
-    databases_by_id: RwLock<BTreeMap<uuid::Uuid, DatabaseEntry>>,
+    databases: RwLock<BTreeMap<String, DatabaseCatalogEntry>>,
+    databases_by_id: RwLock<BTreeMap<uuid::Uuid, DatabaseCatalogEntry>>,
     tables: RwLock<BTreeMap<String, TableCatalogEntry>>,
     tables_by_id: RwLock<BTreeMap<uuid::Uuid, TableCatalogEntry>>,
 }
@@ -40,7 +40,10 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
             .cloned())
     }
 
-    fn get_database(&self, path: &DatabasePath) -> Result<Option<DatabaseEntry>, CatalogError> {
+    fn get_database(
+        &self,
+        path: &DatabasePath,
+    ) -> Result<Option<DatabaseCatalogEntry>, CatalogError> {
         Ok(self
             .databases
             .read()
@@ -52,7 +55,7 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
     fn get_database_by_ref(
         &self,
         database_ref: crate::model::DatabaseRef,
-    ) -> Result<Option<DatabaseEntry>, CatalogError> {
+    ) -> Result<Option<DatabaseCatalogEntry>, CatalogError> {
         Ok(self
             .databases_by_id
             .read()
@@ -82,7 +85,7 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
             .cloned())
     }
 
-    fn put_catalog(&self, entry: CatalogEntry) -> Result<(), CatalogError> {
+    fn create_catalog(&self, entry: CatalogEntry) -> Result<(), CatalogError> {
         self.catalogs_by_id
             .write()
             .expect("catalog-by-id lock poisoned")
@@ -94,7 +97,7 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
         Ok(())
     }
 
-    fn put_database(&self, entry: DatabaseEntry) -> Result<(), CatalogError> {
+    fn create_database(&self, entry: DatabaseCatalogEntry) -> Result<(), CatalogError> {
         self.databases_by_id
             .write()
             .expect("database-by-id lock poisoned")
@@ -106,7 +109,7 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
         Ok(())
     }
 
-    fn put_table(&self, entry: TableCatalogEntry) -> Result<(), CatalogError> {
+    fn create_table(&self, entry: TableCatalogEntry) -> Result<(), CatalogError> {
         self.tables_by_id
             .write()
             .expect("table-by-id lock poisoned")
@@ -116,5 +119,93 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
             .expect("table lock poisoned")
             .insert(entry.path.to_string(), entry);
         Ok(())
+    }
+
+    fn update_catalog(&self, entry: CatalogEntry) -> Result<(), CatalogError> {
+        self.create_catalog(entry)
+    }
+
+    fn update_database(&self, entry: DatabaseCatalogEntry) -> Result<(), CatalogError> {
+        self.create_database(entry)
+    }
+
+    fn update_table(&self, entry: TableCatalogEntry) -> Result<(), CatalogError> {
+        self.create_table(entry)
+    }
+
+    fn delete_catalog(&self, path: &CatalogPath) -> Result<(), CatalogError> {
+        if let Some(entry) = self
+            .catalogs
+            .write()
+            .expect("catalog lock poisoned")
+            .remove(path.catalog())
+        {
+            self.catalogs_by_id
+                .write()
+                .expect("catalog-by-id lock poisoned")
+                .remove(&entry.catalog_id);
+        }
+        Ok(())
+    }
+
+    fn delete_database(&self, path: &DatabasePath) -> Result<(), CatalogError> {
+        if let Some(entry) = self
+            .databases
+            .write()
+            .expect("database lock poisoned")
+            .remove(&path.to_string())
+        {
+            self.databases_by_id
+                .write()
+                .expect("database-by-id lock poisoned")
+                .remove(&entry.database_id);
+        }
+        Ok(())
+    }
+
+    fn delete_table(&self, path: &TablePath) -> Result<(), CatalogError> {
+        if let Some(entry) = self
+            .tables
+            .write()
+            .expect("table lock poisoned")
+            .remove(&path.to_string())
+        {
+            self.tables_by_id
+                .write()
+                .expect("table-by-id lock poisoned")
+                .remove(&entry.table_id);
+        }
+        Ok(())
+    }
+
+    fn list_databases(
+        &self,
+        catalog_path: &CatalogPath,
+    ) -> Result<Vec<DatabaseCatalogEntry>, CatalogError> {
+        Ok(self
+            .databases
+            .read()
+            .expect("database lock poisoned")
+            .values()
+            .filter(|entry| entry.path.catalog() == catalog_path.catalog())
+            .cloned()
+            .collect())
+    }
+
+    fn list_tables(
+        &self,
+        database_path: &DatabasePath,
+    ) -> Result<Vec<TableCatalogEntry>, CatalogError> {
+        Ok(self
+            .tables
+            .read()
+            .expect("table lock poisoned")
+            .values()
+            .filter(|entry| {
+                entry.path.catalog() == database_path.catalog()
+                    && entry.path.database() == database_path.database()
+            })
+            .cloned()
+            .collect())
     }
 }

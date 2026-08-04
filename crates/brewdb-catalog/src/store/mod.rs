@@ -31,6 +31,7 @@ mod tests {
     fn store_factory_opens_memory_backend() {
         let store = open_catalog_store(&CatalogConfig {
             store_backend: CatalogStoreBackendKind::Memory,
+            paimon_warehouse: String::new(),
         });
 
         assert!(
@@ -45,6 +46,7 @@ mod tests {
     fn store_factory_opens_fdb_skeleton_backend() {
         let store = open_catalog_store(&CatalogConfig {
             store_backend: CatalogStoreBackendKind::Fdb,
+            paimon_warehouse: String::new(),
         });
 
         let error = store

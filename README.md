@@ -73,7 +73,7 @@ Phase 1 is organized around capability-oriented crates rather than coordinator/w
 - `brewdb-common`
   Shared common infrastructure and foundational components. This crate replaces the old `brewdb-core` role and now focuses on logger bootstrap, structured event helpers, diagnostics/error-code primitives, job-config layering primitives with explicit `system < session < statement` precedence, a registry-backed config whitelist for `brewdb.*` keys, and other low-level reusable building blocks rather than a large domain-kernel grab bag.
 - `brewdb-catalog`
-  BrewDB-owned catalog metadata kernel. Owns the `catalog.database.table` hierarchy, `Path / Ref / Entry` model, `CatalogService`, and the `CatalogStore / CatalogStoreBackend` split.
+  BrewDB-owned catalog metadata kernel. Owns the `catalog.database.table` hierarchy, `Path / Ref / Entry` model, `CatalogService`, and the `CatalogStore / CatalogStoreBackend` split. The catalog store keeps control-plane identity plus table-location bindings, while format-native schema and snapshot truth stay below the lake-format metadata boundary.
 - `brewdb-frontend`
   Session ingress and client-facing protocol boundary.
 - `brewdb-sql`

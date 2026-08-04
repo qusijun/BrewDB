@@ -7,5 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1.89"
 brewdb-common = { path = "../brewdb-common" }
+futures = "0.3.31"
+paimon.workspace = true
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 uuid.workspace = true

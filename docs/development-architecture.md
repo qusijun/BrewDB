@@ -702,8 +702,9 @@ Owns:
 
 - catalog access service
 - normalized catalog objects
-- catalog cache and route resolution
+- catalog route resolution
 - catalog-store persistence boundary
+- control-plane table-location bindings
 
 Consumes:
 
@@ -715,6 +716,7 @@ Produces:
 - normalized catalog/database/table metadata
 - storage binding lookup results
 - format-routing information
+- catalog-routed table schema resolution
 
 Must not own:
 
@@ -1528,8 +1530,8 @@ Shared core objects:
 
 Ownership split:
 
-- `brewdb-catalog` stores table schema truth inside `TableCatalogEntry`
-- planning layers consume shared schema objects when building DataFusion plans
+- `brewdb-catalog` stores table identity and location routing inside `TableCatalogEntry`
+- planning layers consume shared schema objects after resolving them from the underlying table format metadata
 - `brewdb-execution` runs on Arrow arrays and `RecordBatch`
 - `brewdb-runtime` may reference schema summaries, but should not invent a second schema model
 
@@ -2068,14 +2070,12 @@ src/
 ├── path.rs
 ├── backend.rs
 ├── errors.rs
-├── store/
-├── cache/
-└── normalize/
+└── store/
 ```
 
 Rule:
 
-- stable caller-facing APIs stay near the top; transport and cache machinery move into subdirectories
+- stable caller-facing APIs stay near the top; persistence machinery moves into subdirectories
 
 Suggested catalog substructure responsibilities:
 
@@ -2084,8 +2084,6 @@ service.rs     -> resolve catalog / database / table objects
 path.rs        -> catalog.database.table naming and object-ref helpers
 backend.rs     -> catalog backend and store-facing contracts
 store/         -> FoundationDB catalog-store access boundary
-cache/         -> normalized metadata cache boundary
-normalize/     -> normalization boundary into BrewDB models
 ```
 
 Catalog naming should stay unified:
@@ -2515,7 +2513,7 @@ Recommended internal layering shape:
 Examples:
 
 - `brewdb-runtime`: records and state types -> orchestration services -> runtime-meta backend integrations
-- `brewdb-catalog`: normalized models -> `CatalogService` -> cache/store integrations
+- `brewdb-catalog`: normalized models -> `CatalogService` -> catalog/store integrations
 - `brewdb-storage`: engine contracts -> operation realizations -> concrete `TableEngine` implementations
 
 Rule:
