@@ -108,7 +108,7 @@ mod tests {
     use crate::store::memory::MemoryCatalogStoreBackend;
 
     use super::CatalogService;
-    use brewdb_common::schema::{ColumnSchema, DataType, TableSchema};
+    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
 
     struct TestDir {
         path: PathBuf,
@@ -233,8 +233,8 @@ mod tests {
                     "sales",
                     "orders",
                     TableSchema::new(vec![
-                        ColumnSchema::new("id", DataType::Int32).with_nullable(false),
-                        ColumnSchema::new("name", DataType::String),
+                        SchemaField::new("id", DataType::Int32).with_nullable(false),
+                        SchemaField::new("name", DataType::String),
                     ]),
                 )
                 .with_options([("bucket", "1")]),
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(renamed.path.to_string(), "prod.sales.orders_v2");
         assert_eq!(altered.table_id, table.table_id);
         assert_eq!(altered.path.to_string(), "prod.sales.orders_v2");
-        assert_eq!(altered.table_schema.columns.len(), 2);
+        assert_eq!(altered.table_schema.fields.len(), 2);
         assert_eq!(
             altered.table_options.get("bucket").map(String::as_str),
             Some("2")

@@ -5,6 +5,13 @@ use std::fmt;
 
 use brewdb_common::diagnostics::{DiagnosticError, ErrorCode};
 
+const FRONTEND_AUTHENTICATION_FAILED: ErrorCode =
+    ErrorCode::new("BREWDB_FRONTEND_AUTHENTICATION_FAILED");
+const FRONTEND_INVALID_REQUEST: ErrorCode = ErrorCode::new("BREWDB_FRONTEND_INVALID_REQUEST");
+const FRONTEND_SESSION_NOT_FOUND: ErrorCode = ErrorCode::new("BREWDB_FRONTEND_SESSION_NOT_FOUND");
+const FRONTEND_UNSUPPORTED_PROTOCOL_MESSAGE: ErrorCode =
+    ErrorCode::new("BREWDB_FRONTEND_UNSUPPORTED_PROTOCOL_MESSAGE");
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendError {
     AuthenticationFailed { reason: String },
@@ -35,10 +42,10 @@ impl Error for FrontendError {}
 impl DiagnosticError for FrontendError {
     fn error_code(&self) -> ErrorCode {
         match self {
-            Self::AuthenticationFailed { .. } => ErrorCode::NotFound,
-            Self::InvalidRequest { .. } => ErrorCode::InvalidConfiguration,
-            Self::SessionNotFound { .. } => ErrorCode::NotFound,
-            Self::UnsupportedProtocolMessage { .. } => ErrorCode::NotImplemented,
+            Self::AuthenticationFailed { .. } => FRONTEND_AUTHENTICATION_FAILED,
+            Self::InvalidRequest { .. } => FRONTEND_INVALID_REQUEST,
+            Self::SessionNotFound { .. } => FRONTEND_SESSION_NOT_FOUND,
+            Self::UnsupportedProtocolMessage { .. } => FRONTEND_UNSUPPORTED_PROTOCOL_MESSAGE,
         }
     }
 

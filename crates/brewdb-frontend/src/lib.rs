@@ -17,5 +17,5 @@ pub use result::{
 pub use session::{
     ClientCapabilities, ClientConnectionContext, ClientContext, ClientDefaults, ClientIdentity,
     ClientSessionContext, ClientSqlRequest, FrontendService, OpenClientSession,
-    OpenedClientSession, RequestContext, StatementRoute, StatementRouter, StatementScope,
+    OpenedClientSession, RequestContext,
 };

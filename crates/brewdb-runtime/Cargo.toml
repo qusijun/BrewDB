@@ -11,3 +11,18 @@ brewdb-common = { path = "../brewdb-common" }
 brewdb-catalog = { path = "../brewdb-catalog" }
 brewdb-execution = { path = "../brewdb-execution" }
 brewdb-storage = { path = "../brewdb-storage" }
+brewdb-storage-paimon = { path = "../brewdb-storage-paimon" }
+brewdb-planner = { path = "../brewdb-planner" }
+datafusion = { version = "54.1.0", default-features = false, features = ["sql"] }
+datafusion-expr = "54.1.0"
+datafusion-common = "54.1.0"
+datafusion-physical-expr = "54.1.0"
+arrow = "58.4.0"
+arrow-select = "58.4.0"
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+async-trait = "0.1.89"
+futures = "0.3.31"
+uuid.workspace = true
+
+[dev-dependencies]
+brewdb-sql = { path = "../brewdb-sql" }

@@ -1,5 +1,5 @@
 [package]
-name = "brewdb-storage"
+name = "brewdb-storage-paimon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,10 @@ rust-version.workspace = true
 [dependencies]
 arrow = "58.4.0"
 brewdb-catalog = { path = "../brewdb-catalog" }
-datafusion = { version = "54.1.0", default-features = false, features = ["sql"] }
-inventory.workspace = true
-uuid.workspace = true
-
-[dev-dependencies]
 brewdb-common = { path = "../brewdb-common" }
+brewdb-storage = { path = "../brewdb-storage" }
+datafusion = { version = "54.1.0", default-features = false, features = ["sql"] }
+futures = "0.3.31"
+paimon.workspace = true
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+uuid.workspace = true
