@@ -4,25 +4,22 @@ use uuid::Uuid;
 
 /// Stable error-code namespace used across BrewDB crates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ErrorCode {
-    Internal,
-    NotFound,
-    AlreadyExists,
-    NotImplemented,
-    InvalidConfiguration,
-    LoggingInitializationFailed,
-}
+pub struct ErrorCode(&'static str);
 
 impl ErrorCode {
+    pub const INTERNAL: Self = Self::new("BREWDB_COMMON_INTERNAL");
+    pub const NOT_FOUND: Self = Self::new("BREWDB_COMMON_NOT_FOUND");
+    pub const ALREADY_EXISTS: Self = Self::new("BREWDB_COMMON_ALREADY_EXISTS");
+    pub const NOT_IMPLEMENTED: Self = Self::new("BREWDB_COMMON_NOT_IMPLEMENTED");
+    pub const INVALID_CONFIGURATION: Self = Self::new("BREWDB_COMMON_INVALID_CONFIGURATION");
+    pub const LOGGING_INITIALIZATION_FAILED: Self = Self::new("BREWDB_COMMON_LOGGING_INIT_FAILED");
+
+    pub const fn new(code: &'static str) -> Self {
+        Self(code)
+    }
+
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Internal => "BREWDB_COMMON_INTERNAL",
-            Self::NotFound => "BREWDB_COMMON_NOT_FOUND",
-            Self::AlreadyExists => "BREWDB_COMMON_ALREADY_EXISTS",
-            Self::NotImplemented => "BREWDB_COMMON_NOT_IMPLEMENTED",
-            Self::InvalidConfiguration => "BREWDB_COMMON_INVALID_CONFIGURATION",
-            Self::LoggingInitializationFailed => "BREWDB_COMMON_LOGGING_INIT_FAILED",
-        }
+        self.0
     }
 }
 
@@ -88,13 +85,13 @@ mod tests {
     fn diagnostic_context_keeps_error_code_and_job_id() {
         let job_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440011").unwrap();
         let context = DiagnosticContext::new("brewdb.catalog", "catalog.lookup")
-            .with_error_code(ErrorCode::Internal)
+            .with_error_code(ErrorCode::INTERNAL)
             .with_error_variant("TableNotFound")
             .with_job_id(job_id);
 
         assert_eq!(context.target, "brewdb.catalog");
         assert_eq!(context.event_name, "catalog.lookup");
-        assert_eq!(context.error_code, Some(ErrorCode::Internal));
+        assert_eq!(context.error_code, Some(ErrorCode::INTERNAL));
         assert_eq!(context.error_variant, Some("TableNotFound"));
         assert_eq!(
             context.job_id.as_deref(),
@@ -108,7 +105,7 @@ mod tests {
 
         impl DiagnosticError for TestError {
             fn error_code(&self) -> ErrorCode {
-                ErrorCode::Internal
+                ErrorCode::INTERNAL
             }
 
             fn log_target(&self) -> &'static str {

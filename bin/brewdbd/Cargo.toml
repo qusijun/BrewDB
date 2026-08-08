@@ -13,5 +13,4 @@ brewdb-execution = { path = "../../crates/brewdb-execution" }
 brewdb-frontend = { path = "../../crates/brewdb-frontend" }
 brewdb-runtime = { path = "../../crates/brewdb-runtime" }
 brewdb-sql = { path = "../../crates/brewdb-sql" }
-brewdb-storage = { path = "../../crates/brewdb-storage" }
 tracing.workspace = true

@@ -6,6 +6,18 @@ use std::fmt;
 use brewdb_common::diagnostics::{DiagnosticError, ErrorCode};
 use brewdb_common::errors::CommonError;
 
+const CATALOG_INVALID_PATH: ErrorCode = ErrorCode::new("BREWDB_CATALOG_INVALID_PATH");
+const CATALOG_NOT_FOUND: ErrorCode = ErrorCode::new("BREWDB_CATALOG_NOT_FOUND");
+const CATALOG_BACKEND_FAILED: ErrorCode = ErrorCode::new("BREWDB_CATALOG_BACKEND_FAILED");
+const CATALOG_BACKEND_NOT_IMPLEMENTED: ErrorCode =
+    ErrorCode::new("BREWDB_CATALOG_BACKEND_NOT_IMPLEMENTED");
+const CATALOG_UNSUPPORTED_OPERATION: ErrorCode =
+    ErrorCode::new("BREWDB_CATALOG_UNSUPPORTED_OPERATION");
+const CATALOG_UNSUPPORTED_SCHEMA_TYPE: ErrorCode =
+    ErrorCode::new("BREWDB_CATALOG_UNSUPPORTED_SCHEMA_TYPE");
+const CATALOG_FORMAT_MISMATCH: ErrorCode = ErrorCode::new("BREWDB_CATALOG_FORMAT_MISMATCH");
+const CATALOG_ALREADY_EXISTS: ErrorCode = ErrorCode::new("BREWDB_CATALOG_ALREADY_EXISTS");
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
     Common(CommonError),
@@ -141,22 +153,22 @@ impl DiagnosticError for CatalogError {
     fn error_code(&self) -> ErrorCode {
         match self {
             Self::Common(error) => error.error_code(),
-            Self::InvalidPath { .. } => ErrorCode::InvalidConfiguration,
+            Self::InvalidPath { .. } => CATALOG_INVALID_PATH,
             Self::CatalogNotFound { .. }
             | Self::CatalogNotRegistered { .. }
             | Self::CatalogRefNotFound { .. }
             | Self::DatabaseNotFound { .. }
             | Self::DatabaseRefNotFound { .. }
             | Self::TableNotFound { .. }
-            | Self::TableRefNotFound { .. } => ErrorCode::NotFound,
-            Self::CatalogBackend { .. } => ErrorCode::Internal,
-            Self::BackendNotImplemented { .. }
-            | Self::UnsupportedCatalogOperation { .. }
-            | Self::UnsupportedSchemaType { .. } => ErrorCode::NotImplemented,
-            Self::CatalogFormatMismatch { .. } => ErrorCode::InvalidConfiguration,
+            | Self::TableRefNotFound { .. } => CATALOG_NOT_FOUND,
+            Self::CatalogBackend { .. } => CATALOG_BACKEND_FAILED,
+            Self::BackendNotImplemented { .. } => CATALOG_BACKEND_NOT_IMPLEMENTED,
+            Self::UnsupportedCatalogOperation { .. } => CATALOG_UNSUPPORTED_OPERATION,
+            Self::UnsupportedSchemaType { .. } => CATALOG_UNSUPPORTED_SCHEMA_TYPE,
+            Self::CatalogFormatMismatch { .. } => CATALOG_FORMAT_MISMATCH,
             Self::DuplicateCatalog { .. }
             | Self::DuplicateDatabase { .. }
-            | Self::DuplicateTable { .. } => ErrorCode::AlreadyExists,
+            | Self::DuplicateTable { .. } => CATALOG_ALREADY_EXISTS,
         }
     }
 
@@ -206,7 +218,9 @@ impl CatalogError {
 
 #[cfg(test)]
 mod tests {
-    use brewdb_common::diagnostics::{DiagnosticError, ErrorCode};
+    use brewdb_common::diagnostics::DiagnosticError;
+
+    use crate::errors::CATALOG_NOT_FOUND;
 
     use super::CatalogError;
 
@@ -222,7 +236,7 @@ mod tests {
 
         assert_eq!(context.target, "brewdb.catalog");
         assert_eq!(context.event_name, "catalog.resolve_table");
-        assert_eq!(context.error_code, Some(ErrorCode::NotFound));
+        assert_eq!(context.error_code, Some(CATALOG_NOT_FOUND));
         assert_eq!(context.error_variant, Some("TableNotFound"));
     }
 }

@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn emit_event_accepts_structured_diagnostic_context() {
         let context = DiagnosticContext::new("brewdb.test", "logger.test")
-            .with_error_code(ErrorCode::Internal);
+            .with_error_code(ErrorCode::INTERNAL);
 
         emit_event(LogLevel::Info, &context, "logger helper smoke test");
     }

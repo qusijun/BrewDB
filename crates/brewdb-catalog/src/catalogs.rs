@@ -3,25 +3,22 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use brewdb_common::schema::{ColumnSchema, DataType, TableSchema};
 use paimon::CatalogFactory as PaimonCatalogFactory;
 use paimon::catalog::{Catalog as PaimonCatalog, Database as PaimonDatabase, Identifier};
-use paimon::spec::{
-    BigIntType, BooleanType, DataType as PaimonDataType, DateType, DecimalType, DoubleType,
-    FloatType, IntType, LocalZonedTimestampType, Schema, SchemaChange, SmallIntType, TimeType,
-    TimestampType, TinyIntType, VarBinaryType, VarCharType,
-};
+use paimon::spec::SchemaChange;
 use paimon::table::Table as PaimonTable;
 
 use crate::backend::CatalogStore;
 use crate::config::CatalogConfig;
 use crate::errors::CatalogError;
 use crate::model::{CatalogEntry, DatabaseCatalogEntry, LakeFormatKind, TableCatalogEntry};
+use crate::paimon_schema::PaimonSchemaAdapter;
 use crate::path::{DatabasePath, TablePath};
 use crate::requests::{
     AlterTableOperation, AlterTableRequest, CreateDatabaseRequest, CreateTableRequest,
     RenameTableRequest,
 };
+use crate::storage_format_schema::StorageFormatSchemaAdapter;
 
 pub trait Catalog: Send + Sync {
     fn entry(&self) -> &CatalogEntry;
@@ -166,7 +163,7 @@ impl ManagedPaimonRuntime {
 
     fn create_table(&self, request: &CreateTableRequest) -> Result<(), CatalogError> {
         let catalog = self.catalog()?;
-        let schema = build_paimon_schema(request)?;
+        let schema = PaimonSchemaAdapter::build_schema(request)?;
         self.executor()
             .block_on(catalog.create_table(
                 &Identifier::new(&request.database_name, &request.table_name),
@@ -294,7 +291,7 @@ impl ManagedPaimonCatalog {
         path: TablePath,
         table: &PaimonTable,
     ) -> Result<TableCatalogEntry, CatalogError> {
-        let schema = map_paimon_table_schema(table.schema())?;
+        let schema = PaimonSchemaAdapter::table_schema_to_brewdb(table.schema())?;
         let table_options = map_paimon_table_options(table.schema());
         Ok(TableCatalogEntry::new(
             table_id,
@@ -442,25 +439,6 @@ impl Catalog for ManagedPaimonCatalog {
     }
 }
 
-fn build_paimon_schema(request: &CreateTableRequest) -> Result<Schema, CatalogError> {
-    let mut builder = Schema::builder();
-    for column in &request.table_schema.columns {
-        builder = builder.column(&column.name, map_column_type(column)?);
-    }
-    for (key, value) in &request.table_options {
-        builder = builder.option(key.clone(), value.clone());
-    }
-    if let Some(table_location) = &request.table_location {
-        builder = builder.option("path", table_location.clone());
-    }
-    builder
-        .build()
-        .map_err(|error| CatalogError::CatalogBackend {
-            backend: "paimon",
-            message: error.to_string(),
-        })
-}
-
 fn map_paimon_error(backend: &'static str, error: paimon::Error) -> CatalogError {
     match error {
         paimon::Error::DatabaseNotExist { database } => CatalogError::DatabaseNotFound {
@@ -500,124 +478,8 @@ fn map_paimon_write_error(backend: &'static str, error: paimon::Error) -> Catalo
     }
 }
 
-fn map_column_type(column: &ColumnSchema) -> Result<PaimonDataType, CatalogError> {
-    let nullable = column.nullable;
-    match column.data_type {
-        DataType::Boolean => Ok(PaimonDataType::Boolean(BooleanType::with_nullable(
-            nullable,
-        ))),
-        DataType::Int8 => Ok(PaimonDataType::TinyInt(TinyIntType::with_nullable(
-            nullable,
-        ))),
-        DataType::Int16 => Ok(PaimonDataType::SmallInt(SmallIntType::with_nullable(
-            nullable,
-        ))),
-        DataType::Int32 => Ok(PaimonDataType::Int(IntType::with_nullable(nullable))),
-        DataType::Int64 => Ok(PaimonDataType::BigInt(BigIntType::with_nullable(nullable))),
-        DataType::Float32 => Ok(PaimonDataType::Float(FloatType::with_nullable(nullable))),
-        DataType::Double => Ok(PaimonDataType::Double(DoubleType::with_nullable(nullable))),
-        DataType::Binary => Ok(PaimonDataType::VarBinary(
-            VarBinaryType::try_new(nullable, VarBinaryType::MAX_LENGTH).map_err(|error| {
-                CatalogError::CatalogBackend {
-                    backend: "paimon",
-                    message: error.to_string(),
-                }
-            })?,
-        )),
-        DataType::Date => Ok(PaimonDataType::Date(DateType::with_nullable(nullable))),
-        DataType::Time { precision } => Ok(PaimonDataType::Time(
-            TimeType::with_nullable(nullable, precision).map_err(|error| {
-                CatalogError::CatalogBackend {
-                    backend: "paimon",
-                    message: error.to_string(),
-                }
-            })?,
-        )),
-        DataType::Timestamp {
-            precision,
-            with_time_zone,
-        } => {
-            if with_time_zone {
-                Ok(PaimonDataType::LocalZonedTimestamp(
-                    LocalZonedTimestampType::with_nullable(nullable, precision).map_err(
-                        |error| CatalogError::CatalogBackend {
-                            backend: "paimon",
-                            message: error.to_string(),
-                        },
-                    )?,
-                ))
-            } else {
-                Ok(PaimonDataType::Timestamp(
-                    TimestampType::with_nullable(nullable, precision).map_err(|error| {
-                        CatalogError::CatalogBackend {
-                            backend: "paimon",
-                            message: error.to_string(),
-                        }
-                    })?,
-                ))
-            }
-        }
-        DataType::Decimal { precision, scale } => Ok(PaimonDataType::Decimal(
-            DecimalType::with_nullable(nullable, precision, scale).map_err(|error| {
-                CatalogError::CatalogBackend {
-                    backend: "paimon",
-                    message: error.to_string(),
-                }
-            })?,
-        )),
-        DataType::String => Ok(PaimonDataType::VarChar(
-            VarCharType::with_nullable(nullable, u32::MAX).map_err(|error| {
-                CatalogError::CatalogBackend {
-                    backend: "paimon",
-                    message: error.to_string(),
-                }
-            })?,
-        )),
-    }
-}
-
 fn map_alter_operation(operation: &AlterTableOperation) -> Result<SchemaChange, CatalogError> {
-    match operation {
-        AlterTableOperation::AddColumn(column) => Ok(SchemaChange::add_column(
-            column.name.clone(),
-            map_column_type(column)?,
-        )),
-        AlterTableOperation::DropColumn { column_name } => {
-            Ok(SchemaChange::drop_column(column_name.clone()))
-        }
-        AlterTableOperation::RenameColumn { old_name, new_name } => Ok(
-            SchemaChange::rename_column(old_name.clone(), new_name.clone()),
-        ),
-        AlterTableOperation::AlterColumnType {
-            column_name,
-            data_type,
-        } => Ok(SchemaChange::update_column_type(
-            column_name.clone(),
-            map_column_type(&ColumnSchema::new(column_name, data_type.clone()))?,
-        )),
-        AlterTableOperation::SetTableOption { key, value } => {
-            Ok(SchemaChange::set_option(key.clone(), value.clone()))
-        }
-        AlterTableOperation::RemoveTableOption { key } => {
-            Ok(SchemaChange::remove_option(key.clone()))
-        }
-    }
-}
-
-fn map_paimon_table_schema(
-    schema: &paimon::spec::TableSchema,
-) -> Result<TableSchema, CatalogError> {
-    let columns = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            Ok(
-                ColumnSchema::new(field.name(), map_paimon_data_type(field.data_type())?)
-                    .with_nullable(field.data_type().is_nullable()),
-            )
-        })
-        .collect::<Result<Vec<_>, CatalogError>>()?;
-    Ok(TableSchema::new(columns))
+    PaimonSchemaAdapter::alter_operation_to_change(operation)
 }
 
 fn map_paimon_table_options(schema: &paimon::spec::TableSchema) -> BTreeMap<String, String> {
@@ -628,49 +490,13 @@ fn map_paimon_table_options(schema: &paimon::spec::TableSchema) -> BTreeMap<Stri
         .collect()
 }
 
-fn map_paimon_data_type(data_type: &PaimonDataType) -> Result<DataType, CatalogError> {
-    match data_type {
-        PaimonDataType::Boolean(_) => Ok(DataType::Boolean),
-        PaimonDataType::TinyInt(_) => Ok(DataType::Int8),
-        PaimonDataType::SmallInt(_) => Ok(DataType::Int16),
-        PaimonDataType::Int(_) => Ok(DataType::Int32),
-        PaimonDataType::BigInt(_) => Ok(DataType::Int64),
-        PaimonDataType::Float(_) => Ok(DataType::Float32),
-        PaimonDataType::Double(_) => Ok(DataType::Double),
-        PaimonDataType::Binary(_) | PaimonDataType::VarBinary(_) | PaimonDataType::Blob(_) => {
-            Ok(DataType::Binary)
-        }
-        PaimonDataType::Date(_) => Ok(DataType::Date),
-        PaimonDataType::Time(time) => Ok(DataType::Time {
-            precision: time.precision(),
-        }),
-        PaimonDataType::Timestamp(timestamp) => Ok(DataType::Timestamp {
-            precision: timestamp.precision(),
-            with_time_zone: false,
-        }),
-        PaimonDataType::LocalZonedTimestamp(timestamp) => Ok(DataType::Timestamp {
-            precision: timestamp.precision(),
-            with_time_zone: true,
-        }),
-        PaimonDataType::Decimal(decimal) => Ok(DataType::Decimal {
-            precision: decimal.precision(),
-            scale: decimal.scale(),
-        }),
-        PaimonDataType::VarChar(_) | PaimonDataType::Char(_) => Ok(DataType::String),
-        other => Err(CatalogError::UnsupportedSchemaType {
-            backend: "paimon",
-            type_name: format!("{other:?}"),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use brewdb_common::schema::{ColumnSchema, DataType, TableSchema};
+    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
     use paimon::catalog::{Catalog as PaimonCatalog, Database as PaimonDatabase, Identifier};
     use paimon::io::FileIOBuilder;
     use paimon::spec::{Schema, TableSchema as PaimonTableSchema};
@@ -817,14 +643,14 @@ mod tests {
             .create_table(CreateTableRequest::new(
                 "sales",
                 "orders",
-                TableSchema::new(vec![ColumnSchema::new("id", DataType::Int32)]),
+                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
             ))
             .unwrap();
 
         assert_eq!(database.path.to_string(), "prod.sales");
         assert_eq!(table.path.to_string(), "prod.sales.orders");
         assert_eq!(table.table_location, "s3://warehouse/sales/orders");
-        assert_eq!(table.table_schema.columns.len(), 1);
+        assert_eq!(table.table_schema.fields.len(), 1);
         assert_eq!(
             table.table_options.get("bucket").map(String::as_str),
             Some("1")
@@ -841,7 +667,7 @@ mod tests {
             .create_table(CreateTableRequest::new(
                 "sales",
                 "orders",
-                TableSchema::new(vec![ColumnSchema::new("id", DataType::Int32)]),
+                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
             ))
             .unwrap();
 

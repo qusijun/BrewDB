@@ -8,8 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+arrow = "58.4.0"
 brewdb-common = { path = "../brewdb-common" }
 futures = "0.3.31"
+datafusion-common = "54.1.0"
+datafusion-expr = "54.1.0"
 paimon.workspace = true
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 uuid.workspace = true

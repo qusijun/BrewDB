@@ -1,9 +1,6 @@
 //! Protocol-neutral session and request handling.
 
-use brewdb_sql::{
-    FrontendStatementRoute, FrontendStatementRouteScope, SqlClientCapabilities, SqlIngressRequest,
-    SqlRequestContext, SqlSessionContext,
-};
+use brewdb_sql::{SqlClientCapabilities, SqlIngressRequest, SqlRequestContext, SqlSessionContext};
 use uuid::Uuid;
 
 use crate::auth::{AuthContext, Authenticator};
@@ -140,21 +137,6 @@ pub struct ClientSqlRequest {
     pub sql: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatementScope {
-    SessionLocal,
-    RuntimeBound,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatementRoute {
-    pub scope: StatementScope,
-}
-
-pub trait StatementRouter {
-    fn route(&self, sql: &str) -> Result<StatementRoute, FrontendError>;
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct FrontendService;
 
@@ -203,7 +185,6 @@ impl FrontendService {
     pub fn build_sql_ingress_request(
         &self,
         request: &ClientSqlRequest,
-        route: &StatementRoute,
     ) -> Result<SqlIngressRequest, FrontendError> {
         if request.sql.trim().is_empty() {
             return Err(FrontendError::InvalidRequest {
@@ -222,13 +203,6 @@ impl FrontendService {
                 request_id: request.request_context.request_id,
             },
             sql: request.sql.clone(),
-            route: FrontendStatementRoute {
-                scope: match route.scope {
-                    StatementScope::SessionLocal => FrontendStatementRouteScope::SessionLocal,
-                    StatementScope::RuntimeBound => FrontendStatementRouteScope::RuntimeBound,
-                },
-                statement_name: None,
-            },
             client_capabilities: Some(SqlClientCapabilities {
                 supports_prepared_statements: request
                     .client_context
@@ -241,36 +215,6 @@ impl FrontendService {
                     .supports_streaming_results,
             }),
         })
-    }
-}
-
-impl StatementRouter for FrontendService {
-    fn route(&self, sql: &str) -> Result<StatementRoute, FrontendError> {
-        let normalized = sql.trim();
-        if normalized.is_empty() {
-            return Err(FrontendError::InvalidRequest {
-                reason: "SQL text must not be empty".to_string(),
-            });
-        }
-
-        let upper = normalized.to_ascii_uppercase();
-        let route = if upper.starts_with("SET ")
-            || upper == "BEGIN"
-            || upper == "COMMIT"
-            || upper == "ROLLBACK"
-            || upper.starts_with("SHOW ")
-            || upper.starts_with("USE ")
-        {
-            StatementRoute {
-                scope: StatementScope::SessionLocal,
-            }
-        } else {
-            StatementRoute {
-                scope: StatementScope::RuntimeBound,
-            }
-        };
-
-        Ok(route)
     }
 }
 
@@ -309,24 +253,8 @@ mod tests {
 
     use super::{
         ClientCapabilities, ClientConnectionContext, ClientDefaults, FrontendService,
-        OpenClientSession, RequestContext, StatementRouter, StatementScope,
+        OpenClientSession, RequestContext,
     };
-
-    #[test]
-    fn router_keeps_set_inside_session_boundary() {
-        let service = FrontendService;
-        let route = service.route("set search_path = brew").unwrap();
-
-        assert_eq!(route.scope, StatementScope::SessionLocal);
-    }
-
-    #[test]
-    fn router_sends_select_into_runtime_path() {
-        let service = FrontendService;
-        let route = service.route("select 1").unwrap();
-
-        assert_eq!(route.scope, StatementScope::RuntimeBound);
-    }
 
     #[test]
     fn service_builds_request_for_opened_session() {
@@ -360,11 +288,11 @@ mod tests {
 mod sql_handoff_tests {
     use uuid::Uuid;
 
-    use brewdb_sql::{FrontendStatementRouteScope, SqlClientCapabilities, SqlIngressRequest};
+    use brewdb_sql::{SqlClientCapabilities, SqlIngressRequest};
 
     use crate::session::{
         ClientCapabilities, ClientContext, ClientDefaults, ClientIdentity, ClientSessionContext,
-        ClientSqlRequest, FrontendService, RequestContext, StatementRoute, StatementScope,
+        ClientSqlRequest, FrontendService, RequestContext,
     };
 
     fn make_client_request(sql: &str) -> ClientSqlRequest {
@@ -391,13 +319,7 @@ mod sql_handoff_tests {
     #[test]
     fn client_sql_request_maps_to_sql_ingress_request() {
         let request = make_client_request("select 1");
-        let route = StatementRoute {
-            scope: StatementScope::RuntimeBound,
-        };
-
-        let sql_request = FrontendService
-            .build_sql_ingress_request(&request, &route)
-            .unwrap();
+        let sql_request = FrontendService.build_sql_ingress_request(&request).unwrap();
 
         assert_eq!(sql_request.session.session_id, Uuid::nil());
         assert_eq!(sql_request.session.user_name, "brew");
@@ -405,11 +327,6 @@ mod sql_handoff_tests {
         assert_eq!(sql_request.session.catalog_name.as_deref(), Some("main"));
         assert_eq!(sql_request.request.request_id, Uuid::nil());
         assert_eq!(sql_request.sql, "select 1");
-        assert_eq!(
-            sql_request.route.scope,
-            FrontendStatementRouteScope::RuntimeBound
-        );
-        assert_eq!(sql_request.route.statement_name, None);
         assert_eq!(
             sql_request.client_capabilities,
             Some(SqlClientCapabilities {
@@ -423,19 +340,9 @@ mod sql_handoff_tests {
     #[test]
     fn sql_ingress_request_does_not_include_connection_transport_data() {
         let request = make_client_request("set search_path = brew");
-        let route = StatementRoute {
-            scope: StatementScope::SessionLocal,
-        };
+        let sql_request: SqlIngressRequest =
+            FrontendService.build_sql_ingress_request(&request).unwrap();
 
-        let sql_request: SqlIngressRequest = FrontendService
-            .build_sql_ingress_request(&request, &route)
-            .unwrap();
-
-        assert_eq!(
-            sql_request.route.scope,
-            FrontendStatementRouteScope::SessionLocal
-        );
-        assert_eq!(sql_request.route.statement_name, None);
         assert_eq!(std::mem::size_of_val(&sql_request.session.session_id), 16);
     }
 }

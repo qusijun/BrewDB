@@ -9,5 +9,5 @@ rust-version.workspace = true
 [dependencies]
 brewdb-common = { path = "../brewdb-common" }
 brewdb-catalog = { path = "../brewdb-catalog" }
-brewdb-runtime = { path = "../brewdb-runtime" }
+datafusion-sql = "54.0.0"
 uuid.workspace = true

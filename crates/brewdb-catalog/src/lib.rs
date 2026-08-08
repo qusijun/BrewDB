@@ -5,9 +5,11 @@ pub mod catalogs;
 pub mod config;
 pub mod errors;
 pub mod model;
+mod paimon_schema;
 pub mod path;
 pub mod requests;
 pub mod service;
+mod storage_format_schema;
 pub mod store;
 
 pub use backend::{CatalogStore, CatalogStoreBackend};
@@ -18,7 +20,7 @@ pub use config::{
 pub use errors::CatalogError;
 pub use model::{
     CatalogEntry, CatalogMode, CatalogRef, DatabaseCatalogEntry, DatabaseRef, LakeFormatKind,
-    TableCatalogEntry, TableRef,
+    TableCatalogEntry, TableRef, TableStatsHandle, TableSummary,
 };
 pub use path::{CatalogPath, DatabasePath, TablePath};
 pub use requests::{

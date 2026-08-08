@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use brewdb_common::schema::{ColumnSchema, DataType, TableSchema};
+use brewdb_common::schema::{DataType, SchemaField, TableSchema};
 
-pub type ColumnDefinition = ColumnSchema;
+pub type ColumnDefinition = SchemaField;
 pub type TableDefinition = TableSchema;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

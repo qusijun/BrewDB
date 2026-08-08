@@ -877,7 +877,7 @@ mod tests {
             .apply_patch_with_registry(&registry, &patch)
             .unwrap_err();
 
-        assert_eq!(error.error_code(), ErrorCode::InvalidConfiguration);
+        assert_eq!(error.error_code(), ErrorCode::INVALID_CONFIGURATION);
         assert_eq!(
             error.to_string(),
             "invalid configuration for `brewdb.execution.unknown_option`: unknown config key"
@@ -922,7 +922,7 @@ mod tests {
 
         let error = config.get_u64("brewdb.execution.max_threads").unwrap_err();
 
-        assert_eq!(error.error_code(), ErrorCode::InvalidConfiguration);
+        assert_eq!(error.error_code(), ErrorCode::INVALID_CONFIGURATION);
         assert_eq!(
             error.to_string(),
             "invalid configuration for `brewdb.execution.max_threads`: expected u64, found string"
