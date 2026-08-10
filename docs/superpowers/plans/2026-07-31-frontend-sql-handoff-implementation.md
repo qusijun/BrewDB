@@ -4,7 +4,7 @@
 
 **Goal:** Build a protocol-neutral `brewdb-frontend -> brewdb-sql` ingress boundary that classifies statements through SQL-owned contracts without leaking pgwire-specific details.
 
-**Architecture:** `brewdb-sql` becomes the owner of ingress validation and statement-envelope truth through new `ingress`, `statement`, and `errors` modules. `brewdb-frontend` keeps owning client/session/request truth, and adds a narrow adapter that maps `ClientSqlRequest` plus frontend routing into `SqlIngressRequest`.
+**Architecture:** `brewdb-sql` becomes the owner of ingress validation and statement-envelope truth through new `ingress`, `statement`, and `errors` modules. `brewdb-frontend` keeps owning client/session/request truth, and adds a narrow adapter that maps `SqlRequest` plus frontend routing into `SqlIngressRequest`.
 
 **Tech Stack:** Rust 2024 workspace crates, `uuid`, existing BrewDB common diagnostics helpers, crate-local unit tests via `cargo test --offline`
 
@@ -30,7 +30,7 @@
 - Modify: `crates/brewdb-frontend/src/lib.rs`
   - keep frontend public exports aligned after adding the SQL handoff adapter
 - Modify: `crates/brewdb-frontend/src/session/mod.rs`
-  - add adapter method from `ClientSqlRequest` to `SqlIngressRequest`
+  - add adapter method from `SqlRequest` to `SqlIngressRequest`
   - add focused tests for protocol-neutral mapping
 
 ## Task 1: Add Failing SQL Ingress Tests
@@ -426,11 +426,11 @@ mod sql_handoff_tests {
 
     use crate::session::{
         ClientCapabilities, ClientContext, ClientDefaults, ClientIdentity, ClientSessionContext,
-        ClientSqlRequest, FrontendService, RequestContext, StatementRoute, StatementScope,
+        FrontendService, RequestContext, SqlRequest, StatementRoute, StatementScope,
     };
 
-    fn make_client_request(sql: &str) -> ClientSqlRequest {
-        ClientSqlRequest {
+    fn make_sql_request(sql: &str) -> SqlRequest {
+        SqlRequest {
             client_context: ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::nil(),
@@ -451,8 +451,8 @@ mod sql_handoff_tests {
     }
 
     #[test]
-    fn client_sql_request_maps_to_sql_ingress_request() {
-        let request = make_client_request("select 1");
+    fn sql_request_maps_to_sql_ingress_request() {
+        let request = make_sql_request("select 1");
         let route = StatementRoute {
             scope: StatementScope::RuntimeBound,
             statement_name: "SELECT",
@@ -481,7 +481,7 @@ mod sql_handoff_tests {
 
     #[test]
     fn sql_ingress_request_does_not_include_connection_transport_data() {
-        let request = make_client_request("set search_path = brew");
+        let request = make_sql_request("set search_path = brew");
         let route = StatementRoute {
             scope: StatementScope::SessionLocal,
             statement_name: "SET",
@@ -516,7 +516,7 @@ use brewdb_sql::{
 impl FrontendService {
     pub fn build_sql_ingress_request(
         &self,
-        request: &ClientSqlRequest,
+        request: &SqlRequest,
         route: &StatementRoute,
     ) -> Result<SqlIngressRequest, FrontendError> {
         if request.sql.trim().is_empty() {
@@ -593,7 +593,7 @@ uuid.workspace = true
 // crates/brewdb-frontend/src/lib.rs
 pub use session::{
     ClientCapabilities, ClientConnectionContext, ClientContext, ClientDefaults, ClientIdentity,
-    ClientSessionContext, ClientSqlRequest, FrontendService, OpenClientSession,
+    ClientSessionContext, FrontendService, OpenClientSession, SqlRequest,
     OpenedClientSession, RequestContext, StatementRoute, StatementRouter, StatementScope,
 };
 ```
@@ -629,7 +629,7 @@ git commit -m "feat: wire frontend sql handoff boundary"
 
 - formal SQL ingress contract: covered by Task 1
 - SQL-owned statement envelope: covered by Task 1
-- frontend mapping from `ClientSqlRequest`: covered by Task 2
+- frontend mapping from `SqlRequest`: covered by Task 2
 - protocol-neutral field boundary: covered by Task 2 and Task 3 verification
 - unsupported-statement error path: covered by Task 1
 - crate-level validation and formatting: covered by Task 3

@@ -82,7 +82,7 @@ The main cross-layer contracts should converge on the following objects.
 
 - `ClientContext`
 - `RequestContext`
-- `ClientSqlRequest`
+- `SqlRequest`
 - `OpenClientSession`
 - `OpenedClientSession`
 
@@ -112,7 +112,7 @@ Context boundary note:
 
 The intended chain is:
 
-`ClientSqlRequest -> optimized LogicalPlan -> DistributedPlan -> StageTemplate -> TaskInstance -> TaskPayload`
+`SqlRequest -> optimized LogicalPlan -> DistributedPlan -> StageTemplate -> TaskInstance -> TaskPayload`
 
 ## 1.4 Plan Layers
 
@@ -171,7 +171,7 @@ struct ClientContext {
     capabilities: ClientCapabilities,
 }
 
-struct ClientSqlRequest {
+struct SqlRequest {
     client_context: ClientContext,
     request_context: RequestContext,
     sql: String,

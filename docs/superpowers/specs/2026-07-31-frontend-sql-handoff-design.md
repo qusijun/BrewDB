@@ -27,7 +27,7 @@ Introduce a formal SQL ingress contract owned by `brewdb-sql`.
 
 The handoff flow becomes:
 
-`PgWireRequest -> ClientSqlRequest -> SqlIngressRequest -> SqlStatementEnvelope`
+`PgWireRequest -> SqlRequest -> SqlIngressRequest -> SqlStatementEnvelope`
 
 Responsibilities remain split as follows:
 
@@ -35,7 +35,7 @@ Responsibilities remain split as follows:
   - protocol adapters
   - session and request lifecycle
   - frontend statement routing
-  - translation from `ClientSqlRequest` into SQL ingress input
+  - translation from `SqlRequest` into SQL ingress input
 - `brewdb-sql`
   - ingress validation
   - statement classification truth
@@ -85,7 +85,7 @@ Why this was rejected for now:
 
 `brewdb-frontend` continues to own:
 
-- `ClientSqlRequest`
+- `SqlRequest`
 - `ClientContext`
 - `RequestContext`
 - frontend routing decision (`session-local` vs `runtime-bound`)
@@ -167,12 +167,12 @@ Expected extension points:
 Expected stable areas:
 
 - session/request contracts
-- `ClientSqlRequest`
+- `SqlRequest`
 - `SqlIngressRequest`
 - `SqlStatementEnvelope`
 - `brewdb-sql` statement classification boundary
 
-This means pgwire and ADBC should diverge before `ClientSqlRequest` and converge again at `SqlIngressRequest`.
+This means pgwire and ADBC should diverge before `SqlRequest` and converge again at `SqlIngressRequest`.
 
 ## Error Model
 
@@ -220,7 +220,7 @@ This keeps the SQL entry boundary explicit and isolated from future parser/binde
 The minimal closed boundary for this milestone is:
 
 1. protocol adapter creates or resumes frontend session state
-2. frontend builds `ClientSqlRequest`
+2. frontend builds `SqlRequest`
 3. frontend maps request into `SqlIngressRequest`
 4. sql validates request and classifies statement
 5. sql returns `SqlStatementEnvelope`
@@ -243,7 +243,7 @@ Add unit tests that prove:
 
 Add unit tests that prove:
 
-- `ClientSqlRequest` maps to `SqlIngressRequest` with the expected identity and request fields
+- `SqlRequest` maps to `SqlIngressRequest` with the expected identity and request fields
 - protocol-specific details do not appear in the SQL handoff contract
 
 The tests should verify the boundary shape rather than parser completeness.
