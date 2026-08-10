@@ -1,10 +1,12 @@
 //! Runtime-facing execution bridge contracts.
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use arrow::record_batch::RecordBatch;
 use brewdb_catalog::TableCatalogEntry;
 use brewdb_common::runtime::QueryContext;
 use brewdb_planner::LocalFragmentPlan;
@@ -22,9 +24,18 @@ pub struct QueryExecutionRequest {
     pub distributed_plan: DistributedPlan,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct QueryExecutionHandle {
     pub query_context: QueryContext,
+    pub output: Arc<QueryOutput>,
+}
+
+impl fmt::Debug for QueryExecutionHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryExecutionHandle")
+            .field("query_context", &self.query_context)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +63,35 @@ impl ExchangePageSink for TransportExchangePageSink {
             .transport_registry
             .transport(&channel.target_endpoint)?;
         transport.send_exchange_page(page)
+    }
+}
+
+#[derive(Default)]
+pub struct QueryOutput {
+    batches: Mutex<VecDeque<RecordBatch>>,
+}
+
+impl QueryOutput {
+    pub fn next_result(&self) -> Result<Option<RecordBatch>, ExecutionRuntimeError> {
+        Ok(self
+            .batches
+            .lock()
+            .map_err(|_| ExecutionRuntimeError::RuntimeInitFailed {
+                reason: "query result reader lock is poisoned".to_owned(),
+            })?
+            .pop_front())
+    }
+}
+
+impl crate::rpc::ResultBatchSink for QueryOutput {
+    fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::rpc::RpcError> {
+        self.batches
+            .lock()
+            .map_err(|_| crate::rpc::RpcError::ExecutionFailed {
+                reason: "query result reader lock is poisoned".to_owned(),
+            })?
+            .push_back(batch);
+        Ok(())
     }
 }
 
@@ -236,11 +276,15 @@ impl DataFusionExecutionRuntime {
         request: QueryExecutionRequest,
         dispatches: Vec<FragmentDispatch>,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
+        let output = Arc::new(QueryOutput::default());
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for dispatch in dispatches {
                 let transport_registry = Arc::clone(&self.transport_registry);
+                let result_batch_sink = Arc::clone(&output) as Arc<dyn crate::rpc::ResultBatchSink>;
                 joins.push(scope.spawn(move || {
+                    let is_root_fragment =
+                        dispatch.fragment.kind == brewdb_planner::plan::PlanFragmentKind::Root;
                     let page_sink = Arc::new(TransportExchangePageSink {
                         transport_registry: Arc::clone(&transport_registry),
                     });
@@ -255,21 +299,22 @@ impl DataFusionExecutionRuntime {
                             .map_err(|err| ExecutionRuntimeError::InvalidPlan {
                                 reason: err.to_string(),
                             })?;
+                    let mut task = FragmentTask::new(LocalFragmentPlan {
+                        query_context: prepared.query_context.clone(),
+                        fragment_id: prepared.fragment_id,
+                        fragment_kind: prepared.fragment_kind,
+                        logical_plan: prepared.logical_plan,
+                    })
+                    .with_exchange_channels(
+                        dispatch.exchange_inputs.clone(),
+                        dispatch.exchange_outputs.clone(),
+                    )
+                    .with_exchange_page_sink(page_sink);
+                    if is_root_fragment {
+                        task = task.with_result_batch_sink(result_batch_sink);
+                    }
                     client
-                        .execute_fragment(
-                            dispatch.worker_id,
-                            FragmentTask::new(LocalFragmentPlan {
-                                query_context: prepared.query_context.clone(),
-                                fragment_id: prepared.fragment_id,
-                                fragment_kind: prepared.fragment_kind,
-                                logical_plan: prepared.logical_plan,
-                            })
-                            .with_exchange_channels(
-                                dispatch.exchange_inputs.clone(),
-                                dispatch.exchange_outputs.clone(),
-                            )
-                            .with_exchange_page_sink(page_sink),
-                        )
+                        .execute_fragment(dispatch.worker_id, task)
                         .map_err(|err| ExecutionRuntimeError::InvalidPlan {
                             reason: err.to_string(),
                         })?;
@@ -288,6 +333,7 @@ impl DataFusionExecutionRuntime {
 
         Ok(QueryExecutionHandle {
             query_context: request.query_context,
+            output,
         })
     }
 }
@@ -320,7 +366,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use arrow::array::{ArrayRef, Int32Array};
+    use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use brewdb_catalog::{
@@ -522,6 +568,14 @@ mod tests {
         let array: ArrayRef = Arc::new(Int32Array::from(values.to_vec()));
         let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
         storage.register_batches(table, vec![vec![batch]]).unwrap();
+    }
+
+    fn drain_query_results(handle: &super::QueryExecutionHandle) -> Vec<RecordBatch> {
+        let mut batches = Vec::new();
+        while let Some(batch) = handle.output.next_result().unwrap() {
+            batches.push(batch);
+        }
+        batches
     }
 
     fn build_table_scan_fragment(table: &TableCatalogEntry) -> PlanFragment {
@@ -779,6 +833,92 @@ mod tests {
         let query_context = request.query_context.clone();
         let handle = runtime.execute_query(request).unwrap();
         assert_eq!(handle.query_context, query_context);
+    }
+
+    #[test]
+    fn runtime_reads_single_node_query_results_through_fragment_dispatch() {
+        let table = build_table();
+        let storage = Arc::new(MemoryStorageEngine::default());
+        register_table(&storage, &table, &[1, 2, 3]);
+        let runtime = DataFusionExecutionRuntime::with_storage(storage);
+        let request = QueryExecutionRequest {
+            query_context: QueryContext {
+                query_id: uuid::Uuid::new_v4(),
+            },
+            distributed_plan: DistributedPlan {
+                query_context: QueryContext {
+                    query_id: uuid::Uuid::new_v4(),
+                },
+                fragments: vec![build_table_scan_fragment(&table)],
+                exchanges: vec![],
+            },
+        };
+
+        let handle = runtime.execute_query(request).unwrap();
+        let batches = drain_query_results(&handle);
+
+        assert_eq!(batches.len(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("query result must be int32");
+        assert_eq!(
+            (0..values.len())
+                .map(|idx| values.value(idx))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn runtime_reads_single_node_aggregate_results_through_exchange() {
+        let table = build_table();
+        let storage = Arc::new(MemoryStorageEngine::default());
+        register_table(&storage, &table, &[1, 2, 3]);
+        let planner = DistributedPlanner::default();
+        let parsed = SqlParser
+            .parse_one("select count(id) from orders")
+            .unwrap()
+            .ast;
+        let query_context = QueryContext {
+            query_id: uuid::Uuid::new_v4(),
+        };
+        let plan = planner
+            .build(DistributedPlannerRequest {
+                query_context: query_context.clone(),
+                statement: BoundPlanStatement::Query(brewdb_sql::BoundQueryStatement {
+                    statement_text: "select count(id) from orders".to_owned(),
+                    session: brewdb_sql::BoundSessionContext {
+                        session_id: uuid::Uuid::new_v4(),
+                        user_name: "brew".to_owned(),
+                        catalog_name: "prod".to_owned(),
+                        database_name: "sales".to_owned(),
+                    },
+                    tables: vec![table],
+                    ast: parsed,
+                }),
+            })
+            .unwrap();
+        assert_eq!(plan.fragments.len(), 2);
+        assert_eq!(plan.exchanges.len(), 1);
+
+        let handle = DataFusionExecutionRuntime::with_storage(storage)
+            .execute_query(QueryExecutionRequest {
+                query_context,
+                distributed_plan: plan,
+            })
+            .unwrap();
+        let batches = drain_query_results(&handle);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        let counts = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("count result must be int64");
+        assert_eq!(counts.value(0), 3);
     }
 
     #[test]

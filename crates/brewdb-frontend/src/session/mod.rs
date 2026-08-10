@@ -131,7 +131,7 @@ impl RequestContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientSqlRequest {
+pub struct SqlRequest {
     pub client_context: ClientContext,
     pub request_context: RequestContext,
     pub sql: String,
@@ -167,7 +167,7 @@ impl FrontendService {
         session: &OpenedClientSession,
         request_context: RequestContext,
         sql: impl Into<String>,
-    ) -> Result<ClientSqlRequest, FrontendError> {
+    ) -> Result<SqlRequest, FrontendError> {
         let sql = sql.into();
         if sql.trim().is_empty() {
             return Err(FrontendError::InvalidRequest {
@@ -175,7 +175,7 @@ impl FrontendService {
             });
         }
 
-        Ok(ClientSqlRequest {
+        Ok(SqlRequest {
             client_context: session.context.clone(),
             request_context,
             sql,
@@ -184,7 +184,7 @@ impl FrontendService {
 
     pub fn build_sql_ingress_request(
         &self,
-        request: &ClientSqlRequest,
+        request: &SqlRequest,
     ) -> Result<SqlIngressRequest, FrontendError> {
         if request.sql.trim().is_empty() {
             return Err(FrontendError::InvalidRequest {
@@ -292,11 +292,11 @@ mod sql_handoff_tests {
 
     use crate::session::{
         ClientCapabilities, ClientContext, ClientDefaults, ClientIdentity, ClientSessionContext,
-        ClientSqlRequest, FrontendService, RequestContext,
+        FrontendService, RequestContext, SqlRequest,
     };
 
-    fn make_client_request(sql: &str) -> ClientSqlRequest {
-        ClientSqlRequest {
+    fn make_sql_request(sql: &str) -> SqlRequest {
+        SqlRequest {
             client_context: ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::nil(),
@@ -317,8 +317,8 @@ mod sql_handoff_tests {
     }
 
     #[test]
-    fn client_sql_request_maps_to_sql_ingress_request() {
-        let request = make_client_request("select 1");
+    fn sql_request_maps_to_sql_ingress_request() {
+        let request = make_sql_request("select 1");
         let sql_request = FrontendService.build_sql_ingress_request(&request).unwrap();
 
         assert_eq!(sql_request.session.session_id, Uuid::nil());
@@ -339,7 +339,7 @@ mod sql_handoff_tests {
 
     #[test]
     fn sql_ingress_request_does_not_include_connection_transport_data() {
-        let request = make_client_request("set search_path = brew");
+        let request = make_sql_request("set search_path = brew");
         let sql_request: SqlIngressRequest =
             FrontendService.build_sql_ingress_request(&request).unwrap();
 

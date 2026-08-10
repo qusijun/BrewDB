@@ -505,6 +505,7 @@ dependencies = [
 name = "brewdb-frontend"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "brewdb-common",
  "brewdb-execution",
  "brewdb-runtime",
@@ -595,13 +596,13 @@ dependencies = [
 name = "brewdbd"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "brewdb-catalog",
  "brewdb-common",
- "brewdb-execution",
  "brewdb-frontend",
  "brewdb-runtime",
- "brewdb-sql",
- "tracing",
+ "brewdb-storage",
+ "uuid",
 ]
 
 [[package]]

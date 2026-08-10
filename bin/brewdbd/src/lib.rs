@@ -1,0 +1,442 @@
+//! BrewDB daemon application wiring.
+
+use std::error::Error;
+use std::fmt;
+use std::net::{TcpListener, ToSocketAddrs};
+use std::path::Path;
+use std::sync::Arc;
+
+use brewdb_catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
+use brewdb_common::config::{ConfigSet, ConfigView, SystemConfigLoader, global_config_registry};
+use brewdb_common::errors::CommonError;
+use brewdb_common::logging::{LoggingConfig, init_logging};
+use brewdb_frontend::{
+    ClientDefaults, FrontendConfig, FrontendError, FrontendResponse, FrontendService,
+    ProtocolRegistry, QueryResultOutput, ResultField, SqlExecutionResult, SqlRequest,
+    SqlRequestHandler,
+};
+use brewdb_runtime::{DataFusionExecutionRuntime, QueryExecutionHandle, SqlDriver, SqlDriverError};
+
+#[derive(Debug)]
+pub enum BrewDbServerError {
+    Common(CommonError),
+    Catalog(CatalogError),
+    Frontend(FrontendError),
+    Driver(SqlDriverError),
+}
+
+impl fmt::Display for BrewDbServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Common(error) => write!(f, "{error}"),
+            Self::Catalog(error) => write!(f, "{error}"),
+            Self::Frontend(error) => write!(f, "{error}"),
+            Self::Driver(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl Error for BrewDbServerError {}
+
+impl From<CommonError> for BrewDbServerError {
+    fn from(value: CommonError) -> Self {
+        Self::Common(value)
+    }
+}
+
+impl From<CatalogError> for BrewDbServerError {
+    fn from(value: CatalogError) -> Self {
+        Self::Catalog(value)
+    }
+}
+
+impl From<FrontendError> for BrewDbServerError {
+    fn from(value: FrontendError) -> Self {
+        Self::Frontend(value)
+    }
+}
+
+impl From<SqlDriverError> for BrewDbServerError {
+    fn from(value: SqlDriverError) -> Self {
+        Self::Driver(value)
+    }
+}
+
+pub struct BrewDbServer {
+    frontend: FrontendService,
+    client_defaults: ClientDefaults,
+    listen_address: String,
+    protocols: ProtocolRegistry,
+    sql_driver: SqlDriver,
+}
+
+impl BrewDbServer {
+    pub fn from_system_config(config: ConfigSet) -> Result<Self, BrewDbServerError> {
+        let catalog_config = CatalogConfig::from_config_set(&config)?;
+        let frontend_config = FrontendConfig::from_config_set(&config)?;
+        let catalog_service =
+            CatalogService::with_config(open_catalog_store(&catalog_config), config);
+        let mut server =
+            Self::with_catalog_service(catalog_service, DataFusionExecutionRuntime::default());
+        server.client_defaults =
+            ClientDefaults::default().with_catalog(frontend_config.default_catalog());
+        server.listen_address = frontend_config.pgwire_listen_addr().to_owned();
+        Ok(server)
+    }
+
+    pub fn from_config_file(path: impl AsRef<Path>) -> Result<Self, BrewDbServerError> {
+        let loader = SystemConfigLoader::for_global_registry()?;
+        Self::from_system_config(loader.load_toml_file(path)?)
+    }
+
+    pub fn with_catalog_service(
+        catalog_service: CatalogService,
+        runtime: DataFusionExecutionRuntime,
+    ) -> Self {
+        Self {
+            frontend: FrontendService,
+            client_defaults: ClientDefaults::default().with_catalog("main"),
+            listen_address: "127.0.0.1:5432".to_owned(),
+            protocols: ProtocolRegistry::with_builtin_plugins(),
+            sql_driver: SqlDriver::new(catalog_service, runtime),
+        }
+    }
+
+    pub fn execute_client_request(
+        &self,
+        request: &SqlRequest,
+    ) -> Result<QueryExecutionHandle, BrewDbServerError> {
+        let ingress = self.frontend.build_sql_ingress_request(request)?;
+        self.sql_driver.execute(ingress).map_err(Into::into)
+    }
+
+    pub fn frontend(&self) -> &FrontendService {
+        &self.frontend
+    }
+
+    pub fn protocols(&self) -> &ProtocolRegistry {
+        &self.protocols
+    }
+
+    pub fn listen_address(&self) -> &str {
+        &self.listen_address
+    }
+
+    pub fn with_default_catalog(mut self, catalog_name: impl Into<String>) -> Self {
+        self.client_defaults = ClientDefaults::default().with_catalog(catalog_name);
+        self
+    }
+
+    pub fn serve_protocol(
+        self: Arc<Self>,
+        protocol_name: &str,
+        listener: TcpListener,
+    ) -> Result<(), BrewDbServerError> {
+        let plugin = self.protocols.plugin(protocol_name).ok_or_else(|| {
+            BrewDbServerError::Frontend(FrontendError::UnsupportedProtocolMessage {
+                message: format!("protocol plugin `{protocol_name}` is not registered"),
+            })
+        })?;
+        let handler = Arc::clone(&self) as Arc<dyn SqlRequestHandler>;
+
+        for connection in listener.incoming() {
+            let stream = connection.map_err(|error| {
+                BrewDbServerError::Frontend(FrontendError::UnsupportedProtocolMessage {
+                    message: format!("failed to accept frontend connection: {error}"),
+                })
+            })?;
+            let plugin = Arc::clone(&plugin);
+            let frontend = self.frontend.clone();
+            let defaults = self.client_defaults.clone();
+            let handler = Arc::clone(&handler);
+            std::thread::spawn(move || {
+                if let Err(error) = plugin.serve_connection(stream, frontend, defaults, handler) {
+                    eprintln!("frontend connection failed: {error}");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    pub fn serve_tcp(
+        self: Arc<Self>,
+        protocol_name: &str,
+        address: impl ToSocketAddrs,
+    ) -> Result<(), BrewDbServerError> {
+        let listener = TcpListener::bind(address).map_err(|error| {
+            BrewDbServerError::Frontend(FrontendError::UnsupportedProtocolMessage {
+                message: format!("failed to bind frontend listener: {error}"),
+            })
+        })?;
+        self.serve_protocol(protocol_name, listener)
+    }
+}
+
+pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
+    let registry = global_config_registry()?;
+    let config = registry.materialize_defaults();
+    init_logging(&LoggingConfig::default())?;
+    BrewDbServer::from_system_config(config)
+}
+
+impl SqlRequestHandler for BrewDbServer {
+    fn execute(&self, request: &SqlRequest) -> Result<SqlExecutionResult, FrontendError> {
+        let handle = self.execute_client_request(request).map_err(|error| {
+            FrontendError::QueryExecutionFailed {
+                reason: error.to_string(),
+            }
+        })?;
+        let mut batches = Vec::new();
+        while let Some(batch) =
+            handle
+                .output
+                .next_result()
+                .map_err(|error| FrontendError::QueryExecutionFailed {
+                    reason: error.to_string(),
+                })?
+        {
+            batches.push(batch);
+        }
+
+        let fields = batches
+            .first()
+            .map(|batch| {
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| ResultField::new(field.name(), field.data_type().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let row_count = batches.iter().map(|batch| batch.num_rows() as u64).sum();
+        let response = FrontendResponse::new(QueryResultOutput::query("SELECT", row_count, fields));
+
+        Ok(SqlExecutionResult { response, batches })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Int32Array, Int64Array};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use brewdb_catalog::{
+        CatalogConfig, CatalogEntry, CatalogMode, CatalogPath, CatalogService,
+        CatalogStoreBackendKind, CreateDatabaseRequest, CreateTableRequest, LakeFormatKind,
+        open_catalog_store,
+    };
+    use brewdb_common::config::{ConfigPatch, ConfigScope, global_config_registry};
+    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_frontend::{
+        ClientCapabilities, ClientDefaults, ClientIdentity, ClientSessionContext,
+        OpenedClientSession, PgWireCodec, RequestContext, SqlRequestHandler,
+    };
+    use brewdb_runtime::DataFusionExecutionRuntime;
+    use brewdb_storage::MemoryStorageEngine;
+    use uuid::Uuid;
+
+    use super::BrewDbServer;
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("brewdbd-e2e-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn build_test_server() -> BrewDbServer {
+        let warehouse = TestDir::new();
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System)
+                    .with_entry("brewdb.catalog.store.backend", "memory")
+                    .with_entry(
+                        "brewdb.catalog.paimon.warehouse",
+                        warehouse.path.to_string_lossy().as_ref(),
+                    ),
+            )
+            .unwrap();
+        let catalog_service = CatalogService::with_config(
+            open_catalog_store(&CatalogConfig {
+                store_backend: CatalogStoreBackendKind::Memory,
+                paimon_warehouse: warehouse.path.to_string_lossy().into_owned(),
+            }),
+            config,
+        );
+        catalog_service
+            .create_catalog(CatalogEntry::new(
+                Uuid::new_v4(),
+                CatalogPath::new("prod").unwrap(),
+                CatalogMode::Managed,
+                LakeFormatKind::Paimon,
+            ))
+            .unwrap();
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+
+        let storage = Arc::new(MemoryStorageEngine::default());
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            true,
+        )]));
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        storage
+            .register_batches(
+                &table,
+                vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+            )
+            .unwrap();
+
+        BrewDbServer::with_catalog_service(
+            catalog_service,
+            DataFusionExecutionRuntime::with_storage(storage),
+        )
+    }
+
+    #[test]
+    fn server_wires_frontend_sql_driver_runtime_and_storage() {
+        let server = build_test_server();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database("sales"),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default()
+                    .with_catalog("prod")
+                    .with_database("sales"),
+                identity: ClientIdentity::new("brew").with_database("sales"),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "select count(id) from orders",
+            )
+            .unwrap();
+        let handle = server.execute_client_request(&request).unwrap();
+        let batch = handle.output.next_result().unwrap().unwrap();
+        let count = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 3);
+    }
+
+    #[test]
+    fn server_serves_pgwire_query_through_catalog_planner_runtime_and_storage() {
+        let server = Arc::new(build_test_server().with_default_catalog("prod"));
+        let (server_stream, mut client_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server_for_connection = Arc::clone(&server);
+        let connection = std::thread::spawn(move || {
+            PgWireCodec
+                .serve_connection_io(
+                    server_stream,
+                    server_for_connection.frontend().clone(),
+                    server_for_connection.client_defaults.clone(),
+                    server_for_connection as Arc<dyn SqlRequestHandler>,
+                )
+                .unwrap();
+        });
+
+        let startup_payload = [
+            &196_608_i32.to_be_bytes()[..],
+            b"user\0brew\0database\0sales\0\0",
+        ]
+        .concat();
+        write_startup(&mut client_stream, &startup_payload);
+        assert_eq!(read_frame(&mut client_stream).0, b'R');
+        assert_eq!(read_frame(&mut client_stream).0, b'Z');
+
+        write_message(
+            &mut client_stream,
+            b'Q',
+            b"select count(id) from prod.sales.orders\0",
+        );
+        let first_response = read_frame(&mut client_stream);
+        assert_eq!(first_response.0, b'T', "{first_response:?}");
+        let data_row = read_frame(&mut client_stream);
+        assert_eq!(data_row.0, b'D');
+        assert_eq!(data_row.1[0..2], [0, 1]);
+        assert_eq!(data_row.1[6..7], [b'3']);
+        assert_eq!(read_frame(&mut client_stream).0, b'C');
+        assert_eq!(read_frame(&mut client_stream).0, b'Z');
+
+        write_message(&mut client_stream, b'X', &[]);
+        drop(client_stream);
+        connection.join().unwrap();
+    }
+
+    fn write_startup(stream: &mut impl Write, payload: &[u8]) {
+        let length = (payload.len() + 4) as i32;
+        stream.write_all(&length.to_be_bytes()).unwrap();
+        stream.write_all(payload).unwrap();
+    }
+
+    fn write_message(stream: &mut impl Write, message_type: u8, payload: &[u8]) {
+        let length = (payload.len() + 4) as i32;
+        stream.write_all(&[message_type]).unwrap();
+        stream.write_all(&length.to_be_bytes()).unwrap();
+        stream.write_all(payload).unwrap();
+    }
+
+    fn read_frame(stream: &mut impl Read) -> (u8, Vec<u8>) {
+        let mut message_type = [0; 1];
+        stream.read_exact(&mut message_type).unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut payload = vec![0; i32::from_be_bytes(length) as usize - 4];
+        stream.read_exact(&mut payload).unwrap();
+        (message_type[0], payload)
+    }
+
+    #[test]
+    fn server_can_be_constructed_from_system_config() {
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System)
+                    .with_entry("brewdb.catalog.store.backend", "memory"),
+            )
+            .unwrap();
+
+        let _server = super::BrewDbServer::from_system_config(config).unwrap();
+    }
+}

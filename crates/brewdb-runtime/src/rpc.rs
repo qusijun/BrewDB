@@ -14,6 +14,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::execute_stream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
+use datafusion_common::TableReference;
 use datafusion_common::error::Result as DataFusionResult;
 use datafusion_expr::Expr;
 use datafusion_expr::{LogicalPlan as DataFusionLogicalPlan, LogicalPlanBuilder, TableType};
@@ -106,12 +107,17 @@ pub trait ExchangePageSink: Send + Sync {
     ) -> Result<(), RpcError>;
 }
 
+pub trait ResultBatchSink: Send + Sync {
+    fn send_batch(&self, batch: RecordBatch) -> Result<(), RpcError>;
+}
+
 #[derive(Clone)]
 pub struct FragmentTask {
     pub plan: LocalFragmentPlan,
     pub exchange_inputs: Vec<ExchangeChannelDescriptor>,
     pub exchange_outputs: Vec<ExchangeChannelDescriptor>,
     pub exchange_page_sink: Option<Arc<dyn ExchangePageSink>>,
+    pub result_batch_sink: Option<Arc<dyn ResultBatchSink>>,
 }
 
 impl FragmentTask {
@@ -121,6 +127,7 @@ impl FragmentTask {
             exchange_inputs: Vec::new(),
             exchange_outputs: Vec::new(),
             exchange_page_sink: None,
+            result_batch_sink: None,
         }
     }
 
@@ -139,6 +146,11 @@ impl FragmentTask {
         exchange_page_sink: Arc<dyn ExchangePageSink>,
     ) -> Self {
         self.exchange_page_sink = Some(exchange_page_sink);
+        self
+    }
+
+    pub fn with_result_batch_sink(mut self, result_batch_sink: Arc<dyn ResultBatchSink>) -> Self {
+        self.result_batch_sink = Some(result_batch_sink);
         self
     }
 }
@@ -309,6 +321,7 @@ impl LocalFragmentService {
         let session = SessionContext::new();
         let exchange_outputs = task.exchange_outputs.clone();
         let exchange_page_sink = task.exchange_page_sink.clone();
+        let result_batch_sink = task.result_batch_sink.clone();
         let exchange_buffers = Arc::clone(&self.exchange_buffers);
         runtime.block_on(async move {
             let state = session.state();
@@ -329,6 +342,9 @@ impl LocalFragmentService {
                     reason: err.to_string(),
                 })?;
                 if exchange_outputs.is_empty() {
+                    if let Some(sink) = &result_batch_sink {
+                        sink.send_batch(batch)?;
+                    }
                     continue;
                 }
                 for (channel, routed_batch) in route_exchange_batch(&exchange_outputs, batch)
@@ -408,7 +424,7 @@ impl LocalFragmentService {
                     exchange_ids,
                     exchange_buffers: Arc::clone(&self.exchange_buffers),
                 });
-                let rewritten = LogicalPlanBuilder::scan(
+                let mut builder = LogicalPlanBuilder::scan(
                     format!(
                         "__brewdb_fragment_{}",
                         remote_source.source_fragment_ids[0].stage_id.0
@@ -416,9 +432,15 @@ impl LocalFragmentService {
                     provider_as_source(provider),
                     None,
                 )
-                .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?
-                .build()
                 .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                if let Some(qualifier) = remote_source_single_qualifier(remote_source) {
+                    builder = builder
+                        .alias(qualifier)
+                        .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                }
+                let rewritten = builder
+                    .build()
+                    .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
                 Ok(Transformed::yes(rewritten))
             }
             _ => Ok(Transformed::no(node)),
@@ -428,6 +450,21 @@ impl LocalFragmentService {
             reason: err.to_string(),
         })
     }
+}
+
+fn remote_source_single_qualifier(remote_source: &RemoteSourceNode) -> Option<TableReference> {
+    let mut qualifier = None;
+    for (field_qualifier, _) in remote_source.schema.iter() {
+        let Some(field_qualifier) = field_qualifier else {
+            continue;
+        };
+        match &qualifier {
+            Some(existing) if existing != field_qualifier => return None,
+            Some(_) => {}
+            None => qualifier = Some(field_qualifier.clone()),
+        }
+    }
+    qualifier
 }
 
 impl FragmentService for LocalFragmentService {
