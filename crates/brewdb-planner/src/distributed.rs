@@ -15,6 +15,13 @@ use brewdb_sql::{
     BoundDeleteStatement, BoundInsertStatement, BoundMergeStatement, BoundPlanStatement,
     BoundQueryStatement, BoundUpdateStatement,
 };
+use brewdb_sql_parser::ast::{
+    BinaryOperator as AstBinaryOperator, DuplicateTreatment, Expr as AstExpr, FunctionArg,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint,
+    JoinOperator as AstJoinOperator, Query, Select, SelectItem, SelectItemQualifiedWildcardKind,
+    SetExpr, Statement as AstStatement, TableAlias, TableFactor, TableWithJoins,
+    UnaryOperator as AstUnaryOperator, Value,
+};
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, ScalarFunction, WildcardOptions};
 use datafusion_expr::logical_plan::JoinType as DataFusionJoinType;
@@ -26,13 +33,6 @@ use datafusion_expr::{
 use datafusion_functions as datafusion_scalar_functions;
 use datafusion_functions_aggregate as datafusion_aggregate_functions;
 use datafusion_optimizer::{Optimizer, OptimizerContext};
-use datafusion_sql::sqlparser::ast::{
-    BinaryOperator as AstBinaryOperator, DuplicateTreatment, Expr as AstExpr, FunctionArg,
-    FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint,
-    JoinOperator as AstJoinOperator, Query, Select, SelectItem, SelectItemQualifiedWildcardKind,
-    SetExpr, Statement as AstStatement, TableAlias, TableFactor, TableWithJoins,
-    UnaryOperator as AstUnaryOperator, Value,
-};
 
 #[derive(Debug)]
 struct JoinCondition {
@@ -935,7 +935,7 @@ fn build_table_factor(
 }
 
 fn resolve_table_entry(
-    name: &datafusion_sql::sqlparser::ast::ObjectName,
+    name: &brewdb_sql_parser::ast::ObjectName,
     tables: &[TableCatalogEntry],
 ) -> Result<TableCatalogEntry, PlannerError> {
     let parts = name
@@ -1095,7 +1095,7 @@ fn bind_binary_operator(op: &AstBinaryOperator) -> Result<DataFusionOperator, Pl
 }
 
 fn bind_value(
-    value: &datafusion_sql::sqlparser::ast::ValueWithSpan,
+    value: &brewdb_sql_parser::ast::ValueWithSpan,
 ) -> Result<DataFusionExpr, PlannerError> {
     match &value.value {
         Value::Number(number, _) => {
@@ -1134,7 +1134,7 @@ fn bind_value(
 }
 
 fn bind_function(
-    function: &datafusion_sql::sqlparser::ast::Function,
+    function: &brewdb_sql_parser::ast::Function,
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionExpr, PlannerError> {
     if function.over.is_some()

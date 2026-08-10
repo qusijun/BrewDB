@@ -5,15 +5,15 @@ use std::fmt;
 use std::net::{TcpListener, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use brewdb_catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
 use brewdb_common::config::{ConfigSet, ConfigView, SystemConfigLoader, global_config_registry};
 use brewdb_common::errors::CommonError;
-use brewdb_common::logging::{LoggingConfig, init_logging};
 use brewdb_frontend::{
     ClientDefaults, FrontendConfig, FrontendError, FrontendResponse, FrontendService,
-    ProtocolRegistry, QueryResultOutput, ResultField, SqlExecutionResult, SqlRequest,
-    SqlRequestHandler,
+    MANAGED_PAIMON_CATALOG_NAME, ProtocolRegistry, QueryResultOutput, ResultField,
+    SqlExecutionResult, SqlRequest, SqlRequestHandler,
 };
 use brewdb_runtime::{DataFusionExecutionRuntime, QueryExecutionHandle, SqlDriver, SqlDriverError};
 
@@ -74,8 +74,12 @@ impl BrewDbServer {
     pub fn from_system_config(config: ConfigSet) -> Result<Self, BrewDbServerError> {
         let catalog_config = CatalogConfig::from_config_set(&config)?;
         let frontend_config = FrontendConfig::from_config_set(&config)?;
-        let catalog_service =
-            CatalogService::with_config(open_catalog_store(&catalog_config), config);
+        let catalog_service = CatalogService::with_config_and_default_managed_paimon_catalog(
+            open_catalog_store(&catalog_config),
+            config,
+            catalog_config,
+            frontend_config.default_catalog(),
+        )?;
         let mut server =
             Self::with_catalog_service(catalog_service, DataFusionExecutionRuntime::default());
         server.client_defaults =
@@ -95,7 +99,7 @@ impl BrewDbServer {
     ) -> Self {
         Self {
             frontend: FrontendService,
-            client_defaults: ClientDefaults::default().with_catalog("main"),
+            client_defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
             listen_address: "127.0.0.1:5432".to_owned(),
             protocols: ProtocolRegistry::with_builtin_plugins(),
             sql_driver: SqlDriver::new(catalog_service, runtime),
@@ -174,8 +178,22 @@ impl BrewDbServer {
 
 pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
     let registry = global_config_registry()?;
-    let config = registry.materialize_defaults();
-    init_logging(&LoggingConfig::default())?;
+    let warehouse = std::env::temp_dir().join(format!("brewdb-warehouse-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&warehouse).map_err(|error| {
+        BrewDbServerError::Common(CommonError::InvalidConfiguration {
+            field: "brewdb.catalog.paimon.warehouse".to_owned(),
+            reason: error.to_string(),
+        })
+    })?;
+    let mut config = registry.materialize_defaults();
+    config.apply_patch_with_registry(
+        &registry,
+        &brewdb_common::config::ConfigPatch::new(brewdb_common::config::ConfigScope::System)
+            .with_entry(
+                "brewdb.catalog.paimon.warehouse",
+                warehouse.to_string_lossy().as_ref(),
+            ),
+    )?;
     BrewDbServer::from_system_config(config)
 }
 
@@ -198,19 +216,27 @@ impl SqlRequestHandler for BrewDbServer {
             batches.push(batch);
         }
 
-        let fields = batches
-            .first()
-            .map(|batch| {
-                batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|field| ResultField::new(field.name(), field.data_type().to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let row_count = batches.iter().map(|batch| batch.num_rows() as u64).sum();
-        let response = FrontendResponse::new(QueryResultOutput::query("SELECT", row_count, fields));
+        let response = if handle.returns_rows {
+            let fields = batches
+                .first()
+                .map(|batch| {
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|field| ResultField::new(field.name(), field.data_type().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let row_count = batches.iter().map(|batch| batch.num_rows() as u64).sum();
+            FrontendResponse::new(QueryResultOutput::query(
+                handle.command_tag,
+                row_count,
+                fields,
+            ))
+        } else {
+            FrontendResponse::new(QueryResultOutput::command(handle.command_tag))
+        };
 
         Ok(SqlExecutionResult { response, batches })
     }
@@ -235,7 +261,8 @@ mod tests {
     use brewdb_common::schema::{DataType, SchemaField, TableSchema};
     use brewdb_frontend::{
         ClientCapabilities, ClientDefaults, ClientIdentity, ClientSessionContext,
-        OpenedClientSession, PgWireCodec, RequestContext, SqlRequestHandler,
+        DEFAULT_DATABASE_NAME, MANAGED_PAIMON_CATALOG_NAME, OpenedClientSession, PgWireCodec,
+        QueryResultKind, RequestContext, SqlRequestHandler,
     };
     use brewdb_runtime::DataFusionExecutionRuntime;
     use brewdb_storage::MemoryStorageEngine;
@@ -359,6 +386,142 @@ mod tests {
     }
 
     #[test]
+    fn server_returns_command_result_for_ddl() {
+        let server = build_test_server();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database("sales"),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default()
+                    .with_catalog("prod")
+                    .with_database("sales"),
+                identity: ClientIdentity::new("brew").with_database("sales"),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "create database analytics",
+            )
+            .unwrap();
+
+        let result = server.execute(&request).unwrap();
+
+        assert_eq!(result.response.result.kind, QueryResultKind::Command);
+        assert_eq!(
+            result.response.result.command_tag.as_str(),
+            "CREATE DATABASE"
+        );
+        assert!(result.batches.is_empty());
+    }
+
+    #[test]
+    fn server_bootstraps_default_database_for_client_sessions() {
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        let warehouse = std::env::temp_dir().join(format!("brewdbd-default-db-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&warehouse).unwrap();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System).with_entry(
+                    "brewdb.catalog.paimon.warehouse",
+                    warehouse.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+        let server = super::BrewDbServer::from_system_config(config).unwrap();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default()
+                    .with_catalog(MANAGED_PAIMON_CATALOG_NAME)
+                    .with_database(DEFAULT_DATABASE_NAME),
+                identity: ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "create table t1 (id int not null)",
+            )
+            .unwrap();
+
+        let result = server.execute(&request).unwrap();
+
+        assert_eq!(result.response.result.kind, QueryResultKind::Command);
+        assert_eq!(result.response.result.command_tag.as_str(), "CREATE TABLE");
+
+        let _ = std::fs::remove_dir_all(&warehouse);
+    }
+
+    #[test]
+    fn server_rejects_schema_less_create_table() {
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        let warehouse =
+            std::env::temp_dir().join(format!("brewdbd-empty-schema-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&warehouse).unwrap();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System).with_entry(
+                    "brewdb.catalog.paimon.warehouse",
+                    warehouse.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+        let server = super::BrewDbServer::from_system_config(config).unwrap();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default()
+                    .with_catalog(MANAGED_PAIMON_CATALOG_NAME)
+                    .with_database(DEFAULT_DATABASE_NAME),
+                identity: ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "create table t1",
+            )
+            .unwrap();
+
+        let error = match server.execute(&request) {
+            Ok(_) => panic!("expected create table without schema to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "query execution failed: invalid sql request: CREATE TABLE must define at least one column"
+        );
+
+        let _ = std::fs::remove_dir_all(&warehouse);
+    }
+
+    #[test]
     fn server_serves_pgwire_query_through_catalog_planner_runtime_and_storage() {
         let server = Arc::new(build_test_server().with_default_catalog("prod"));
         let (server_stream, mut client_stream) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -436,7 +599,82 @@ mod tests {
                     .with_entry("brewdb.catalog.store.backend", "memory"),
             )
             .unwrap();
+        let warehouse = std::env::temp_dir().join(format!("brewdbd-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&warehouse).unwrap();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System).with_entry(
+                    "brewdb.catalog.paimon.warehouse",
+                    warehouse.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
 
-        let _server = super::BrewDbServer::from_system_config(config).unwrap();
+        let server = super::BrewDbServer::from_system_config(config).unwrap();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database("sales"),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
+                identity: ClientIdentity::new("brew").with_database("sales"),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "create database analytics",
+            )
+            .unwrap();
+        let result = server.execute(&request).unwrap();
+        assert_eq!(result.response.result.kind, QueryResultKind::Command);
+    }
+
+    #[test]
+    fn server_can_be_constructed_from_config_file() {
+        let warehouse = std::env::temp_dir().join(format!("brewdbd-config-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&warehouse).unwrap();
+        let path = std::env::temp_dir().join(format!("brewdbd-config-{}.toml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(
+                "brewdb.catalog.store.backend = \"memory\"\nbrewdb.catalog.paimon.warehouse = \"{}\"\n",
+                warehouse.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let server = super::BrewDbServer::from_config_file(&path).unwrap();
+        let session = OpenedClientSession {
+            context: brewdb_frontend::ClientContext {
+                session: ClientSessionContext::new(
+                    Uuid::new_v4(),
+                    ClientIdentity::new("brew").with_database("sales"),
+                ),
+                connection: None,
+                defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
+                identity: ClientIdentity::new("brew").with_database("sales"),
+                capabilities: ClientCapabilities::default(),
+            },
+        };
+        let request = server
+            .frontend()
+            .build_request(
+                &session,
+                RequestContext::new(Uuid::new_v4()),
+                "create database analytics",
+            )
+            .unwrap();
+        let result = server.execute(&request).unwrap();
+        assert_eq!(result.response.result.kind, QueryResultKind::Command);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&warehouse);
     }
 }

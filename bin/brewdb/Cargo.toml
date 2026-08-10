@@ -7,5 +7,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+brewdb-common = { path = "../../crates/brewdb-common" }
 rustyline = "18.0.1"
 tracing.workspace = true

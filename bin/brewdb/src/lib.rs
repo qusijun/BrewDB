@@ -3,7 +3,9 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 
+use brewdb_common::defaults::DEFAULT_DATABASE_NAME;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -29,7 +31,7 @@ impl ClientOptions {
         let mut host = "127.0.0.1".to_owned();
         let mut port = 5432_u16;
         let mut user = env::var("USER").unwrap_or_else(|_| "brew".to_owned());
-        let mut database = "brewdb".to_owned();
+        let mut database = DEFAULT_DATABASE_NAME.to_owned();
         let mut query = None;
 
         let mut iter = args.into_iter().map(Into::into).peekable();
@@ -309,6 +311,9 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
     let mut line_editor = DefaultEditor::new().map_err(|error| ClientError::LineEditor {
         reason: format!("line editor failed to start: {error}"),
     })?;
+    if let Some(path) = history_path() {
+        let _ = line_editor.load_history(&path);
+    }
     let mut buffer = String::new();
 
     loop {
@@ -337,8 +342,9 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
         }
         if trimmed.is_empty() {
             if !buffer.trim().is_empty() {
-                let result = session.execute(buffer.trim())?;
-                render_query_result(&mut io::stdout(), &result)?;
+                if let Err(error) = execute_and_render(session, buffer.trim()) {
+                    eprintln!("brewdb failed: {error}");
+                }
                 buffer.clear();
             }
             continue;
@@ -350,19 +356,37 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
         if trimmed.ends_with(';') {
             let sql = buffer.trim().trim_end_matches(';').trim().to_owned();
             if !sql.is_empty() {
-                let result = session.execute(&sql)?;
-                render_query_result(&mut io::stdout(), &result)?;
+                if let Err(error) = execute_and_render(session, &sql) {
+                    eprintln!("brewdb failed: {error}");
+                }
             }
             buffer.clear();
         }
     }
 
     if !buffer.trim().is_empty() {
-        let result = session.execute(buffer.trim())?;
-        render_query_result(&mut io::stdout(), &result)?;
+        if let Err(error) = execute_and_render(session, buffer.trim()) {
+            eprintln!("brewdb failed: {error}");
+        }
+    }
+
+    if let Some(path) = history_path() {
+        let _ = line_editor.save_history(&path);
     }
 
     Ok(())
+}
+
+fn history_path() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".brewdb_history"))
+}
+
+fn execute_and_render<S: Read + Write>(
+    session: &mut PgWireSession<S>,
+    sql: &str,
+) -> Result<(), ClientError> {
+    let result = session.execute(sql)?;
+    render_query_result(&mut io::stdout(), &result)
 }
 
 fn write_startup_message<S: Write>(

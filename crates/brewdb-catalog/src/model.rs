@@ -186,6 +186,7 @@ pub struct TableCatalogEntry {
     pub database_id: Uuid,
     pub path: TablePath,
     pub table_schema: TableSchema,
+    pub primary_keys: Vec<String>,
     /// Stable table root location owned by the underlying table format.
     pub table_location: String,
     pub lake_format_kind: LakeFormatKind,
@@ -212,6 +213,7 @@ impl TableCatalogEntry {
             database_id,
             path,
             table_schema,
+            primary_keys: Vec::new(),
             table_location: table_location.into(),
             lake_format_kind,
             catalog_mode,
@@ -226,6 +228,14 @@ impl TableCatalogEntry {
 
     pub fn table_stats_handle(&self) -> TableStatsHandle {
         TableStatsHandle::new(self.table_id)
+    }
+
+    pub fn with_primary_keys(
+        mut self,
+        primary_keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.primary_keys = primary_keys.into_iter().map(Into::into).collect();
+        self
     }
 
     pub fn with_options(

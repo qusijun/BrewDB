@@ -1,16 +1,16 @@
 //! Frontend configuration view.
 
+use brewdb_common::defaults::MANAGED_PAIMON_CATALOG_NAME;
 use brewdb_common::errors::CommonError;
 
 pub const PGWIRE_LISTEN_ADDR_KEY: &str = "brewdb.frontend.pgwire.listen_addr";
 pub const DEFAULT_CATALOG_KEY: &str = "brewdb.frontend.default_catalog";
-
 brewdb_common::define_config_view! {
     pub struct FrontendConfig {
         default_catalog: String {
             key: DEFAULT_CATALOG_KEY,
             kind: String,
-            default: "main",
+            default: MANAGED_PAIMON_CATALOG_NAME,
             scopes: [brewdb_common::config::ConfigScope::System],
             parse: |value: &str| Ok(value.to_owned()),
         },

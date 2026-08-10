@@ -1,8 +1,10 @@
 //! Catalog-facing resolve service.
 
 use std::sync::Arc;
+use uuid::Uuid;
 
 use brewdb_common::config::{ConfigSet, ConfigView, global_config_registry};
+use brewdb_common::defaults::DEFAULT_DATABASE_NAME;
 
 use crate::backend::CatalogStore;
 use crate::catalogs::{Catalog, CatalogRegistry, ManagedPaimonCatalog};
@@ -10,6 +12,7 @@ use crate::config::CatalogConfig;
 use crate::errors::CatalogError;
 use crate::model::{CatalogEntry, CatalogMode, CatalogRef, LakeFormatKind};
 use crate::path::CatalogPath;
+use crate::requests::CreateDatabaseRequest;
 
 #[derive(Clone)]
 pub struct CatalogService {
@@ -34,6 +37,19 @@ impl CatalogService {
         }
     }
 
+    pub fn with_config_and_default_managed_paimon_catalog(
+        store: CatalogStore,
+        config: ConfigSet,
+        catalog_config: CatalogConfig,
+        catalog_name: impl Into<String>,
+    ) -> Result<Self, CatalogError> {
+        let service = Self::with_config(store, config);
+        let catalog_name = catalog_name.into();
+        service.ensure_managed_paimon_catalog(&catalog_config, catalog_name.clone())?;
+        service.ensure_default_managed_paimon_database(&catalog_name)?;
+        Ok(service)
+    }
+
     pub fn create_catalog(&self, entry: CatalogEntry) -> Result<(), CatalogError> {
         if self.store.get_catalog(&entry.path)?.is_some() {
             return Err(CatalogError::DuplicateCatalog {
@@ -43,6 +59,62 @@ impl CatalogService {
 
         self.store.create_catalog(entry)?;
         Ok(())
+    }
+
+    fn ensure_managed_paimon_catalog(
+        &self,
+        catalog_config: &CatalogConfig,
+        catalog_name: String,
+    ) -> Result<(), CatalogError> {
+        let path = CatalogPath::new(&catalog_name)?;
+        if self.store.get_catalog(&path)?.is_none() {
+            let entry = CatalogEntry::new(
+                Uuid::new_v4(),
+                path,
+                CatalogMode::Managed,
+                LakeFormatKind::Paimon,
+            );
+            self.create_catalog(entry.clone())?;
+            let catalog = Arc::new(ManagedPaimonCatalog::new(
+                entry,
+                self.store.clone(),
+                catalog_config,
+            ));
+            self.registry.register(catalog);
+            return Ok(());
+        }
+
+        let entry = self.resolve_catalog(&path)?;
+        if !matches!(
+            (entry.mode, entry.lake_format_kind),
+            (CatalogMode::Managed, LakeFormatKind::Paimon)
+        ) {
+            return Err(CatalogError::CatalogNotRegistered {
+                catalog: catalog_name,
+            });
+        }
+        let catalog = Arc::new(ManagedPaimonCatalog::new(
+            entry,
+            self.store.clone(),
+            catalog_config,
+        ));
+        self.registry.register(catalog);
+        Ok(())
+    }
+
+    fn ensure_default_managed_paimon_database(
+        &self,
+        catalog_name: &str,
+    ) -> Result<(), CatalogError> {
+        let catalog = self.open_catalog(catalog_name)?;
+        match catalog.get_database(DEFAULT_DATABASE_NAME) {
+            Ok(_) => Ok(()),
+            Err(CatalogError::DatabaseNotFound { .. }) => {
+                catalog.create_database(CreateDatabaseRequest::new(DEFAULT_DATABASE_NAME))?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn resolve_catalog(&self, path: &CatalogPath) -> Result<CatalogEntry, CatalogError> {
@@ -87,6 +159,27 @@ impl CatalogService {
         self.registry.register(catalog.clone());
         Ok(catalog)
     }
+
+    pub fn list_catalogs(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        self.store.list_catalogs()
+    }
+
+    pub fn list_databases(
+        &self,
+        catalog_name: &str,
+    ) -> Result<Vec<crate::model::DatabaseCatalogEntry>, CatalogError> {
+        let path = CatalogPath::new(catalog_name)?;
+        self.store.list_databases(&path)
+    }
+
+    pub fn list_tables(
+        &self,
+        catalog_name: &str,
+        database_name: &str,
+    ) -> Result<Vec<crate::model::TableCatalogEntry>, CatalogError> {
+        let path = crate::path::DatabasePath::new(catalog_name, database_name)?;
+        self.store.list_tables(&path)
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +189,7 @@ mod tests {
     use std::sync::Arc;
 
     use brewdb_common::config::{ConfigPatch, ConfigScope, global_config_registry};
+    use brewdb_common::defaults::DEFAULT_DATABASE_NAME;
 
     use crate::backend::CatalogStore;
     use crate::errors::CatalogError;
@@ -277,5 +371,37 @@ mod tests {
 
         catalog.drop_table("sales", "orders_v2").unwrap();
         catalog.drop_database("sales").unwrap();
+    }
+
+    #[test]
+    fn catalog_service_bootstraps_default_database() {
+        let warehouse = TestDir::new("brewdb-paimon-default-db");
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System)
+                    .with_entry("brewdb.catalog.store.backend", "memory")
+                    .with_entry(
+                        "brewdb.catalog.paimon.warehouse",
+                        warehouse.path().to_string_lossy().as_ref(),
+                    ),
+            )
+            .unwrap();
+
+        let service = CatalogService::with_config_and_default_managed_paimon_catalog(
+            CatalogStore::new(Arc::new(MemoryCatalogStoreBackend::default())),
+            config,
+            crate::config::CatalogConfig {
+                store_backend: crate::config::CatalogStoreBackendKind::Memory,
+                paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+            },
+            "prod",
+        )
+        .unwrap();
+
+        let catalog = service.open_catalog("prod").unwrap();
+        assert!(catalog.get_database(DEFAULT_DATABASE_NAME).is_ok());
     }
 }

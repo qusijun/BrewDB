@@ -11,8 +11,8 @@ brewdb-catalog = { path = "../../crates/brewdb-catalog" }
 brewdb-common = { path = "../../crates/brewdb-common" }
 brewdb-frontend = { path = "../../crates/brewdb-frontend" }
 brewdb-runtime = { path = "../../crates/brewdb-runtime" }
+uuid.workspace = true
 
 [dev-dependencies]
 arrow = "58.4.0"
 brewdb-storage = { path = "../../crates/brewdb-storage" }
-uuid.workspace = true

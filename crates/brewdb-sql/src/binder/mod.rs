@@ -6,13 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use brewdb_catalog::{CatalogPath, TableCatalogEntry};
 use brewdb_common::schema::{DataType, SchemaField, TableSchema};
-use datafusion_sql::sqlparser::ast::{
+use brewdb_sql_parser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation as AstAlterTableOperation, AnalyzeFormat,
-    AnalyzeFormatKind, ColumnDef, ContextModifier, CreateTable, CreateTableOptions,
+    AnalyzeFormatKind, ColumnDef, ColumnOption, ContextModifier, CreateTable, CreateTableOptions,
     DataType as AstDataType, Delete, ExactNumberInfo, Expr, FromTable, Ident, Insert, Merge,
-    ObjectName, ObjectNamePart, Query, Set, SetExpr, SqlOption, Statement as AstStatement,
-    TableFactor, TableObject, TableWithJoins, TransactionAccessMode,
-    TransactionMode as AstTransactionMode, Update, Use, Value, ValueWithSpan,
+    ObjectName, ObjectNamePart, PrimaryKeyConstraint, Query, Set, SetExpr, ShowStatementOptions,
+    SqlOption, Statement as AstStatement, TableConstraint, TableFactor, TableObject,
+    TableWithJoins, TransactionAccessMode, TransactionMode as AstTransactionMode, Update, Use,
+    Value, ValueWithSpan,
 };
 
 use crate::errors::SqlError;
@@ -22,9 +23,9 @@ use crate::statement::{
     BoundCreateTableStatement, BoundDeleteStatement, BoundDropDatabaseStatement,
     BoundDropStatement, BoundDropTableStatement, BoundExplainStatement, BoundInsertStatement,
     BoundMergeStatement, BoundPlanStatement, BoundQueryStatement, BoundRollbackStatement,
-    BoundSessionContext, BoundSetStatement, BoundSetVariableStatement, BoundStatement,
-    BoundTransactionStatement, BoundUpdateStatement, BoundUseDatabaseStatement, ExplainKind,
-    ParsedStatement, ParsedStatementKind, SetScope, TransactionMode,
+    BoundSessionContext, BoundSetStatement, BoundSetVariableStatement, BoundShowStatement,
+    BoundStatement, BoundTransactionStatement, BoundUpdateStatement, BoundUseDatabaseStatement,
+    ExplainKind, ParsedStatement, ParsedStatementKind, SetScope, TransactionMode,
 };
 
 use self::context::StatementBindingContext;
@@ -62,6 +63,19 @@ impl SqlBinder {
             AstStatement::AlterTable(alter_table) => {
                 self.bind_alter(bound_session, ctx, alter_table)
             }
+            AstStatement::ShowCatalogs { .. } => {
+                Ok(BoundStatement::Show(BoundShowStatement::Catalogs))
+            }
+            AstStatement::ShowDatabases { show_options, .. }
+            | AstStatement::ShowSchemas { show_options, .. } => {
+                self.bind_show_databases(bound_session, show_options)
+            }
+            AstStatement::ShowTables { show_options, .. } => {
+                self.bind_show_tables(bound_session, show_options)
+            }
+            AstStatement::ShowVariable { variable } => Err(SqlError::UnsupportedStatement {
+                reason: format!("unsupported SHOW statement `SHOW {}`", ident_list(variable)),
+            }),
             AstStatement::Set(set) => self.bind_set(set, bound_session),
             AstStatement::Use(use_stmt) => self.bind_use(bound_session, use_stmt),
             AstStatement::StartTransaction { modes, .. } => Ok(BoundStatement::Transaction(
@@ -204,9 +218,17 @@ impl SqlBinder {
         session: &BoundSessionContext,
         create_table: &CreateTable,
     ) -> Result<BoundStatement, SqlError> {
+        if create_table.columns.is_empty() {
+            return Err(SqlError::InvalidRequest {
+                reason: "CREATE TABLE must define at least one column".to_string(),
+            });
+        }
         let (catalog_name, database_name, table_name) =
             qualify_table_name(session, &create_table.name)?;
         let mut table_options = create_table_options(&create_table.table_options);
+        if let Some(distribution) = &create_table.distributed_by {
+            bind_paimon_distribution(distribution, &mut table_options)?;
+        }
         let table_location = create_table
             .location
             .clone()
@@ -218,6 +240,7 @@ impl SqlBinder {
                 .map(bind_column_def)
                 .collect::<Result<Vec<_>, SqlError>>()?,
         );
+        let primary_keys = bind_primary_keys(create_table)?;
 
         Ok(BoundStatement::Create(BoundCreateStatement::Table(
             BoundCreateTableStatement {
@@ -225,6 +248,7 @@ impl SqlBinder {
                 database_name,
                 table_name,
                 table_schema,
+                primary_keys,
                 table_location,
                 table_options,
             },
@@ -235,7 +259,7 @@ impl SqlBinder {
         &self,
         session: &BoundSessionContext,
         ctx: &StatementBindingContext<'_>,
-        object_type: &datafusion_sql::sqlparser::ast::ObjectType,
+        object_type: &brewdb_sql_parser::ast::ObjectType,
         names: &[ObjectName],
     ) -> Result<BoundStatement, SqlError> {
         let Some(name) = names.first() else {
@@ -245,13 +269,13 @@ impl SqlBinder {
         };
 
         match object_type {
-            datafusion_sql::sqlparser::ast::ObjectType::Table => Ok(BoundStatement::Drop(
+            brewdb_sql_parser::ast::ObjectType::Table => Ok(BoundStatement::Drop(
                 BoundDropStatement::Table(BoundDropTableStatement {
                     table: resolve_table(ctx, session, name)?,
                 }),
             )),
-            datafusion_sql::sqlparser::ast::ObjectType::Database
-            | datafusion_sql::sqlparser::ast::ObjectType::Schema => {
+            brewdb_sql_parser::ast::ObjectType::Database
+            | brewdb_sql_parser::ast::ObjectType::Schema => {
                 let (catalog_name, database_name) = qualify_database_name(session, name)?;
                 Ok(BoundStatement::Drop(BoundDropStatement::Database(
                     BoundDropDatabaseStatement {
@@ -281,6 +305,50 @@ impl SqlBinder {
         Ok(BoundStatement::Alter(BoundAlterStatement::Table(
             BoundAlterTableStatement { table, operations },
         )))
+    }
+
+    fn bind_show_databases(
+        &self,
+        session: BoundSessionContext,
+        show_options: &ShowStatementOptions,
+    ) -> Result<BoundStatement, SqlError> {
+        let catalog_name = show_options
+            .show_in
+            .as_ref()
+            .and_then(|show_in| show_in.parent_name.as_ref())
+            .map(object_name_to_string)
+            .unwrap_or(session.catalog_name);
+        Ok(BoundStatement::Show(BoundShowStatement::Databases {
+            catalog_name,
+        }))
+    }
+
+    fn bind_show_tables(
+        &self,
+        session: BoundSessionContext,
+        show_options: &ShowStatementOptions,
+    ) -> Result<BoundStatement, SqlError> {
+        let (catalog_name, database_name) = show_options
+            .show_in
+            .as_ref()
+            .and_then(|show_in| show_in.parent_name.as_ref())
+            .map(|name| {
+                let parts = name_parts(name)?;
+                match parts.as_slice() {
+                    [database] => Ok((session.catalog_name.clone(), database.clone())),
+                    [catalog, database] => Ok((catalog.clone(), database.clone())),
+                    _ => Err(SqlError::InvalidRequest {
+                        reason: format!("invalid SHOW TABLES target `{name}`"),
+                    }),
+                }
+            })
+            .transpose()?
+            .unwrap_or((session.catalog_name, session.database_name));
+
+        Ok(BoundStatement::Show(BoundShowStatement::Tables {
+            catalog_name,
+            database_name,
+        }))
     }
 
     fn bind_set(
@@ -495,11 +563,11 @@ fn table_factor_object_name(factor: &TableFactor) -> Option<&ObjectName> {
 }
 
 fn resolve_update_sources(
-    from: &datafusion_sql::sqlparser::ast::UpdateTableFromKind,
+    from: &brewdb_sql_parser::ast::UpdateTableFromKind,
 ) -> Result<Vec<ObjectName>, SqlError> {
     let tables = match from {
-        datafusion_sql::sqlparser::ast::UpdateTableFromKind::BeforeSet(tables)
-        | datafusion_sql::sqlparser::ast::UpdateTableFromKind::AfterSet(tables) => tables,
+        brewdb_sql_parser::ast::UpdateTableFromKind::BeforeSet(tables)
+        | brewdb_sql_parser::ast::UpdateTableFromKind::AfterSet(tables) => tables,
     };
 
     tables
@@ -624,6 +692,14 @@ fn object_name_to_string(name: &ObjectName) -> String {
         .join(".")
 }
 
+fn ident_list(idents: &[Ident]) -> String {
+    idents
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn create_table_options(options: &CreateTableOptions) -> BTreeMap<String, String> {
     let entries = match options {
         CreateTableOptions::None => &[][..],
@@ -658,10 +734,85 @@ fn bind_column_def(column: &ColumnDef) -> Result<SchemaField, SqlError> {
     bound.nullable = !column.options.iter().any(|option| {
         matches!(
             option.option,
-            datafusion_sql::sqlparser::ast::ColumnOption::NotNull
+            ColumnOption::NotNull | ColumnOption::PrimaryKey(_)
         )
     });
     Ok(bound)
+}
+
+fn bind_primary_keys(create_table: &CreateTable) -> Result<Vec<String>, SqlError> {
+    let mut primary_keys = Vec::new();
+    for column in &create_table.columns {
+        for option in &column.options {
+            if matches!(option.option, ColumnOption::PrimaryKey(_)) {
+                if !primary_keys.is_empty() {
+                    return Err(SqlError::InvalidRequest {
+                        reason: "CREATE TABLE must not define multiple PRIMARY KEY constraints"
+                            .to_string(),
+                    });
+                }
+                primary_keys.push(column.name.value.clone());
+            }
+        }
+    }
+
+    for constraint in &create_table.constraints {
+        if let TableConstraint::PrimaryKey(PrimaryKeyConstraint { columns, .. }) = constraint {
+            if !primary_keys.is_empty() {
+                return Err(SqlError::InvalidRequest {
+                    reason: "CREATE TABLE must not define multiple PRIMARY KEY constraints"
+                        .to_string(),
+                });
+            }
+            primary_keys = columns
+                .iter()
+                .map(primary_key_column_name)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+    }
+
+    validate_primary_keys(&create_table.columns, &primary_keys)?;
+    Ok(primary_keys)
+}
+
+fn primary_key_column_name(
+    column: &brewdb_sql_parser::ast::IndexColumn,
+) -> Result<String, SqlError> {
+    match &column.column.expr {
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(parts) if parts.len() == 1 => Ok(parts[0].value.clone()),
+        other => Err(SqlError::InvalidRequest {
+            reason: format!("PRIMARY KEY column must be a simple column name, got `{other}`"),
+        }),
+    }
+}
+
+fn validate_primary_keys(columns: &[ColumnDef], primary_keys: &[String]) -> Result<(), SqlError> {
+    if primary_keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut seen = BTreeSet::new();
+    for key in primary_keys {
+        if !seen.insert(key.clone()) {
+            return Err(SqlError::InvalidRequest {
+                reason: format!("PRIMARY KEY must not contain duplicate column `{key}`"),
+            });
+        }
+    }
+
+    let column_names = columns
+        .iter()
+        .map(|column| column.name.value.as_str())
+        .collect::<BTreeSet<_>>();
+    for key in primary_keys {
+        if !column_names.contains(key.as_str()) {
+            return Err(SqlError::InvalidRequest {
+                reason: format!("PRIMARY KEY column `{key}` is not defined in CREATE TABLE"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn bind_data_type(data_type: &AstDataType) -> Result<DataType, SqlError> {
@@ -689,8 +840,8 @@ fn bind_data_type(data_type: &AstDataType) -> Result<DataType, SqlError> {
             precision: timezone_precision(timezone, 6),
             with_time_zone: !matches!(
                 timezone,
-                datafusion_sql::sqlparser::ast::TimezoneInfo::None
-                    | datafusion_sql::sqlparser::ast::TimezoneInfo::WithoutTimeZone
+                brewdb_sql_parser::ast::TimezoneInfo::None
+                    | brewdb_sql_parser::ast::TimezoneInfo::WithoutTimeZone
             ),
         }),
         AstDataType::Datetime(precision) => Ok(DataType::Timestamp {
@@ -708,7 +859,7 @@ fn bind_data_type(data_type: &AstDataType) -> Result<DataType, SqlError> {
 }
 
 fn timezone_precision(
-    timezone: &datafusion_sql::sqlparser::ast::TimezoneInfo,
+    timezone: &brewdb_sql_parser::ast::TimezoneInfo,
     default_precision: u32,
 ) -> u32 {
     let _ = timezone;
@@ -723,6 +874,53 @@ fn decimal_precision_scale(info: &ExactNumberInfo) -> (u32, u32) {
             (*precision as u32, (*scale).max(0) as u32)
         }
     }
+}
+
+fn bind_paimon_distribution(
+    distribution: &brewdb_sql_parser::ast::DistributedBy,
+    table_options: &mut BTreeMap<String, String>,
+) -> Result<(), SqlError> {
+    if !distribution.columns.is_empty() {
+        table_options.insert(
+            "bucket-key".to_string(),
+            distribution
+                .columns
+                .iter()
+                .map(|column| column.value.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    } else if distribution.function.is_some() {
+        return Err(SqlError::InvalidRequest {
+            reason: "Paimon bucket function requires at least one bucket key".to_string(),
+        });
+    }
+
+    if let Some(function) = &distribution.function {
+        match function.value.to_ascii_lowercase().as_str() {
+            "default" | "hash" => {
+                table_options.remove("bucket-function.type");
+            }
+            "mod" => {
+                table_options.insert("bucket-function.type".to_string(), "mod".to_string());
+            }
+            "hive" => {
+                table_options.insert("bucket-function.type".to_string(), "hive".to_string());
+            }
+            other => {
+                return Err(SqlError::InvalidRequest {
+                    reason: format!(
+                        "unsupported Paimon bucket function `{other}`; supported functions are default, hash, mod, hive"
+                    ),
+                });
+            }
+        }
+    }
+
+    if let Some(bucket_count) = distribution.buckets {
+        table_options.insert("bucket".to_string(), bucket_count.to_string());
+    }
+    Ok(())
 }
 
 fn bind_alter_operation(

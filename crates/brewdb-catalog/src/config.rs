@@ -38,7 +38,7 @@ brewdb_common::define_config_view! {
         store_backend: CatalogStoreBackendKind {
             key: CATALOG_STORE_BACKEND_KEY,
             kind: String,
-            default: "fdb",
+            default: "memory",
             scopes: [brewdb_common::config::ConfigScope::System],
             parse: CatalogStoreBackendKind::parse,
         },
@@ -86,7 +86,7 @@ mod tests {
         let registry = catalog_registry();
         let definition = registry.definition(CATALOG_STORE_BACKEND_KEY).unwrap();
 
-        assert_eq!(definition.default_value, "fdb".into());
+        assert_eq!(definition.default_value, "memory".into());
         assert!(definition.allows_scope(ConfigScope::System));
         assert!(!definition.allows_scope(ConfigScope::Session));
         assert!(!definition.allows_scope(ConfigScope::Statement));

@@ -28,10 +28,10 @@ mod tests {
     use brewdb_common::runtime::QueryContext;
     use brewdb_common::schema::{DataType, SchemaField, TableSchema};
     use brewdb_sql::{BoundPlanStatement, BoundQueryStatement, BoundSessionContext};
+    use brewdb_sql_parser::dialect::PostgreSqlDialect;
+    use brewdb_sql_parser::parser::Parser;
     use datafusion_expr::logical_plan::JoinType as DataFusionJoinType;
     use datafusion_expr::{Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPlan};
-    use datafusion_sql::sqlparser::dialect::PostgreSqlDialect;
-    use datafusion_sql::sqlparser::parser::Parser;
 
     use crate::distributed::{DistributedPlanner, DistributedPlannerRequest};
     use crate::exchange::{ExchangeScope, ExchangeType, RemoteSourceNode};

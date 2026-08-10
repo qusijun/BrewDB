@@ -303,6 +303,7 @@ impl ManagedPaimonCatalog {
             self.entry.lake_format_kind,
             self.entry.mode,
         )
+        .with_primary_keys(table.schema().primary_keys().iter().cloned())
         .with_options(table_options))
     }
 }
@@ -607,6 +608,7 @@ mod tests {
                 "id",
                 paimon::spec::DataType::Int(paimon::spec::IntType::new()),
             )
+            .primary_key(["id"])
             .option("bucket", "1")
             .build()
             .unwrap();
@@ -651,6 +653,7 @@ mod tests {
         assert_eq!(table.path.to_string(), "prod.sales.orders");
         assert_eq!(table.table_location, "s3://warehouse/sales/orders");
         assert_eq!(table.table_schema.fields.len(), 1);
+        assert_eq!(table.primary_keys, vec!["id"]);
         assert_eq!(
             table.table_options.get("bucket").map(String::as_str),
             Some("1")

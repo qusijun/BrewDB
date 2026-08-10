@@ -10,6 +10,7 @@ pub mod result;
 pub mod session;
 
 pub use auth::{AuthContext, AuthDecision, AuthMethod, Authenticator, StaticAuthenticator};
+pub use brewdb_common::defaults::{DEFAULT_DATABASE_NAME, MANAGED_PAIMON_CATALOG_NAME};
 pub use config::{DEFAULT_CATALOG_KEY, FrontendConfig, PGWIRE_LISTEN_ADDR_KEY};
 pub use errors::FrontendError;
 pub use pgwire::{PgWireCodec, PgWireRequest, PgWireResponse};

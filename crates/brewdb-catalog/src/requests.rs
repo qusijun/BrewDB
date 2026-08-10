@@ -38,6 +38,7 @@ pub struct CreateTableRequest {
     pub database_name: String,
     pub table_name: String,
     pub table_schema: TableDefinition,
+    pub primary_keys: Vec<String>,
     pub table_location: Option<String>,
     pub table_options: BTreeMap<String, String>,
 }
@@ -52,9 +53,18 @@ impl CreateTableRequest {
             database_name: database_name.into(),
             table_name: table_name.into(),
             table_schema,
+            primary_keys: Vec::new(),
             table_location: None,
             table_options: BTreeMap::new(),
         }
+    }
+
+    pub fn with_primary_keys(
+        mut self,
+        primary_keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.primary_keys = primary_keys.into_iter().map(Into::into).collect();
+        self
     }
 
     pub fn with_location(mut self, table_location: impl Into<String>) -> Self {

@@ -61,6 +61,8 @@ pub trait CatalogStoreBackend: Send + Sync {
         database_path: &DatabasePath,
     ) -> Result<Vec<TableCatalogEntry>, CatalogError>;
 
+    fn list_catalogs(&self) -> Result<Vec<CatalogEntry>, CatalogError>;
+
     fn database_exists(&self, path: &DatabasePath) -> Result<bool, CatalogError> {
         Ok(self.get_database(path)?.is_some())
     }
@@ -168,6 +170,10 @@ impl CatalogStore {
         database_path: &DatabasePath,
     ) -> Result<Vec<TableCatalogEntry>, CatalogError> {
         self.backend.list_tables(database_path)
+    }
+
+    pub fn list_catalogs(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        self.backend.list_catalogs()
     }
 
     pub fn database_exists(&self, path: &DatabasePath) -> Result<bool, CatalogError> {

@@ -24,6 +24,9 @@ impl StorageFormatSchemaAdapter for PaimonSchemaAdapter {
         for column in &request.table_schema.fields {
             builder = builder.column(&column.name, Self::brewdb_field_to_format_type(column)?);
         }
+        if !request.primary_keys.is_empty() {
+            builder = builder.primary_key(request.primary_keys.iter().cloned());
+        }
         for (key, value) in &request.table_options {
             builder = builder.option(key.clone(), value.clone());
         }

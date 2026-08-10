@@ -3,6 +3,7 @@ members = [
     "crates/brewdb-common",
     "crates/brewdb-catalog",
     "crates/brewdb-frontend",
+    "crates/brewdb-sql-parser",
     "crates/brewdb-sql",
     "crates/brewdb-planner",
     "crates/brewdb-execution",

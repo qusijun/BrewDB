@@ -208,4 +208,14 @@ impl CatalogStoreBackend for MemoryCatalogStoreBackend {
             .cloned()
             .collect())
     }
+
+    fn list_catalogs(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        Ok(self
+            .catalogs
+            .read()
+            .expect("catalog lock poisoned")
+            .values()
+            .cloned()
+            .collect())
+    }
 }

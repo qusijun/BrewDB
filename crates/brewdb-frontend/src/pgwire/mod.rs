@@ -397,6 +397,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
 
     use super::{PgWireCodec, PgWireRequest, PgWireResponse};
+    use crate::MANAGED_PAIMON_CATALOG_NAME;
     use crate::errors::FrontendError;
     use crate::protocol::{SqlExecutionResult, SqlRequestHandler};
     use crate::result::{FrontendResponse, Notice, QueryResultOutput, ResultField};
@@ -475,7 +476,7 @@ mod tests {
                 .serve_connection_io(
                     server_stream,
                     FrontendService,
-                    ClientDefaults::default().with_catalog("main"),
+                    ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                     Arc::new(TestHandler),
                 )
                 .unwrap();

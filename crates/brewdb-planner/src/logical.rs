@@ -1,8 +1,8 @@
 //! Planner-owned logical plan shell.
 
 use brewdb_catalog::TableCatalogEntry;
+use brewdb_sql_parser::ast::Statement as AstStatement;
 use datafusion_expr::{Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPlan};
-use datafusion_sql::sqlparser::ast::Statement as AstStatement;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogicalPlan {

@@ -249,6 +249,7 @@ impl Default for ClientDefaults {
 mod tests {
     use uuid::Uuid;
 
+    use crate::MANAGED_PAIMON_CATALOG_NAME;
     use crate::auth::{AuthContext, AuthMethod, StaticAuthenticator};
 
     use super::{
@@ -264,7 +265,7 @@ mod tests {
                 &StaticAuthenticator,
                 OpenClientSession {
                     auth: AuthContext::new("brew", AuthMethod::Trust).with_database("brewdb"),
-                    defaults: ClientDefaults::default().with_catalog("main"),
+                    defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                     connection: Some(ClientConnectionContext::new(Uuid::nil(), "pgwire")),
                     capabilities: ClientCapabilities::default(),
                 },
@@ -290,6 +291,7 @@ mod sql_handoff_tests {
 
     use brewdb_sql::{SqlClientCapabilities, SqlIngressRequest};
 
+    use crate::MANAGED_PAIMON_CATALOG_NAME;
     use crate::session::{
         ClientCapabilities, ClientContext, ClientDefaults, ClientIdentity, ClientSessionContext,
         FrontendService, RequestContext, SqlRequest,
@@ -303,7 +305,7 @@ mod sql_handoff_tests {
                     ClientIdentity::new("brew").with_database("brewdb"),
                 ),
                 connection: None,
-                defaults: ClientDefaults::default().with_catalog("main"),
+                defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                 identity: ClientIdentity::new("brew").with_database("brewdb"),
                 capabilities: ClientCapabilities {
                     supports_prepared_statements: true,
@@ -324,7 +326,10 @@ mod sql_handoff_tests {
         assert_eq!(sql_request.session.session_id, Uuid::nil());
         assert_eq!(sql_request.session.user_name, "brew");
         assert_eq!(sql_request.session.database_name.as_deref(), Some("brewdb"));
-        assert_eq!(sql_request.session.catalog_name.as_deref(), Some("main"));
+        assert_eq!(
+            sql_request.session.catalog_name.as_deref(),
+            Some(MANAGED_PAIMON_CATALOG_NAME)
+        );
         assert_eq!(sql_request.request.request_id, Uuid::nil());
         assert_eq!(sql_request.sql, "select 1");
         assert_eq!(

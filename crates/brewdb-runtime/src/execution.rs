@@ -27,6 +27,8 @@ pub struct QueryExecutionRequest {
 #[derive(Clone)]
 pub struct QueryExecutionHandle {
     pub query_context: QueryContext,
+    pub command_tag: String,
+    pub returns_rows: bool,
     pub output: Arc<QueryOutput>,
 }
 
@@ -34,7 +36,29 @@ impl fmt::Debug for QueryExecutionHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryExecutionHandle")
             .field("query_context", &self.query_context)
+            .field("command_tag", &self.command_tag)
+            .field("returns_rows", &self.returns_rows)
             .finish_non_exhaustive()
+    }
+}
+
+impl QueryExecutionHandle {
+    pub fn query(query_context: QueryContext) -> Self {
+        Self {
+            query_context,
+            command_tag: "SELECT".to_owned(),
+            returns_rows: true,
+            output: Arc::new(QueryOutput::default()),
+        }
+    }
+
+    pub fn command(query_context: QueryContext, command_tag: impl Into<String>) -> Self {
+        Self {
+            query_context,
+            command_tag: command_tag.into(),
+            returns_rows: false,
+            output: Arc::new(QueryOutput::default()),
+        }
     }
 }
 
@@ -72,6 +96,16 @@ pub struct QueryOutput {
 }
 
 impl QueryOutput {
+    pub fn push_result(&self, batch: RecordBatch) -> Result<(), ExecutionRuntimeError> {
+        self.batches
+            .lock()
+            .map_err(|_| ExecutionRuntimeError::RuntimeInitFailed {
+                reason: "query result reader lock is poisoned".to_owned(),
+            })?
+            .push_back(batch);
+        Ok(())
+    }
+
     pub fn next_result(&self) -> Result<Option<RecordBatch>, ExecutionRuntimeError> {
         Ok(self
             .batches
@@ -85,13 +119,10 @@ impl QueryOutput {
 
 impl crate::rpc::ResultBatchSink for QueryOutput {
     fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::rpc::RpcError> {
-        self.batches
-            .lock()
-            .map_err(|_| crate::rpc::RpcError::ExecutionFailed {
-                reason: "query result reader lock is poisoned".to_owned(),
-            })?
-            .push_back(batch);
-        Ok(())
+        self.push_result(batch)
+            .map_err(|error| crate::rpc::RpcError::ExecutionFailed {
+                reason: error.to_string(),
+            })
     }
 }
 
@@ -333,6 +364,8 @@ impl DataFusionExecutionRuntime {
 
         Ok(QueryExecutionHandle {
             query_context: request.query_context,
+            command_tag: "SELECT".to_owned(),
+            returns_rows: true,
             output,
         })
     }

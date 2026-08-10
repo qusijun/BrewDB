@@ -127,6 +127,10 @@ impl CatalogStoreBackend for FdbCatalogStoreBackend {
     ) -> Result<Vec<TableCatalogEntry>, CatalogError> {
         Err(Self::not_implemented())
     }
+
+    fn list_catalogs(&self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        Err(Self::not_implemented())
+    }
 }
 
 #[cfg(test)]

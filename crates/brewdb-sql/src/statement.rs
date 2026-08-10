@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use brewdb_catalog::TableCatalogEntry;
 use brewdb_common::schema::{DataType, SchemaField, TableSchema};
-use datafusion_sql::sqlparser::ast::{Set as AstSet, Statement as AstStatement};
+use brewdb_sql_parser::ast::{Set as AstSet, Statement as AstStatement};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub enum ParsedStatementKind {
     Create,
     Drop,
     Alter,
+    Show,
     Set,
     Transaction,
     Explain,
@@ -34,6 +35,11 @@ impl ParsedStatementKind {
             AstStatement::CreateTable(_) | AstStatement::CreateDatabase { .. } => Self::Create,
             AstStatement::Drop { .. } => Self::Drop,
             AstStatement::AlterTable(_) => Self::Alter,
+            AstStatement::ShowCatalogs { .. }
+            | AstStatement::ShowDatabases { .. }
+            | AstStatement::ShowSchemas { .. }
+            | AstStatement::ShowTables { .. }
+            | AstStatement::ShowVariable { .. } => Self::Show,
             AstStatement::Set(AstSet::SingleAssignment { .. })
             | AstStatement::Set(AstSet::SetTimeZone { .. })
             | AstStatement::Use(_) => Self::Set,
@@ -67,6 +73,7 @@ pub enum BoundStatement {
     Create(BoundCreateStatement),
     Drop(BoundDropStatement),
     Alter(BoundAlterStatement),
+    Show(BoundShowStatement),
     Set(BoundSetStatement),
     Transaction(BoundTransactionStatement),
     Explain(BoundExplainStatement),
@@ -143,6 +150,7 @@ pub struct BoundCreateTableStatement {
     pub database_name: String,
     pub table_name: String,
     pub table_schema: TableSchema,
+    pub primary_keys: Vec<String>,
     pub table_location: Option<String>,
     pub table_options: BTreeMap<String, String>,
 }
@@ -167,6 +175,18 @@ pub struct BoundDropTableStatement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundAlterStatement {
     Table(BoundAlterTableStatement),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoundShowStatement {
+    Catalogs,
+    Databases {
+        catalog_name: String,
+    },
+    Tables {
+        catalog_name: String,
+        database_name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

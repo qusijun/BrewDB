@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use brewdb_common::diagnostics::{DiagnosticError, ErrorCode};
-use datafusion_sql::sqlparser::parser::ParserError;
+use brewdb_sql_parser::parser::ParserError;
 
 const SQL_INVALID_REQUEST: ErrorCode = ErrorCode::new("BREWDB_SQL_INVALID_REQUEST");
 const SQL_PARSE_FAILED: ErrorCode = ErrorCode::new("BREWDB_SQL_PARSE_FAILED");
