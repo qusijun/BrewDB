@@ -616,9 +616,9 @@ fn build_from_input(
         });
     };
     if select.from.is_empty() {
-        return Err(PlannerError::UnsupportedPlan {
-            reason: "query without bound tables is not supported yet".to_string(),
-        });
+        return LogicalPlanBuilder::empty(true)
+            .build()
+            .map_err(map_df_plan_error);
     }
     let mut inputs = select
         .from

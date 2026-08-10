@@ -1,140 +1,167 @@
 # BrewDB
 
-BrewDB is a distributed MPP lakehouse database engine built around a BrewDB-owned catalog, DataFusion-based planning and execution, and format-aware storage engines such as Paimon and Iceberg.
+BrewDB is a lakehouse database engine built around a BrewDB-owned catalog,
+DataFusion-based SQL planning/execution, and format-aware storage engines.
 
-The current repository state is intentionally architecture-first:
+The current implementation focuses on the core query path and process boundary:
 
-- design documents are the source of truth
-- code has been reset to skeleton layout
-- implementation will be rebuilt from the documented crate boundaries
+```text
+brewdb client -> brewdbd -> frontend -> sql -> planner -> runtime -> execution
+                                                     |
+                                                     v
+                                                  storage
+```
 
-## Top-Level Shape
+## Positioning
 
-The main product entrypoints are:
+BrewDB is intended to be a database engine for open lakehouse tables, not just a
+thin SQL wrapper around a single file format.
 
+Its core responsibilities are:
+
+- own catalog metadata and table identity
+- parse and bind SQL requests from client protocols
+- build distributed query plans from DataFusion logical plans
+- run fragment-local execution through DataFusion
+- access lakehouse storage through BrewDB storage engines
+
+Paimon is the first storage format being wired through this stack. The storage
+adapter exposes Paimon tables as native DataFusion table providers inside
+BrewDB, rather than depending on an external DataFusion fork.
+
+## Core Architecture
+
+The main crates are capability-oriented:
+
+- `brewdb-common`: shared config, logging, diagnostics, and schema primitives
+- `brewdb-catalog`: catalog model, catalog service, and table metadata
+- `brewdb-frontend`: client sessions and protocol ingress such as pgwire
+- `brewdb-sql`: SQL parsing and binding
+- `brewdb-planner`: logical and distributed planning
+- `brewdb-runtime`: scheduling, SQL driver, exchange, and execution orchestration
+- `brewdb-execution`: execution-facing fragment contracts
+- `brewdb-storage`: storage engine abstraction
+- `brewdb-storage-paimon`: Paimon storage engine integration
+
+Product entrypoints live under `bin/`:
+
+- `brewdbd`: server process
 - `brewdb`: SQL client
-- `brewdbd`: server process host
-
-The main query path is:
-
-`brewdb -> brewdbd -> brewdb-frontend -> brewdb-sql -> brewdb-planner -> brewdb-runtime -> brewdb-execution`
 
 ## Architecture Diagram
 
 ```text
-+-----------+      +---------+      +------------------+      +------------+
-|  brewdb   | ---> | brewdbd | ---> | brewdb-frontend  | ---> | brewdb-sql |
-+-----------+      +---------+      +------------------+      +------------+
-                                                                  |
-                                                                  v
-                                                           +---------------+
-                                                           | brewdb-planner|
-                                                           +---------------+
-                                                                  |
-                                                                  v
-                   +------------------+                   +---------------+                   +------------------+
-                   |  brewdb-catalog  | <---------------  | brewdb-runtime| ---------------> | brewdb-execution |
-                   +------------------+                   +---------------+                   +------------------+
-                           |                                      |                                      |
-                           v                                      v                                      v
-                   +------------------+                   +------------------+                   +------------------+
-                   | CatalogMeta/FDB  |                   | RuntimeMeta/FDB  |                   | Arrow/DataFusion |
-                   +------------------+                   +------------------+                   +------------------+
-                           |                                                                             |
-                           +-----------------------------------+-----------------------------------------+
-                                                               |
-                                                               v
-                                                       +----------------+
-                                                       | brewdb-storage |
-                                                       +----------------+
-                                                               |
-                                                               v
-                                         +---------------------------------------------+
-                                         | TableEngine implementations                 |
-                                         | - PaimonTableEngine                        |
-                                         | - IcebergTableEngine                       |
-                                         +---------------------------------------------+
+                +-------------------+
+                |       brewdb      |
+                |   SQL client CLI   |
+                +---------+---------+
+                          |
+                          | pgwire
+                          v
+                +-------------------+
+                |      brewdbd      |
+                |   server host     |
+                +---------+---------+
+                          |
+                          v
+                +-------------------+
+                |   brewdb-frontend |
+                | sessions/protocol |
+                +---------+---------+
+                          |
+                          v
+                +-------------------+
+                |     brewdb-sql    |
+                | parse + bind SQL  |
+                +---------+---------+
+                          |
+                          v
+                +-------------------+
+                |   brewdb-planner  |
+                | logical + distro  |
+                +---------+---------+
+                          |
+                          v
+              +----------------------+
+              |    brewdb-runtime    |
+              |  schedule + exchange |
+              +----------+-----------+
+                         / \
+                        /   \
+                       v     v
+          +----------------+  +----------------+
+          | worker / node 1 |  | worker / node N|
+          | brewdb-execution|  | brewdb-execution|
+          +--------+-------+  +--------+-------+
+                   |                   |
+                   v                   v
+          +----------------+  +----------------+
+          | brewdb-storage |  | brewdb-storage |
+          | table engines   |  | table engines  |
+          +--------+-------+  +--------+-------+
+                   |                   |
+                   v                   v
+          +----------------+  +----------------+
+          | Paimon / files |  | Paimon / files |
+          +----------------+  +----------------+
 ```
 
-Read path:
+## Build
 
-`brewdb -> brewdbd -> frontend -> sql -> planner -> runtime -> execution`
+Debug build:
 
-Metadata and storage side paths:
+```bash
+cargo build -p brewdbd -p brewdb
+```
 
-- `sql / planner / runtime -> brewdb-catalog`
-- `runtime / execution -> brewdb-storage`
-- `runtime -> RuntimeMeta`
+Release build:
 
-## Crate Layout
+```bash
+cargo build --release -p brewdbd -p brewdb
+```
 
-Phase 1 is organized around capability-oriented crates rather than coordinator/worker repository splits.
+Run tests for the main binary boundary:
 
-- `brewdb-common`
-  Shared common infrastructure and foundational components. This crate replaces the old `brewdb-core` role and now focuses on logger bootstrap, structured event helpers, diagnostics/error-code primitives, job-config layering primitives with explicit `system < session < statement` precedence, a registry-backed config whitelist for `brewdb.*` keys, and other low-level reusable building blocks rather than a large domain-kernel grab bag.
-- `brewdb-catalog`
-  BrewDB-owned catalog metadata kernel. Owns the `catalog.database.table` hierarchy, `Path / Ref / Entry` model, `CatalogService`, and the `CatalogStore / CatalogStoreBackend` split. The catalog store keeps control-plane identity plus table-location bindings, while format-native schema and snapshot truth stay below the lake-format metadata boundary.
-- `brewdb-frontend`
-  Session ingress and client-facing protocol boundary.
-- `brewdb-sql`
-  SQL parsing, binding, statement routing, and `BoundStatement` handoff.
-- `brewdb-planner`
-  Distributed planning layer. Sits between SQL binding and runtime scheduling.
-- `brewdb-runtime`
-  Fragment scheduling, transaction coordination, and runtime metadata integration.
-- `brewdb-execution`
-  DataFusion-aligned fragment execution and exchange runtime. Arrow is the in-memory execution baseline.
-- `brewdb-storage`
-  Storage semantics kernel with `StorageEngine / TableEngine` boundaries.
+```bash
+cargo test -p brewdb -p brewdbd
+```
 
-## Core Architecture Decisions
+## Quick Start
 
-- BrewDB owns its catalog directly; it does not depend on Lakekeeper as an architectural prerequisite.
-- Catalog naming is unified as `catalog.database.table`.
-- Catalog metadata and runtime metadata are separate logical subsystems, even if both use FoundationDB in Phase 1.
-- DataFusion is reused for:
-  - SQL parsing/binding bridge
-  - logical optimization
-  - fragment-local physical planning
-  - fragment-local physical optimization
-- BrewDB owns:
-  - distributed planning
-  - distributed CBO
-  - distributed runtime scheduling
-  - transaction and recovery coordination
-- Runtime consumes `DistributedPlan`, not raw SQL statements.
-- Execution data stays Arrow-compatible. BrewDB does not define a second private row format.
+Start the server:
 
-## Current Repository State
+```bash
+./target/debug/brewdbd
+```
 
-The repository currently keeps:
+In another terminal, run one query:
 
-- architecture and rollout docs under `docs/`
-- workspace and crate manifests
-- crate and binary directory skeletons
+```bash
+./target/debug/brewdb -c "select 1"
+```
 
-The repository intentionally does not currently keep the previous implementation code. The codebase is being rebuilt from the architecture baseline rather than incrementally patching the old scaffold.
+Or open the interactive client:
 
-## Important Docs
+```bash
+./target/debug/brewdb
+```
 
-- [Development Architecture](docs/development-architecture.md)
-- [Catalog Model](docs/catalog-model.md)
-- [Distributed Execution Phase 1](docs/distributed-execution-phase1.md)
-- [Coordinator CBO Optimizer Selection](docs/coordinator-cbo-optimizer-selection.md)
-- [Framework Rollout Tasks](docs/framework-rollout-tasks.md)
-- [Architecture Constraints](docs/architecture-constraints.md)
+Example interactive session:
 
-## Next Build Order
+```text
+brewdb> select 1;
+```
 
-The current rebuild order is:
+By default, `brewdbd` listens on `127.0.0.1:5432`, and `brewdb` connects to that
+address. Override it with:
 
-1. `brewdb-catalog`
-2. `brewdb-sql`
-3. `brewdb-planner`
-4. `brewdb-storage`
-5. `brewdb-runtime`
-6. `brewdb-execution`
-7. `brewdb-frontend`
-8. `brewdb` / `brewdbd`
+```bash
+./target/debug/brewdb --host 127.0.0.1 --port 5432
+```
 
-This order follows one rule: define the metadata and planning truth first, then reconnect runtime and execution on top of it.
+## Status
+
+BrewDB is still early-stage. The catalog, SQL path, runtime, pgwire shell,
+client process, and Paimon read integration are being built up incrementally.
+Expect some SQL shapes and storage operations to remain intentionally narrow
+while the architecture settles.

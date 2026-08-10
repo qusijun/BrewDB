@@ -115,6 +115,21 @@ mod tests {
     }
 
     #[test]
+    fn distributed_planner_supports_constant_query_without_from_clause() {
+        let plan = build_query_plan("select 1", vec![]);
+        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
+            panic!("expected query root");
+        };
+        let local_plan = plan.fragments[0]
+            .local_plan
+            .as_ref()
+            .expect("expected fragment local plan");
+
+        assert!(query_root.tables.is_empty());
+        assert!(matches!(local_plan, DataFusionLogicalPlan::Projection(_)));
+    }
+
+    #[test]
     fn distributed_planner_resolves_datafusion_function_expr() {
         let plan = build_query_plan("select lower(name) from orders", vec![make_table("orders")]);
         let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
