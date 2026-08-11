@@ -31,7 +31,7 @@ use crate::exchange::{
     route_exchange_batch,
 };
 use brewdb_execution::FragmentExecutionStatus;
-use brewdb_planner::exchange::RemoteSourceNode;
+use brewdb_planner::distributed::exchange::RemoteSourceNode;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RpcError {
@@ -577,7 +577,7 @@ mod tests {
 
     use brewdb_common::runtime::QueryContext;
     use brewdb_execution::FragmentExecutionStatus;
-    use brewdb_planner::plan::{PlanFragmentId, PlanFragmentKind};
+    use brewdb_planner::distributed::plan::{PlanFragmentId, PlanFragmentKind};
     use brewdb_planner::{LocalFragmentPlan, PlanStageId};
     use datafusion_common::DFSchema;
     use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;

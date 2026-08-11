@@ -37,8 +37,8 @@ use sqlparser_derive::{Visit, VisitMut};
 ///
 /// # Example: create a `ValueWithSpan` from a `Value`
 /// ```
-/// # use sqlparser::ast::{Value, ValueWithSpan};
-/// # use sqlparser::tokenizer::{Location, Span};
+/// # use brewdb_sql_parser::ast::{Value, ValueWithSpan};
+/// # use brewdb_sql_parser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
 /// // from line 1, column 1 to line 1, column 7
 /// let span = Span::new(Location::new(1, 1), Location::new(1, 7));
@@ -49,8 +49,8 @@ use sqlparser_derive::{Visit, VisitMut};
 ///
 /// You can call [`Value::with_empty_span`] to create a `ValueWithSpan` with an empty span
 /// ```
-/// # use sqlparser::ast::{Value, ValueWithSpan};
-/// # use sqlparser::tokenizer::{Location, Span};
+/// # use brewdb_sql_parser::ast::{Value, ValueWithSpan};
+/// # use brewdb_sql_parser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
 /// let value_with_span = value.with_empty_span();
 /// assert_eq!(value_with_span.span, Span::empty());
@@ -58,8 +58,8 @@ use sqlparser_derive::{Visit, VisitMut};
 ///
 /// You can also use the [`From`] trait to convert  `ValueWithSpan` to/from `Value`s
 /// ```
-/// # use sqlparser::ast::{Value, ValueWithSpan};
-/// # use sqlparser::tokenizer::{Location, Span};
+/// # use brewdb_sql_parser::ast::{Value, ValueWithSpan};
+/// # use brewdb_sql_parser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
 /// // converting `Value` to `ValueWithSpan` results in an empty span
 /// let value_with_span: ValueWithSpan = value.into();

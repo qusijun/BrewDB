@@ -1,10 +1,6 @@
-//! Shared schema types used across catalog, planning, and execution boundaries.
+//! Shared logical data types used across catalog, planning, and execution.
 
-use std::sync::Arc;
-
-use arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
-};
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
 use crate::errors::CommonError;
 
@@ -31,78 +27,6 @@ pub enum DataType {
         scale: u32,
     },
     String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SchemaField {
-    pub name: String,
-    pub data_type: DataType,
-    pub nullable: bool,
-}
-
-impl SchemaField {
-    pub fn new(name: impl Into<String>, data_type: DataType) -> Self {
-        Self {
-            name: name.into(),
-            data_type,
-            nullable: true,
-        }
-    }
-
-    pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.nullable = nullable;
-        self
-    }
-
-    pub fn to_arrow_field(&self) -> Result<ArrowField, CommonError> {
-        Ok(ArrowField::new(
-            &self.name,
-            self.data_type.to_arrow_data_type()?,
-            self.nullable,
-        ))
-    }
-
-    pub fn from_arrow_field(field: &ArrowField) -> Result<Self, CommonError> {
-        Ok(Self {
-            name: field.name().to_owned(),
-            data_type: DataType::from_arrow_data_type(field.data_type())?,
-            nullable: field.is_nullable(),
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TableSchema {
-    pub fields: Vec<SchemaField>,
-}
-
-impl TableSchema {
-    pub fn new(fields: Vec<SchemaField>) -> Self {
-        Self { fields }
-    }
-
-    pub fn to_arrow_schema(&self) -> Result<ArrowSchema, CommonError> {
-        Ok(ArrowSchema::new(
-            self.fields
-                .iter()
-                .map(SchemaField::to_arrow_field)
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
-    }
-
-    pub fn to_arrow_schema_ref(&self) -> Result<Arc<ArrowSchema>, CommonError> {
-        Ok(Arc::new(self.to_arrow_schema()?))
-    }
-
-    pub fn from_arrow_schema(schema: &ArrowSchema) -> Result<Self, CommonError> {
-        Ok(Self::new(
-            schema
-                .fields()
-                .iter()
-                .map(|field| SchemaField::from_arrow_field(field.as_ref()))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
-    }
 }
 
 impl DataType {
@@ -184,75 +108,5 @@ impl DataType {
                 reason: format!("unsupported Arrow data type `{other}`"),
             }),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::datatypes::{
-        DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
-    };
-
-    use super::{DataType, SchemaField, TableSchema};
-
-    #[test]
-    fn brewdb_schema_round_trips_through_arrow_schema() {
-        let schema = TableSchema::new(vec![
-            SchemaField::new("id", DataType::Int64).with_nullable(false),
-            SchemaField::new(
-                "event_time",
-                DataType::Timestamp {
-                    precision: 6,
-                    with_time_zone: true,
-                },
-            ),
-            SchemaField::new(
-                "amount",
-                DataType::Decimal {
-                    precision: 18,
-                    scale: 2,
-                },
-            )
-            .with_nullable(false),
-        ]);
-
-        let arrow_schema = schema.to_arrow_schema().unwrap();
-        let round_trip = TableSchema::from_arrow_schema(&arrow_schema).unwrap();
-
-        assert_eq!(round_trip, schema);
-    }
-
-    #[test]
-    fn arrow_schema_round_trips_through_brewdb_schema() {
-        let arrow_schema = ArrowSchema::new(vec![
-            ArrowField::new("name", ArrowDataType::Utf8, true),
-            ArrowField::new(
-                "ts",
-                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
-                false,
-            ),
-            ArrowField::new("payload", ArrowDataType::Binary, true),
-        ]);
-
-        let brewdb_schema = TableSchema::from_arrow_schema(&arrow_schema).unwrap();
-        let restored_arrow_schema = brewdb_schema.to_arrow_schema().unwrap();
-
-        assert_eq!(restored_arrow_schema, arrow_schema);
-    }
-
-    #[test]
-    fn unsupported_arrow_data_type_returns_conversion_error() {
-        let error = DataType::from_arrow_data_type(&ArrowDataType::List(Arc::new(
-            ArrowField::new("item", ArrowDataType::Int32, true),
-        )))
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("schema conversion failed: unsupported Arrow data type")
-        );
     }
 }

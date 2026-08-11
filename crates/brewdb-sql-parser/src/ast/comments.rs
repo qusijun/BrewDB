@@ -50,7 +50,7 @@ impl Comments {
     ///
     /// # Example
     /// ```rust
-    /// use sqlparser::{dialect::GenericDialect, parser::Parser, tokenizer::Location};
+    /// use brewdb_sql_parser::{dialect::GenericDialect, parser::Parser, tokenizer::Location};
     ///
     /// let sql = r#"/*
     ///  header comment ...

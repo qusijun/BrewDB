@@ -1,6 +1,6 @@
 //! Storage-format-local schema conversion interfaces.
 
-use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
 use crate::errors::CatalogError;
 use crate::requests::{AlterTableOperation, CreateTableRequest};
@@ -22,7 +22,7 @@ pub trait StorageFormatSchemaAdapter {
     ) -> Result<TableSchema, CatalogError>;
 
     fn brewdb_field_to_format_type(
-        column: &SchemaField,
+        column: &ColumnField,
     ) -> Result<Self::FormatDataType, CatalogError>;
 
     fn format_data_type_to_brewdb(

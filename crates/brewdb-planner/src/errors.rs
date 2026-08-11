@@ -47,3 +47,15 @@ impl DiagnosticError for PlannerError {
             .with_error_code(self.error_code())
     }
 }
+
+pub(crate) fn map_df_plan_error(error: datafusion_common::DataFusionError) -> PlannerError {
+    PlannerError::InvalidPlan {
+        reason: error.to_string(),
+    }
+}
+
+pub(crate) fn map_common_error(error: brewdb_common::errors::CommonError) -> PlannerError {
+    PlannerError::InvalidPlan {
+        reason: error.to_string(),
+    }
+}

@@ -11,8 +11,10 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrow_select::filter::filter_record_batch;
-use brewdb_planner::exchange::{ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme};
-use brewdb_planner::plan::PlanFragmentId;
+use brewdb_planner::distributed::exchange::{
+    ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme,
+};
+use brewdb_planner::distributed::plan::PlanFragmentId;
 use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
@@ -403,8 +405,8 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use brewdb_common::runtime::QueryContext;
     use brewdb_planner::PlanStageId;
-    use brewdb_planner::exchange::{ExchangeNode, PartitioningScheme};
-    use brewdb_planner::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
+    use brewdb_planner::distributed::exchange::{ExchangeNode, PartitioningScheme};
+    use brewdb_planner::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 
     use crate::scheduler::ScheduledFragment;
 

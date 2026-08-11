@@ -15,7 +15,9 @@ use brewdb_frontend::{
     MANAGED_PAIMON_CATALOG_NAME, ProtocolRegistry, QueryResultOutput, ResultField,
     SqlExecutionResult, SqlRequest, SqlRequestHandler,
 };
-use brewdb_runtime::{DataFusionExecutionRuntime, QueryExecutionHandle, SqlDriver, SqlDriverError};
+use brewdb_runtime::{
+    DistributedExecutionRuntime, QueryExecutionHandle, SqlDriver, SqlDriverError,
+};
 
 #[derive(Debug)]
 pub enum BrewDbServerError {
@@ -81,7 +83,7 @@ impl BrewDbServer {
             frontend_config.default_catalog(),
         )?;
         let mut server =
-            Self::with_catalog_service(catalog_service, DataFusionExecutionRuntime::default());
+            Self::with_catalog_service(catalog_service, DistributedExecutionRuntime::default());
         server.client_defaults =
             ClientDefaults::default().with_catalog(frontend_config.default_catalog());
         server.listen_address = frontend_config.pgwire_listen_addr().to_owned();
@@ -95,7 +97,7 @@ impl BrewDbServer {
 
     pub fn with_catalog_service(
         catalog_service: CatalogService,
-        runtime: DataFusionExecutionRuntime,
+        runtime: DistributedExecutionRuntime,
     ) -> Self {
         Self {
             frontend: FrontendService,
@@ -258,13 +260,13 @@ mod tests {
         open_catalog_store,
     };
     use brewdb_common::config::{ConfigPatch, ConfigScope, global_config_registry};
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use brewdb_frontend::{
         ClientCapabilities, ClientDefaults, ClientIdentity, ClientSessionContext,
         DEFAULT_DATABASE_NAME, MANAGED_PAIMON_CATALOG_NAME, OpenedClientSession, PgWireCodec,
         QueryResultKind, RequestContext, SqlRequestHandler,
     };
-    use brewdb_runtime::DataFusionExecutionRuntime;
+    use brewdb_runtime::DistributedExecutionRuntime;
     use brewdb_storage::MemoryStorageEngine;
     use uuid::Uuid;
 
@@ -326,7 +328,7 @@ mod tests {
             .create_table(CreateTableRequest::new(
                 "sales",
                 "orders",
-                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             ))
             .unwrap();
 
@@ -346,7 +348,7 @@ mod tests {
 
         BrewDbServer::with_catalog_service(
             catalog_service,
-            DataFusionExecutionRuntime::with_storage(storage),
+            DistributedExecutionRuntime::with_storage(storage),
         )
     }
 

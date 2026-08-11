@@ -32,8 +32,8 @@
 //! # Example parsing SQL text
 //!
 //! ```
-//! use sqlparser::dialect::GenericDialect;
-//! use sqlparser::parser::Parser;
+//! use brewdb_sql_parser::dialect::GenericDialect;
+//! use brewdb_sql_parser::parser::Parser;
 //!
 //! let dialect = GenericDialect {}; // or AnsiDialect
 //!
@@ -54,8 +54,8 @@
 //! useful for tools that analyze and manipulate SQL.
 //!
 //! ```
-//! # use sqlparser::dialect::GenericDialect;
-//! # use sqlparser::parser::Parser;
+//! # use brewdb_sql_parser::dialect::GenericDialect;
+//! # use brewdb_sql_parser::parser::Parser;
 //! let sql = "SELECT a FROM table_1";
 //!
 //! // parse to a Vec<Statement>
@@ -70,8 +70,8 @@
 //! SQL statements can be pretty-printed with proper indentation and line breaks using the alternate flag (`{:#}`):
 //!
 //! ```
-//! # use sqlparser::dialect::GenericDialect;
-//! # use sqlparser::parser::Parser;
+//! # use brewdb_sql_parser::dialect::GenericDialect;
+//! # use brewdb_sql_parser::parser::Parser;
 //! let sql = "SELECT a, b FROM table_1";
 //! let ast = Parser::parse_sql(&GenericDialect, sql).unwrap();
 //!
@@ -121,7 +121,7 @@
 //!
 //! Previously:
 //! ```text
-//! # use sqlparser::ast::Ident;
+//! # use brewdb_sql_parser::ast::Ident;
 //! Ident {
 //!     value: "name".into(),
 //!     quote_style: None,
@@ -129,8 +129,8 @@
 //! ```
 //! Now
 //! ```rust
-//! # use sqlparser::ast::Ident;
-//! # use sqlparser::tokenizer::Span;
+//! # use brewdb_sql_parser::ast::Ident;
+//! # use brewdb_sql_parser::tokenizer::Span;
 //! Ident {
 //!     value: "name".into(),
 //!     quote_style: None,

@@ -37,8 +37,8 @@ use crate::parser::ParserError;
 ///
 /// # Example
 /// ```rust
-/// use sqlparser::ast::helpers::stmt_create_database::CreateDatabaseBuilder;
-/// use sqlparser::ast::{ColumnDef, Ident, ObjectName};
+/// use brewdb_sql_parser::ast::helpers::stmt_create_database::CreateDatabaseBuilder;
+/// use brewdb_sql_parser::ast::{ColumnDef, Ident, ObjectName};
 /// let builder = CreateDatabaseBuilder::new(ObjectName::from(vec![Ident::new("database_name")]))
 ///    .if_not_exists(true);
 /// // You can access internal elements with ease

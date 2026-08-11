@@ -40,8 +40,8 @@ use sqlparser_derive::{Visit, VisitMut};
 ///
 /// Same token, different location are equal
 /// ```
-/// # use sqlparser::ast::helpers::attached_token::AttachedToken;
-/// # use sqlparser::tokenizer::{Location, Span, Token, TokenWithLocation};
+/// # use brewdb_sql_parser::ast::helpers::attached_token::AttachedToken;
+/// # use brewdb_sql_parser::tokenizer::{Location, Span, Token, TokenWithLocation};
 /// // commas @ line 1, column 10
 /// let tok1 = TokenWithLocation::new(
 ///   Token::Comma,
@@ -60,8 +60,8 @@ use sqlparser_derive::{Visit, VisitMut};
 /// Different token, different location are equal 🤯
 ///
 /// ```
-/// # use sqlparser::ast::helpers::attached_token::AttachedToken;
-/// # use sqlparser::tokenizer::{Location, Span, Token, TokenWithLocation};
+/// # use brewdb_sql_parser::ast::helpers::attached_token::AttachedToken;
+/// # use brewdb_sql_parser::tokenizer::{Location, Span, Token, TokenWithLocation};
 /// // commas @ line 1, column 10
 /// let tok1 = TokenWithLocation::new(
 ///   Token::Comma,

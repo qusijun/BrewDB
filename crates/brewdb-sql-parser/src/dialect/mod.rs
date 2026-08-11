@@ -73,8 +73,8 @@ pub use self::teradata::TeradataDialect;
 /// # Example
 ///
 /// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, GenericDialect};
+/// use brewdb_sql_parser::derive_dialect;
+/// use brewdb_sql_parser::dialect::{Dialect, GenericDialect};
 ///
 /// // Override boolean methods (supports_*, allow_*, etc.)
 /// derive_dialect!(CustomDialect, GenericDialect, overrides = {
@@ -91,8 +91,8 @@ pub use self::teradata::TeradataDialect;
 ///
 /// Use a char literal or `None`:
 /// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, PostgreSqlDialect};
+/// use brewdb_sql_parser::derive_dialect;
+/// use brewdb_sql_parser::dialect::{Dialect, PostgreSqlDialect};
 ///
 /// derive_dialect!(BacktickPostgreSqlDialect, PostgreSqlDialect,
 ///     preserve_type_id = true,
@@ -114,8 +114,8 @@ pub use self::teradata::TeradataDialect;
 /// By default, derived dialects have their own `TypeId`. Set `preserve_type_id = true` to
 /// retain the base dialect's identity with respect to the parser's `dialect.is::<T>()` checks:
 /// ```
-/// use sqlparser::derive_dialect;
-/// use sqlparser::dialect::{Dialect, GenericDialect};
+/// use brewdb_sql_parser::derive_dialect;
+/// use brewdb_sql_parser::dialect::{Dialect, GenericDialect};
 ///
 /// derive_dialect!(EnhancedGenericDialect, GenericDialect,
 ///     preserve_type_id = true,
@@ -185,7 +185,7 @@ macro_rules! dialect_is {
 /// level documentation]:
 ///
 /// ```
-/// # use sqlparser::dialect::AnsiDialect;
+/// # use brewdb_sql_parser::dialect::AnsiDialect;
 /// let dialect = AnsiDialect {};
 /// ```
 ///
@@ -193,7 +193,7 @@ macro_rules! dialect_is {
 /// name. For example:
 ///
 /// ```
-/// # use sqlparser::dialect::{AnsiDialect, dialect_from_str};
+/// # use brewdb_sql_parser::dialect::{AnsiDialect, dialect_from_str};
 /// let dialect = dialect_from_str("ansi").unwrap();
 ///
 /// // Parsed dialect is an instance of `AnsiDialect`:

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use brewdb_common::schema::TableSchema;
+use brewdb_common::table::TableSchema;
 use datafusion_common::Statistics;
 use datafusion_common::stats::Precision;
 use datafusion_expr::TableSource;
@@ -286,7 +286,7 @@ impl TableSource for TableCatalogEntry {
 mod tests {
     use super::{CatalogMode, LakeFormatKind, TableCatalogEntry, TableStatsHandle};
     use crate::path::TablePath;
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
     #[test]
     fn table_catalog_entry_exposes_table_stats_handle() {
@@ -296,7 +296,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             TablePath::new("prod", "sales", "orders").unwrap(),
-            TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             "s3://warehouse/sales/orders",
             LakeFormatKind::Paimon,
             CatalogMode::Managed,

@@ -202,7 +202,7 @@ mod tests {
     use crate::store::memory::MemoryCatalogStoreBackend;
 
     use super::CatalogService;
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
     struct TestDir {
         path: PathBuf,
@@ -327,8 +327,8 @@ mod tests {
                     "sales",
                     "orders",
                     TableSchema::new(vec![
-                        SchemaField::new("id", DataType::Int32).with_nullable(false),
-                        SchemaField::new("name", DataType::String),
+                        ColumnField::new("id", DataType::Int32).with_nullable(false),
+                        ColumnField::new("name", DataType::String),
                     ]),
                 )
                 .with_options([("bucket", "1")]),

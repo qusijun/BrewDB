@@ -10,8 +10,8 @@ use datafusion_common::tree_node::Transformed;
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
 use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerContext, OptimizerRule};
 
+use crate::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::errors::PlannerError;
-use crate::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFragmentPlan {
@@ -103,6 +103,28 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                     scan.fetch,
                 )?;
                 Ok(Transformed::yes(DataFusionLogicalPlan::TableScan(rebuilt)))
+            }
+            DataFusionLogicalPlan::Dml(dml) => {
+                let Some(table) = self
+                    .tables
+                    .iter()
+                    .find(|table| table.path.table() == dml.table_name.table())
+                else {
+                    return Ok(Transformed::no(DataFusionLogicalPlan::Dml(dml)));
+                };
+                let provider = self
+                    .storage
+                    .table_engine(table)
+                    .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?
+                    .table_provider()
+                    .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                let rebuilt = datafusion_expr::logical_plan::dml::DmlStatement::new(
+                    dml.table_name,
+                    provider_as_source(provider),
+                    dml.op,
+                    dml.input,
+                );
+                Ok(Transformed::yes(DataFusionLogicalPlan::Dml(rebuilt)))
             }
             other => Ok(Transformed::no(other)),
         }

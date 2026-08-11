@@ -497,7 +497,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use paimon::catalog::{Catalog as PaimonCatalog, Database as PaimonDatabase, Identifier};
     use paimon::io::FileIOBuilder;
     use paimon::spec::{Schema, TableSchema as PaimonTableSchema};
@@ -645,7 +645,7 @@ mod tests {
             .create_table(CreateTableRequest::new(
                 "sales",
                 "orders",
-                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             ))
             .unwrap();
 
@@ -670,7 +670,7 @@ mod tests {
             .create_table(CreateTableRequest::new(
                 "sales",
                 "orders",
-                TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             ))
             .unwrap();
 

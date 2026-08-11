@@ -6,37 +6,40 @@
 
 pub mod distributed;
 pub mod errors;
-pub mod exchange;
 pub mod local;
 pub mod logical;
-pub mod plan;
-
 pub use brewdb_common::runtime::QueryContext;
+pub use distributed::exchange::{ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme};
+pub use distributed::plan::{
+    DistributedPhysicalPlan, PlanFragment, PlanFragmentId, PlanFragmentKind, PlanStageId,
+};
 pub use distributed::{DistributedPlanner, DistributedPlannerRequest};
 pub use errors::PlannerError;
-pub use exchange::{ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme};
 pub use local::LocalFragmentPlan;
+pub use logical::plan::{CreateDatabase, Ddl, DropDatabase, LogicalPlanNode, Show};
 pub use logical::{
-    DeletePlanRoot, InsertPlanRoot, LogicalPlan, MergePlanRoot, QueryExpression, QueryGroupBy,
-    QueryPlanRoot, UpdatePlanRoot,
+    LogicalOptimizer, LogicalPlanner, LogicalPlanningContext, LogicalPlanningSession,
 };
-pub use plan::{PlanFragment, PlanFragmentId, PlanFragmentKind, PlanStageId};
 
 #[cfg(test)]
 mod tests {
     use brewdb_catalog::{CatalogMode, LakeFormatKind, TableCatalogEntry, TablePath};
     use brewdb_common::runtime::QueryContext;
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
-    use brewdb_sql::{BoundPlanStatement, BoundQueryStatement, BoundSessionContext};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use brewdb_sql_parser::dialect::PostgreSqlDialect;
     use brewdb_sql_parser::parser::Parser;
     use datafusion_expr::logical_plan::JoinType as DataFusionJoinType;
+    use datafusion_expr::registry::MemoryFunctionRegistry;
     use datafusion_expr::{Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPlan};
+    use datafusion_functions as datafusion_scalar_functions;
+    use datafusion_functions_aggregate as datafusion_aggregate_functions;
 
+    use crate::distributed::exchange::{ExchangeScope, ExchangeType, RemoteSourceNode};
+    use crate::distributed::plan::{CommandPlan, DistributedPlanRoot, PlanFragmentKind};
     use crate::distributed::{DistributedPlanner, DistributedPlannerRequest};
-    use crate::exchange::{ExchangeScope, ExchangeType, RemoteSourceNode};
-    use crate::logical::{LogicalPlan, QueryGroupBy};
-    use crate::plan::PlanFragmentKind;
+    use crate::logical::insert::plan_insert_statement;
+    use crate::logical::plan::{Ddl, LogicalPlanNode, Show};
+    use crate::logical::query::plan_query_statement;
 
     fn find_table_scan<'a>(
         plan: &'a DataFusionLogicalPlan,
@@ -54,8 +57,8 @@ mod tests {
             uuid::Uuid::new_v4(),
             TablePath::new("prod", "sales", table_name).unwrap(),
             TableSchema::new(vec![
-                SchemaField::new("id", DataType::Int32),
-                SchemaField::new("name", DataType::String),
+                ColumnField::new("id", DataType::Int32),
+                ColumnField::new("name", DataType::String),
             ]),
             format!("s3://warehouse/sales/{table_name}"),
             LakeFormatKind::Paimon,
@@ -63,27 +66,50 @@ mod tests {
         )
     }
 
-    fn build_query_plan(sql: &str, tables: Vec<TableCatalogEntry>) -> crate::plan::DistributedPlan {
+    fn function_registry() -> MemoryFunctionRegistry {
+        let mut registry = MemoryFunctionRegistry::new();
+        datafusion_scalar_functions::register_all(&mut registry).unwrap();
+        datafusion_aggregate_functions::register_all(&mut registry).unwrap();
+        registry
+    }
+
+    fn build_query_plan(
+        sql: &str,
+        tables: Vec<TableCatalogEntry>,
+    ) -> crate::distributed::plan::DistributedPhysicalPlan {
         let planner = DistributedPlanner::default();
         let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql)
             .unwrap()
             .remove(0);
+        let logical_plan = plan_query_statement(ast, tables, &function_registry()).unwrap();
         planner
             .build(DistributedPlannerRequest {
                 query_context: QueryContext {
                     query_id: uuid::Uuid::new_v4(),
                 },
-                statement: BoundPlanStatement::Query(BoundQueryStatement {
-                    statement_text: sql.to_owned(),
-                    session: BoundSessionContext {
-                        session_id: uuid::Uuid::new_v4(),
-                        user_name: "brew".to_owned(),
-                        catalog_name: "prod".to_owned(),
-                        database_name: "sales".to_owned(),
-                    },
-                    tables,
-                    ast,
-                }),
+                logical_plan,
+            })
+            .unwrap()
+    }
+
+    fn build_insert_plan(
+        sql: &str,
+        target_table: TableCatalogEntry,
+        source_tables: Vec<TableCatalogEntry>,
+    ) -> crate::distributed::plan::DistributedPhysicalPlan {
+        let planner = DistributedPlanner::default();
+        let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+            .unwrap()
+            .remove(0);
+        let logical_plan =
+            plan_insert_statement(ast, target_table.clone(), &function_registry()).unwrap();
+        let _ = source_tables;
+        planner
+            .build(DistributedPlannerRequest {
+                query_context: QueryContext {
+                    query_id: uuid::Uuid::new_v4(),
+                },
+                logical_plan,
             })
             .unwrap()
     }
@@ -93,22 +119,20 @@ mod tests {
         let plan = build_query_plan("select * from orders", vec![make_table("orders")]);
 
         assert_eq!(plan.fragments.len(), 1);
+        assert_eq!(plan.command_tag, "SELECT");
+        assert!(plan.returns_rows);
+        assert_eq!(plan.table_catalogs.len(), 1);
         assert!(matches!(
             plan.fragments[0].root,
-            Some(LogicalPlan::Query(_))
+            Some(DataFusionLogicalPlan::TableScan(_))
         ));
         assert_eq!(plan.fragments[0].kind, PlanFragmentKind::Root);
         let local_plan = plan.fragments[0]
             .local_plan
             .as_ref()
             .expect("expected fragment local plan");
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
-        assert_eq!(query_root.query.projection.len(), 1);
-        assert!(matches!(query_root.query.group_by, QueryGroupBy::None));
         assert!(matches!(local_plan, DataFusionLogicalPlan::TableScan(_)));
-        let Some(DataFusionLogicalPlan::TableScan(scan)) = query_root.input.as_ref() else {
+        let Some(DataFusionLogicalPlan::TableScan(scan)) = plan.fragments[0].root.as_ref() else {
             panic!("expected table scan root");
         };
         assert_eq!(scan.table_name.table(), "orders");
@@ -117,32 +141,126 @@ mod tests {
     #[test]
     fn distributed_planner_supports_constant_query_without_from_clause() {
         let plan = build_query_plan("select 1", vec![]);
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
         let local_plan = plan.fragments[0]
             .local_plan
             .as_ref()
             .expect("expected fragment local plan");
 
-        assert!(query_root.tables.is_empty());
+        assert!(plan.table_catalogs.is_empty());
         assert!(matches!(local_plan, DataFusionLogicalPlan::Projection(_)));
+    }
+
+    #[test]
+    fn distributed_planner_models_insert_values_as_append_write_with_input_plan() {
+        let plan = build_insert_plan(
+            "insert into orders values (1, 'a')",
+            make_table("orders"),
+            vec![],
+        );
+
+        assert_eq!(plan.command_tag, "INSERT");
+        assert!(!plan.returns_rows);
+        assert_eq!(plan.table_catalogs.len(), 1);
+        assert_eq!(plan.table_catalogs[0].path.table(), "orders");
+        let Some(DataFusionLogicalPlan::Dml(dml)) = &plan.fragments[0].root else {
+            panic!("expected DataFusion DML root");
+        };
+        assert_eq!(dml.table_name.table(), "orders");
+        let DataFusionLogicalPlan::Projection(projection) = dml.input.as_ref() else {
+            panic!("expected INSERT VALUES input to be projected onto target columns");
+        };
+        assert!(matches!(
+            projection.input.as_ref(),
+            DataFusionLogicalPlan::Values(_)
+        ));
+    }
+
+    #[test]
+    fn distributed_planner_models_non_compute_logical_plans_as_commands() {
+        let planner = DistributedPlanner::default();
+        let query_context = QueryContext {
+            query_id: uuid::Uuid::new_v4(),
+        };
+        let plan = planner
+            .build(DistributedPlannerRequest {
+                query_context: query_context.clone(),
+                logical_plan: datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
+                    node: std::sync::Arc::new(LogicalPlanNode::Show(Show::Catalogs)),
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(plan.query_context, query_context);
+        assert_eq!(plan.command_tag, "SHOW CATALOGS");
+        assert!(plan.returns_rows);
+        assert!(plan.fragments.is_empty());
+        assert!(plan.exchanges.is_empty());
+        assert!(matches!(
+            plan.root,
+            DistributedPlanRoot::Command(CommandPlan::Extension(LogicalPlanNode::Show(
+                Show::Catalogs
+            )))
+        ));
+
+        let plan = planner
+            .build(DistributedPlannerRequest {
+                query_context: QueryContext {
+                    query_id: uuid::Uuid::new_v4(),
+                },
+                logical_plan: datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
+                    node: std::sync::Arc::new(LogicalPlanNode::Ddl(Ddl::CreateDatabase(
+                        crate::logical::plan::CreateDatabase {
+                            catalog_name: "prod".to_owned(),
+                            database_name: "sales".to_owned(),
+                        },
+                    ))),
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(plan.command_tag, "CREATE DATABASE");
+        assert!(!plan.returns_rows);
+        assert!(plan.fragments.is_empty());
+        assert!(matches!(
+            plan.root,
+            DistributedPlanRoot::Command(CommandPlan::Extension(LogicalPlanNode::Ddl(
+                Ddl::CreateDatabase(_)
+            )))
+        ));
+
+        let plan = planner
+            .build(DistributedPlannerRequest {
+                query_context: QueryContext {
+                    query_id: uuid::Uuid::new_v4(),
+                },
+                logical_plan: datafusion_expr::LogicalPlan::Ddl(
+                    datafusion_expr::DdlStatement::DropTable(datafusion_expr::DropTable {
+                        name: datafusion_common::TableReference::full("prod", "sales", "orders"),
+                        if_exists: false,
+                        schema: std::sync::Arc::new(datafusion_common::DFSchema::empty()),
+                    }),
+                ),
+            })
+            .unwrap();
+
+        assert_eq!(plan.command_tag, "DROP TABLE");
+        assert!(!plan.returns_rows);
+        assert!(plan.fragments.is_empty());
+        assert!(matches!(
+            plan.root,
+            DistributedPlanRoot::Command(CommandPlan::Ddl(
+                datafusion_expr::DdlStatement::DropTable(_)
+            ))
+        ));
     }
 
     #[test]
     fn distributed_planner_resolves_datafusion_function_expr() {
         let plan = build_query_plan("select lower(name) from orders", vec![make_table("orders")]);
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
         let local_plan = plan.fragments[0]
             .local_plan
             .as_ref()
             .expect("expected worker-facing fragment plan");
-        assert!(matches!(
-            query_root.query.projection.first(),
-            Some(DataFusionExpr::ScalarFunction(_))
-        ));
         let DataFusionLogicalPlan::Projection(projection) = local_plan else {
             panic!("expected projection root");
         };
@@ -159,18 +277,13 @@ mod tests {
             "select id from orders where id > 10",
             vec![make_table("orders")],
         );
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
-        let Some(scan) = find_table_scan(query_root.input.as_ref().unwrap()) else {
+        let root = plan.fragments[0].root.as_ref().expect("expected root plan");
+        let Some(scan) = find_table_scan(root) else {
             panic!("expected table scan in query plan");
         };
         assert_eq!(scan.table_name.table(), "orders");
         assert!(scan.projection.is_some());
-        assert!(matches!(
-            query_root.input.as_ref().unwrap(),
-            DataFusionLogicalPlan::Filter(_)
-        ));
+        assert!(matches!(root, DataFusionLogicalPlan::Filter(_)));
     }
 
     #[test]
@@ -188,10 +301,9 @@ mod tests {
         );
         assert_eq!(plan.exchanges[0].partitioning_scheme.output_layout.len(), 1);
         assert_eq!(plan.fragments[1].kind, PlanFragmentKind::Source);
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
-        let DataFusionLogicalPlan::Aggregate(aggregate) = query_root.input.as_ref().unwrap() else {
+        let DataFusionLogicalPlan::Aggregate(aggregate) =
+            plan.fragments[0].root.as_ref().expect("expected root plan")
+        else {
             panic!("expected aggregate root");
         };
         assert_eq!(aggregate.aggr_expr.len(), 1);
@@ -251,10 +363,7 @@ mod tests {
                 .iter()
                 .all(|fragment| fragment.kind == PlanFragmentKind::Source)
         );
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
-        let Some(DataFusionLogicalPlan::Join(join)) = query_root.input.as_ref() else {
+        let Some(DataFusionLogicalPlan::Join(join)) = &plan.fragments[0].root else {
             panic!("expected join input");
         };
         assert_eq!(join.join_type, DataFusionJoinType::Inner);
@@ -334,10 +443,7 @@ mod tests {
                 .iter()
                 .all(|edge| !edge.partitioning_scheme.output_layout.is_empty())
         );
-        let Some(LogicalPlan::Query(query_root)) = &plan.fragments[0].root else {
-            panic!("expected query root");
-        };
-        let Some(DataFusionLogicalPlan::Join(join)) = query_root.input.as_ref() else {
+        let Some(DataFusionLogicalPlan::Join(join)) = &plan.fragments[0].root else {
             panic!("expected join input");
         };
         assert!(join.on.len() <= 1);

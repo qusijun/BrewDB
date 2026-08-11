@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use brewdb_common::runtime::QueryContext;
-use brewdb_planner::plan::{DistributedPlan, PlanFragment, PlanFragmentKind};
+use brewdb_planner::distributed::plan::{DistributedPhysicalPlan, PlanFragment, PlanFragmentKind};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +93,7 @@ impl WorkerSelector for FirstWorkerSelector {
 pub trait FragmentScheduler {
     fn schedule(
         &self,
-        plan: DistributedPlan,
+        plan: DistributedPhysicalPlan,
         resource_manager: &dyn ResourceManager,
     ) -> Result<FragmentSchedule, FragmentSchedulerError>;
 }
@@ -114,7 +114,7 @@ impl Default for AllAtOnceFragmentScheduler {
 impl FragmentScheduler for AllAtOnceFragmentScheduler {
     fn schedule(
         &self,
-        plan: DistributedPlan,
+        plan: DistributedPhysicalPlan,
         resource_manager: &dyn ResourceManager,
     ) -> Result<FragmentSchedule, FragmentSchedulerError> {
         if plan.fragments.is_empty() {
@@ -151,7 +151,10 @@ mod tests {
     use std::sync::Arc;
 
     use brewdb_planner::PlanStageId;
-    use brewdb_planner::plan::{DistributedPlan, PlanFragment, PlanFragmentId, PlanFragmentKind};
+    use brewdb_planner::distributed::plan::{
+        DistributedPhysicalPlan, DistributedPlanRoot, PlanFragment, PlanFragmentId,
+        PlanFragmentKind,
+    };
 
     use super::{
         AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, FragmentSchedulerError,
@@ -164,10 +167,14 @@ mod tests {
         let scheduler = AllAtOnceFragmentScheduler::default();
         let err = scheduler
             .schedule(
-                DistributedPlan {
+                DistributedPhysicalPlan {
                     query_context: QueryContext {
                         query_id: uuid::Uuid::new_v4(),
                     },
+                    root: DistributedPlanRoot::Fragments,
+                    table_catalogs: vec![],
+                    command_tag: "SELECT".to_owned(),
+                    returns_rows: true,
                     fragments: vec![],
                     exchanges: vec![],
                 },
@@ -186,10 +193,14 @@ mod tests {
         let scheduler = AllAtOnceFragmentScheduler {
             worker_selector: Arc::new(FirstWorkerSelector),
         };
-        let plan = DistributedPlan {
+        let plan = DistributedPhysicalPlan {
             query_context: QueryContext {
                 query_id: uuid::Uuid::new_v4(),
             },
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: "SELECT".to_owned(),
+            returns_rows: true,
             fragments: vec![PlanFragment {
                 fragment_id: PlanFragmentId {
                     stage_id: PlanStageId(0),

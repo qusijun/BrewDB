@@ -142,9 +142,9 @@ visit_noop!(bigdecimal::BigDecimal);
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{Visit, Visitor, ObjectName, Expr};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{Visit, Visitor, ObjectName, Expr};
 /// # use core::ops::ControlFlow;
 /// // A structure that records statements and relations
 /// #[derive(Default)]
@@ -283,9 +283,9 @@ pub trait Visitor {
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{VisitMut, VisitorMut, ObjectName, Expr, Ident};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{VisitMut, VisitorMut, ObjectName, Expr, Ident};
 /// # use core::ops::ControlFlow;
 ///
 /// // A visitor that replaces "to_replace" with "replaced" in all expressions
@@ -418,9 +418,9 @@ impl<E, F: FnMut(&mut ObjectName) -> ControlFlow<E>> VisitorMut for RelationVisi
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{visit_relations};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{visit_relations};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT a FROM foo where x IN (SELECT y FROM bar)";
 /// let statements = Parser::parse_sql(&GenericDialect{}, sql)
@@ -458,9 +458,9 @@ where
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{ObjectName, ObjectNamePart, Ident, visit_relations_mut};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{ObjectName, ObjectNamePart, Ident, visit_relations_mut};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT a FROM foo";
 /// let mut statements = Parser::parse_sql(&GenericDialect{}, sql)
@@ -506,9 +506,9 @@ impl<E, F: FnMut(&mut Expr) -> ControlFlow<E>> VisitorMut for ExprVisitor<F> {
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{visit_expressions};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{visit_expressions};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT a FROM foo where x IN (SELECT y FROM bar)";
 /// let statements = Parser::parse_sql(&GenericDialect{}, sql)
@@ -550,9 +550,9 @@ where
 ///
 /// ## Remove all select limits in sub-queries
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{Expr, visit_expressions_mut, visit_statements_mut};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{Expr, visit_expressions_mut, visit_statements_mut};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT (SELECT y FROM z LIMIT 9) FROM t LIMIT 3";
 /// let mut statements = Parser::parse_sql(&GenericDialect{}, sql).unwrap();
@@ -575,9 +575,9 @@ where
 /// [`std::mem`] family of functions.
 ///
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::*;
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::*;
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT x, y FROM t";
 /// let mut statements = Parser::parse_sql(&GenericDialect{}, sql).unwrap();
@@ -637,9 +637,9 @@ impl<E, F: FnMut(&mut Statement) -> ControlFlow<E>> VisitorMut for StatementVisi
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{visit_statements};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{visit_statements};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT a FROM foo where x IN (SELECT y FROM bar); CREATE TABLE baz(q int)";
 /// let statements = Parser::parse_sql(&GenericDialect{}, sql)
@@ -674,9 +674,9 @@ where
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::Parser;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::ast::{Statement, visit_statements_mut};
+/// # use brewdb_sql_parser::parser::Parser;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::ast::{Statement, visit_statements_mut};
 /// # use core::ops::ControlFlow;
 /// let sql = "SELECT x FROM foo LIMIT 9+$limit; SELECT * FROM t LIMIT f()";
 /// let mut statements = Parser::parse_sql(&GenericDialect{}, sql).unwrap();

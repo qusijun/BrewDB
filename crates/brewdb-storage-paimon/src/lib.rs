@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use brewdb_catalog::{LakeFormatKind, TableCatalogEntry};
-use brewdb_common::schema::{DataType, SchemaField};
+use brewdb_common::{column::ColumnField, datatype::DataType};
 use brewdb_storage::{StorageEngine, StorageError, TableEngine};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::{TableProvider, TableType};
@@ -242,7 +242,7 @@ fn build_paimon_schema(table: &TableCatalogEntry) -> Result<PaimonTableSchema, S
         .map(|schema| PaimonTableSchema::new(0, &schema))
 }
 
-fn brewdb_field_to_paimon_type(field: &SchemaField) -> Result<PaimonDataType, StorageError> {
+fn brewdb_field_to_paimon_type(field: &ColumnField) -> Result<PaimonDataType, StorageError> {
     let nullable = field.nullable;
     match field.data_type {
         DataType::Boolean => Ok(PaimonDataType::Boolean(BooleanType::with_nullable(
@@ -294,7 +294,7 @@ fn brewdb_field_to_paimon_type(field: &SchemaField) -> Result<PaimonDataType, St
 #[cfg(test)]
 mod tests {
     use brewdb_catalog::{CatalogMode, LakeFormatKind, TableCatalogEntry, TablePath};
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use brewdb_storage::{StorageEngine, StorageError};
 
     use super::PaimonStorageEngine;
@@ -305,7 +305,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             TablePath::new("prod", "sales", "orders").unwrap(),
-            TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             "file:///tmp/brewdb-paimon-test",
             lake_format_kind,
             CatalogMode::Managed,

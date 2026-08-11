@@ -1,6 +1,6 @@
 //! Paimon <-> BrewDB schema conversion helpers kept local to brewdb-catalog.
 
-use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
 use paimon::spec::{
     BigIntType, BooleanType, DataType as PaimonDataType, DateType, DecimalType, DoubleType,
     FloatType, IntType, LocalZonedTimestampType, Schema, SchemaChange, SmallIntType, TimeType,
@@ -55,7 +55,7 @@ impl StorageFormatSchemaAdapter for PaimonSchemaAdapter {
                 data_type,
             } => Ok(SchemaChange::update_column_type(
                 column_name.clone(),
-                Self::brewdb_field_to_format_type(&SchemaField::new(
+                Self::brewdb_field_to_format_type(&ColumnField::new(
                     column_name,
                     data_type.clone(),
                 ))?,
@@ -76,7 +76,7 @@ impl StorageFormatSchemaAdapter for PaimonSchemaAdapter {
             .fields()
             .iter()
             .map(|field| {
-                Ok(SchemaField::new(
+                Ok(ColumnField::new(
                     field.name(),
                     Self::format_data_type_to_brewdb(field.data_type())?,
                 )
@@ -87,7 +87,7 @@ impl StorageFormatSchemaAdapter for PaimonSchemaAdapter {
     }
 
     fn brewdb_field_to_format_type(
-        column: &SchemaField,
+        column: &ColumnField,
     ) -> Result<Self::FormatDataType, CatalogError> {
         let nullable = column.nullable;
         match column.data_type {
@@ -186,7 +186,7 @@ fn map_paimon_backend_error(error: impl ToString) -> CatalogError {
 
 #[cfg(test)]
 mod tests {
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use paimon::spec::{
         ArrayType, DataType as PaimonDataType, IntType, Schema, TableSchema as PaimonTableSchema,
     };
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn brewdb_field_round_trips_with_paimon_type() {
-        let field = SchemaField::new(
+        let field = ColumnField::new(
             "event_time",
             DataType::Timestamp {
                 precision: 6,
@@ -208,7 +208,7 @@ mod tests {
         .with_nullable(false);
 
         let paimon_type = PaimonSchemaAdapter::brewdb_field_to_format_type(&field).unwrap();
-        let round_trip = SchemaField::new(
+        let round_trip = ColumnField::new(
             "event_time",
             PaimonSchemaAdapter::format_data_type_to_brewdb(&paimon_type).unwrap(),
         )
@@ -229,7 +229,7 @@ mod tests {
 
         assert_eq!(
             brewdb_schema,
-            TableSchema::new(vec![SchemaField::new("id", DataType::Int32)])
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)])
         );
     }
 

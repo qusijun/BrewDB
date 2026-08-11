@@ -1549,7 +1549,7 @@ pub enum LambdaSyntax {
 /// # Examples
 /// Accessing as a slice:
 /// ```
-/// # use sqlparser::ast::OneOrManyWithParens;
+/// # use brewdb_sql_parser::ast::OneOrManyWithParens;
 /// let one = OneOrManyWithParens::One("a");
 ///
 /// assert_eq!(one[0], "a");
@@ -1557,7 +1557,7 @@ pub enum LambdaSyntax {
 /// ```
 /// Iterating:
 /// ```
-/// # use sqlparser::ast::OneOrManyWithParens;
+/// # use brewdb_sql_parser::ast::OneOrManyWithParens;
 /// let one = OneOrManyWithParens::One("a");
 /// let many = OneOrManyWithParens::Many(vec!["a", "b"]);
 ///
@@ -5013,8 +5013,8 @@ impl fmt::Display for Statement {
     /// indentation and line breaks. For example:
     ///
     /// ```
-    /// # use sqlparser::dialect::GenericDialect;
-    /// # use sqlparser::parser::Parser;
+    /// # use brewdb_sql_parser::dialect::GenericDialect;
+    /// # use brewdb_sql_parser::parser::Parser;
     /// let sql = "SELECT a, b FROM table_1";
     /// let ast = Parser::parse_sql(&GenericDialect, sql).unwrap();
     ///
@@ -10693,7 +10693,7 @@ impl Display for CommentDef {
 ///
 /// # Examples
 /// ```
-/// # use sqlparser::ast::WrappedCollection;
+/// # use brewdb_sql_parser::ast::WrappedCollection;
 /// let items = WrappedCollection::Parentheses(vec!["one", "two", "three"]);
 /// assert_eq!("(one, two, three)", items.to_string());
 ///

@@ -368,7 +368,7 @@ impl<'a> Parser<'a> {
     ///
     /// Example:
     /// ```
-    /// # use sqlparser::{parser::{Parser, ParserError}, dialect::GenericDialect};
+    /// # use brewdb_sql_parser::{parser::{Parser, ParserError}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
     /// let statements = Parser::new(&dialect)
@@ -396,7 +396,7 @@ impl<'a> Parser<'a> {
     ///
     /// Example:
     /// ```
-    /// # use sqlparser::{parser::{Parser, ParserError}, dialect::GenericDialect};
+    /// # use brewdb_sql_parser::{parser::{Parser, ParserError}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
     /// let result = Parser::new(&dialect)
@@ -423,7 +423,7 @@ impl<'a> Parser<'a> {
     ///
     /// Example:
     /// ```
-    /// # use sqlparser::{parser::{Parser, ParserError, ParserOptions}, dialect::GenericDialect};
+    /// # use brewdb_sql_parser::{parser::{Parser, ParserError, ParserOptions}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
     /// let options = ParserOptions::new()
@@ -480,7 +480,7 @@ impl<'a> Parser<'a> {
     ///
     /// Example
     /// ```
-    /// # use sqlparser::{parser::{Parser, ParserError}, dialect::GenericDialect};
+    /// # use brewdb_sql_parser::{parser::{Parser, ParserError}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
     /// let statements = Parser::new(&dialect)
@@ -532,7 +532,7 @@ impl<'a> Parser<'a> {
     ///
     /// Example
     /// ```
-    /// # use sqlparser::{parser::{Parser, ParserError}, dialect::GenericDialect};
+    /// # use brewdb_sql_parser::{parser::{Parser, ParserError}, dialect::GenericDialect};
     /// # fn main() -> Result<(), ParserError> {
     /// let dialect = GenericDialect{};
     /// let statements = Parser::parse_sql(
@@ -3208,7 +3208,7 @@ impl<'a> Parser<'a> {
         self.expected("an expression", token)
     }
 
-    /// Parses fulltext expressions [`sqlparser::ast::Expr::MatchAgainst`]
+    /// Parses fulltext expressions [`brewdb_sql_parser::ast::Expr::MatchAgainst`]
     ///
     /// # Errors
     /// This method will raise an error if the column list is empty or with invalid identifiers,
@@ -4377,10 +4377,10 @@ impl<'a> Parser<'a> {
     ///
     /// Example:
     /// ```rust
-    /// # use sqlparser::dialect::GenericDialect;
-    /// # use sqlparser::parser::Parser;
-    /// # use sqlparser::keywords::Keyword;
-    /// # use sqlparser::tokenizer::{Token, Word};
+    /// # use brewdb_sql_parser::dialect::GenericDialect;
+    /// # use brewdb_sql_parser::parser::Parser;
+    /// # use brewdb_sql_parser::keywords::Keyword;
+    /// # use brewdb_sql_parser::tokenizer::{Token, Word};
     /// let dialect = GenericDialect {};
     /// let mut parser = Parser::new(&dialect).try_with_sql("ORDER BY foo, bar").unwrap();
     ///
@@ -13311,9 +13311,9 @@ impl<'a> Parser<'a> {
     /// For example:
     ///
     /// ```rust
-    /// use sqlparser::ast::Ident;
-    /// use sqlparser::dialect::GenericDialect;
-    /// use sqlparser::parser::Parser;
+    /// use brewdb_sql_parser::ast::Ident;
+    /// use brewdb_sql_parser::dialect::GenericDialect;
+    /// use brewdb_sql_parser::parser::Parser;
     ///
     /// let dialect = GenericDialect {};
     /// let expected = vec![Ident::new("one"), Ident::new("two")];
@@ -17067,8 +17067,8 @@ impl<'a> Parser<'a> {
     ///
     /// Example
     /// ```
-    /// # use sqlparser::parser::{Parser, ParserError};
-    /// # use sqlparser::dialect::GenericDialect;
+    /// # use brewdb_sql_parser::parser::{Parser, ParserError};
+    /// # use brewdb_sql_parser::dialect::GenericDialect;
     /// # fn main() ->Result<(), ParserError> {
     /// let sql = r#"SUM("a") as "b""#;
     /// let mut parser = Parser::new(&GenericDialect).try_with_sql(sql)?;

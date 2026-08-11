@@ -42,8 +42,8 @@ use crate::parser::ParserError;
 ///
 /// # Example
 /// ```rust
-/// use sqlparser::ast::helpers::stmt_create_table::CreateTableBuilder;
-/// use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName};
+/// use brewdb_sql_parser::ast::helpers::stmt_create_table::CreateTableBuilder;
+/// use brewdb_sql_parser::ast::{ColumnDef, DataType, Ident, ObjectName};
 /// let builder = CreateTableBuilder::new(ObjectName::from(vec![Ident::new("table_name")]))
 ///    .if_not_exists(true)
 ///    .columns(vec![ColumnDef {

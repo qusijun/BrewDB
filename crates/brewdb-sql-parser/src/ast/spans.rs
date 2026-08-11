@@ -71,10 +71,10 @@ fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
 ///
 /// # Example
 /// ```
-/// # use sqlparser::parser::{Parser, ParserError};
-/// # use sqlparser::ast::Spanned;
-/// # use sqlparser::dialect::GenericDialect;
-/// # use sqlparser::tokenizer::Location;
+/// # use brewdb_sql_parser::parser::{Parser, ParserError};
+/// # use brewdb_sql_parser::ast::Spanned;
+/// # use brewdb_sql_parser::dialect::GenericDialect;
+/// # use brewdb_sql_parser::tokenizer::Location;
 /// # fn main() -> Result<(), ParserError> {
 /// let dialect = GenericDialect {};
 /// let sql = r#"SELECT *

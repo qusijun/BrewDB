@@ -9,12 +9,15 @@ const COMMON_INVALID_CONFIGURATION: ErrorCode = ErrorCode::INVALID_CONFIGURATION
 const COMMON_LOGGING_INITIALIZATION_FAILED: ErrorCode = ErrorCode::LOGGING_INITIALIZATION_FAILED;
 const COMMON_SCHEMA_CONVERSION_FAILED: ErrorCode =
     ErrorCode::new("BREWDB_COMMON_SCHEMA_CONVERSION_FAILED");
+const COMMON_INVALID_TABLE_REFERENCE: ErrorCode =
+    ErrorCode::new("BREWDB_COMMON_INVALID_TABLE_REFERENCE");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommonError {
     InvalidConfiguration { field: String, reason: String },
     LoggingInitializationFailed { reason: String },
     SchemaConversionFailed { reason: String },
+    InvalidTableReference { reference: String },
 }
 
 impl fmt::Display for CommonError {
@@ -29,6 +32,9 @@ impl fmt::Display for CommonError {
             Self::SchemaConversionFailed { reason } => {
                 write!(f, "schema conversion failed: {reason}")
             }
+            Self::InvalidTableReference { reference } => {
+                write!(f, "table reference must be fully qualified: {reference}")
+            }
         }
     }
 }
@@ -41,6 +47,7 @@ impl DiagnosticError for CommonError {
             Self::InvalidConfiguration { .. } => COMMON_INVALID_CONFIGURATION,
             Self::LoggingInitializationFailed { .. } => COMMON_LOGGING_INITIALIZATION_FAILED,
             Self::SchemaConversionFailed { .. } => COMMON_SCHEMA_CONVERSION_FAILED,
+            Self::InvalidTableReference { .. } => COMMON_INVALID_TABLE_REFERENCE,
         }
     }
 

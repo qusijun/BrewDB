@@ -182,7 +182,7 @@ impl StorageEngine for MemoryStorageEngine {
 #[cfg(test)]
 mod tests {
     use brewdb_catalog::{CatalogMode, LakeFormatKind, TableCatalogEntry, TablePath};
-    use brewdb_common::schema::{DataType, SchemaField, TableSchema};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
     use super::{MemoryStorageEngine, StorageEngine, StorageError};
 
@@ -192,7 +192,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             TablePath::new("prod", "sales", "orders").unwrap(),
-            TableSchema::new(vec![SchemaField::new("id", DataType::Int32)]),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             "s3://warehouse/sales/orders",
             LakeFormatKind::Paimon,
             CatalogMode::Managed,

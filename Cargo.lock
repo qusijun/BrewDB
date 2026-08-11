@@ -488,6 +488,7 @@ name = "brewdb-common"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "datafusion-common",
  "inventory",
  "toml",
  "tracing",
@@ -578,6 +579,7 @@ version = "0.1.0"
 dependencies = [
  "bigdecimal",
  "log",
+ "pretty_assertions",
  "recursive",
  "serde",
  "serde_json",

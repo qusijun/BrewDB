@@ -531,19 +531,19 @@ impl fmt::Display for Whitespace {
 ///
 /// # Create an "empty" (unknown) `Location`
 /// ```
-/// # use sqlparser::tokenizer::Location;
+/// # use brewdb_sql_parser::tokenizer::Location;
 /// let location = Location::empty();
 /// ```
 ///
 /// # Create a `Location` from a line and column
 /// ```
-/// # use sqlparser::tokenizer::Location;
+/// # use brewdb_sql_parser::tokenizer::Location;
 /// let location = Location::new(1, 1);
 /// ```
 ///
 /// # Create a `Location` from a pair
 /// ```
-/// # use sqlparser::tokenizer::Location;
+/// # use brewdb_sql_parser::tokenizer::Location;
 /// let location = Location::from((1, 1));
 /// ```
 #[derive(Eq, PartialEq, Hash, Clone, Copy, Ord, PartialOrd)]
@@ -651,7 +651,7 @@ impl Span {
     ///
     /// # Examples
     /// ```
-    /// # use sqlparser::tokenizer::{Span, Location};
+    /// # use brewdb_sql_parser::tokenizer::{Span, Location};
     /// // line 1, column1 -> line 2, column 5
     /// let span1 = Span::new(Location::new(1, 1), Location::new(2, 5));
     /// // line 2, column 3 -> line 3, column 7
@@ -690,7 +690,7 @@ impl Span {
     ///
     /// # Example
     /// ```
-    /// # use sqlparser::tokenizer::{Span, Location};
+    /// # use brewdb_sql_parser::tokenizer::{Span, Location};
     /// let spans = vec![
     ///     Span::new(Location::new(1, 1), Location::new(2, 5)),
     ///     Span::new(Location::new(2, 3), Location::new(3, 7)),
@@ -718,7 +718,7 @@ pub type TokenWithLocation = TokenWithSpan;
 ///
 /// # Examples
 /// ```
-/// # use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan};
+/// # use brewdb_sql_parser::tokenizer::{Location, Span, Token, TokenWithSpan};
 /// // commas @ line 1, column 10
 /// let tok1 = TokenWithSpan::new(
 ///   Token::Comma,
@@ -878,8 +878,8 @@ impl<'a> Tokenizer<'a> {
     /// Create a new SQL tokenizer for the specified SQL statement
     ///
     /// ```
-    /// # use sqlparser::tokenizer::{Token, Whitespace, Tokenizer};
-    /// # use sqlparser::dialect::GenericDialect;
+    /// # use brewdb_sql_parser::tokenizer::{Token, Whitespace, Tokenizer};
+    /// # use brewdb_sql_parser::dialect::GenericDialect;
     /// # let dialect = GenericDialect{};
     /// let query = r#"SELECT 'foo'"#;
     ///
@@ -912,8 +912,8 @@ impl<'a> Tokenizer<'a> {
     /// # Example
     ///
     /// ```
-    /// # use sqlparser::tokenizer::{Token, Tokenizer};
-    /// # use sqlparser::dialect::GenericDialect;
+    /// # use brewdb_sql_parser::tokenizer::{Token, Tokenizer};
+    /// # use brewdb_sql_parser::dialect::GenericDialect;
     /// # let dialect = GenericDialect{};
     /// let query = r#""Foo "" Bar""#;
     /// let unescaped = Token::make_word(r#"Foo " Bar"#, Some('"'));
