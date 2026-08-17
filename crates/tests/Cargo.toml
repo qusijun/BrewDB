@@ -1,0 +1,14 @@
+[package]
+name = "brewdb-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[test]]
+name = "integration_tests"
+path = "integration_tests.rs"
+
+[dev-dependencies]
+uuid.workspace = true

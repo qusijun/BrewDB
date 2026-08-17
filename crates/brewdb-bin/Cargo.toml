@@ -1,0 +1,23 @@
+[package]
+name = "brewdb-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "brewdb"
+path = "src/bin/brewdb.rs"
+
+[[bin]]
+name = "brewdbd"
+path = "src/bin/brewdbd.rs"
+
+[dependencies]
+brewdb = { path = "../brewdb" }
+rustyline = "18.0.1"
+uuid.workspace = true
+
+[dev-dependencies]
+arrow = "58.4.0"

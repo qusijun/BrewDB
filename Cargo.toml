@@ -1,17 +1,8 @@
 [workspace]
 members = [
-    "crates/brewdb-common",
-    "crates/brewdb-catalog",
-    "crates/brewdb-frontend",
-    "crates/brewdb-sql-parser",
-    "crates/brewdb-sql",
-    "crates/brewdb-planner",
-    "crates/brewdb-execution",
-    "crates/brewdb-storage",
-    "crates/brewdb-storage-paimon",
-    "crates/brewdb-runtime",
-    "bin/brewdbd",
-    "bin/brewdb",
+    "crates/brewdb",
+    "crates/brewdb-bin",
+    "crates/tests",
 ]
 resolver = "2"
 

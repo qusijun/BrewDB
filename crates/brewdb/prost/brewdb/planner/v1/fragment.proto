@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package brewdb.planner.v1;
+
+message PlanFragmentId {
+  uint32 value = 1;
+}
+
+enum PlanFragmentKind {
+  PLAN_FRAGMENT_KIND_UNSPECIFIED = 0;
+  PLAN_FRAGMENT_KIND_SOURCE = 1;
+  PLAN_FRAGMENT_KIND_INTERMEDIATE = 2;
+  PLAN_FRAGMENT_KIND_ROOT = 3;
+}
+
+message PlanFragment {
+  PlanFragmentId fragment_id = 1;
+  PlanFragmentKind kind = 2;
+  bytes root_logical_plan = 3;
+  bytes local_logical_plan = 4;
+}

@@ -1,0 +1,17 @@
+statement ok
+create table orders (id int, name text);
+
+statement ok
+insert into orders values (1, 'alice'), (2, 'bob'), (3, 'carol');
+
+query
+select id, name from orders order by id;
+----
+1 alice
+2 bob
+3 carol
+
+query
+select count(id) from orders;
+----
+3
