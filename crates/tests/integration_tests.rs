@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 fn sqllogic_fixtures_pass_through_shared_server_and_client() {
     let mut harness = ServerHarness::start();
     harness.run_fixture("sqllogic/basic.test");
+    harness.run_fixture("sqllogic/copy_from_csv.test");
 }
 
 struct ServerHarness {
@@ -69,6 +70,7 @@ brewdb.catalog.paimon.warehouse = "{}"
                 fixture_path.display()
             )
         });
+        let source = expand_fixture_variables(&source);
         let cases = parse_fixture(&source).unwrap_or_else(|error| {
             panic!("fixture {} is invalid: {error}", fixture_path.display())
         });
@@ -129,7 +131,7 @@ struct TestDir {
 
 impl TestDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("brewdb-sqllogic-{}", uuid::Uuid::new_v4()));
+        let path = test_sandbox_root().join(format!("brewdb-sqllogic-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         Self { path }
     }
@@ -137,6 +139,10 @@ impl TestDir {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn test_sandbox_root() -> PathBuf {
+    PathBuf::from("/tmp")
 }
 
 impl Drop for TestDir {
@@ -159,6 +165,11 @@ fn parse_fixture(source: &str) -> Result<Vec<FixtureCase>, String> {
         .filter(|block| !block.starts_with('#'))
         .map(parse_block)
         .collect()
+}
+
+fn expand_fixture_variables(source: &str) -> String {
+    let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data");
+    source.replace("{{TEST_DATA_DIR}}", &data_dir.to_string_lossy())
 }
 
 fn parse_block(block: &str) -> Result<FixtureCase, String> {
@@ -266,7 +277,9 @@ fn wait_for_server(port: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FixtureCase, parse_client_rows, parse_fixture};
+    use std::path::Path;
+
+    use super::{FixtureCase, expand_fixture_variables, parse_client_rows, parse_fixture};
 
     #[test]
     fn parser_reads_statement_and_query_blocks() {
@@ -313,5 +326,27 @@ SELECT
         );
 
         assert_eq!(rows, vec!["1 alice".to_owned(), "2 bob".to_owned()]);
+    }
+
+    #[test]
+    fn fixture_variables_expand_to_test_data_directory() {
+        let expanded = expand_fixture_variables("copy from '{{TEST_DATA_DIR}}/orders.csv'");
+
+        assert!(expanded.contains("crates/tests/data/orders.csv"));
+        assert!(!expanded.contains("{{TEST_DATA_DIR}}"));
+    }
+
+    #[test]
+    fn test_dir_uses_tmp_root_for_inspection() {
+        let dir = super::TestDir::new();
+
+        assert_eq!(dir.path().parent().unwrap(), Path::new("/tmp"));
+        assert!(
+            dir.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("brewdb-sqllogic-")
+        );
     }
 }
