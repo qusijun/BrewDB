@@ -1,6 +1,7 @@
 //! SQL-to-runtime driver.
 
 use crate::catalog::{CatalogError, CatalogService};
+use crate::common::diagnostics::{DiagnosticError, ErrorCode};
 use crate::common::runtime::QueryContext;
 use crate::frontend::ingress::SqlIngressRequest;
 use crate::parser::ast::Statement;
@@ -60,6 +61,22 @@ impl fmt::Display for SqlDriverError {
 }
 
 impl Error for SqlDriverError {}
+
+impl DiagnosticError for SqlDriverError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::Catalog(error) => error.error_code(),
+            Self::Sql(error) => error.error_code(),
+            Self::Planner(error) => error.error_code(),
+            Self::Runtime(_) => ErrorCode::INTERNAL,
+            Self::UnsupportedStatement => ErrorCode::NOT_IMPLEMENTED,
+        }
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.runtime"
+    }
+}
 
 impl From<CatalogError> for SqlDriverError {
     fn from(value: CatalogError) -> Self {

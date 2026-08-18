@@ -8,6 +8,7 @@ use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, Int64Array, St
 use arrow::record_batch::RecordBatch;
 use uuid::Uuid;
 
+use crate::common::diagnostics::DiagnosticError;
 use crate::frontend::auth::{AuthContext, AuthMethod, StaticAuthenticator};
 use crate::frontend::errors::FrontendError;
 use crate::frontend::protocol::{
@@ -95,13 +96,18 @@ impl PgWireCodec {
                             write_ready_for_query(&mut stream)?;
                         }
                         Err(error) => {
-                            write_error_response(&mut stream, &error.to_string())?;
+                            write_error_response(&mut stream, &error)?;
                             write_ready_for_query(&mut stream)?;
                         }
                     }
                 }
                 b'X' => return Ok(()),
-                _ => write_error_response(&mut stream, "unsupported frontend protocol message")?,
+                _ => write_error_response(
+                    &mut stream,
+                    &FrontendError::UnsupportedProtocolMessage {
+                        message: "unsupported frontend protocol message".to_owned(),
+                    },
+                )?,
             }
         }
     }
@@ -315,10 +321,17 @@ fn write_query_result<S: Write>(
     write_frame(stream, b'C', &command_tag)
 }
 
-fn write_error_response<S: Write>(stream: &mut S, message: &str) -> Result<(), FrontendError> {
+fn write_error_response<S: Write>(
+    stream: &mut S,
+    error: &FrontendError,
+) -> Result<(), FrontendError> {
     let mut payload = Vec::new();
+    let message = error.to_string();
+    let code = error.error_code().as_str();
     payload.extend_from_slice(b"SERROR\0");
-    payload.extend_from_slice(b"CXX000\0");
+    payload.extend_from_slice(b"C");
+    payload.extend_from_slice(code.as_bytes());
+    payload.push(0);
     payload.extend_from_slice(b"M");
     payload.extend_from_slice(message.as_bytes());
     payload.extend_from_slice(b"\0\0");

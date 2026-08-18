@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use brewdb::catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
 use brewdb::common::config::{ConfigSet, ConfigView, SystemConfigLoader, global_config_registry};
+use brewdb::common::diagnostics::DiagnosticError;
 use brewdb::common::errors::CommonError;
 use brewdb::frontend::{
     ClientDefaults, FrontendConfig, FrontendError, FrontendResponse, FrontendService,
@@ -37,6 +38,21 @@ impl fmt::Display for BrewDbServerError {
 }
 
 impl Error for BrewDbServerError {}
+
+impl DiagnosticError for BrewDbServerError {
+    fn error_code(&self) -> brewdb::common::diagnostics::ErrorCode {
+        match self {
+            Self::Common(error) => error.error_code(),
+            Self::Catalog(error) => error.error_code(),
+            Self::Frontend(error) => error.error_code(),
+            Self::Driver(error) => error.error_code(),
+        }
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.server"
+    }
+}
 
 impl From<CommonError> for BrewDbServerError {
     fn from(value: CommonError) -> Self {
@@ -205,6 +221,7 @@ impl SqlRequestHandler for BrewDbServer {
     fn execute(&self, request: &SqlRequest) -> Result<SqlExecutionResult, FrontendError> {
         let handle = self.execute_client_request(request).map_err(|error| {
             FrontendError::QueryExecutionFailed {
+                error_code: Some(error.error_code()),
                 reason: error.to_string(),
             }
         })?;
@@ -214,6 +231,7 @@ impl SqlRequestHandler for BrewDbServer {
                 .output
                 .next_result()
                 .map_err(|error| FrontendError::QueryExecutionFailed {
+                    error_code: None,
                     reason: error.to_string(),
                 })?
         {
