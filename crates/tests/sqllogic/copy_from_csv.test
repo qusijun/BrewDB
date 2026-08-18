@@ -1,0 +1,30 @@
+statement ok
+create table copy_orders (id int, amount int);
+
+statement ok
+copy from '{{TEST_DATA_DIR}}/copy_orders.csv' to copy_orders with (format csv, header true);
+
+statement ok
+copy from '{{TEST_DATA_DIR}}/copy_orders.csv' to copy_orders with (format csv, header true);
+
+query
+select id, amount from copy_orders order by id;
+----
+10 125
+11 250
+12 375
+10 125
+11 250
+12 375
+
+statement ok
+create table inferred_copy_orders (id int, amount int);
+
+statement ok
+copy from '{{TEST_DATA_DIR}}/copy_orders_no_header.csv' to inferred_copy_orders;
+
+query
+select id, amount from inferred_copy_orders order by id;
+----
+20 500
+21 600

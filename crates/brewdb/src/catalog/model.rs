@@ -243,6 +243,29 @@ impl TableCatalogEntry {
         .with_options(table_options))
     }
 
+    pub fn temporary_file_with_schema(
+        table_name: impl Into<String>,
+        location: impl Into<String>,
+        table_schema: TableSchema,
+        options: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<Self, crate::catalog::errors::CatalogError> {
+        let table_options = options
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Self::new(
+            Uuid::new_v4(),
+            Uuid::nil(),
+            Uuid::nil(),
+            TablePath::new("__temporary", "__file", table_name.into())?,
+            table_schema,
+            location,
+            StorageKind::File,
+            CatalogMode::Temporary,
+        )
+        .with_options(table_options))
+    }
+
     pub fn table_ref(&self) -> TableRef {
         TableRef::new(self.table_id)
     }
