@@ -306,7 +306,7 @@ fn plan_copy_from_file_statement(
         .map_err(|error| SqlError::InvalidRequest {
             reason: error.to_string(),
         })?
-        .project(copy_projection(&target_table, &source_schema)?)
+        .project(copy_projection(&target_table, &source_file_schema)?)
         .map_err(|error| SqlError::InvalidRequest {
             reason: error.to_string(),
         })?
@@ -391,7 +391,7 @@ fn validate_copy_from_schema(
     let source_count = source_schema.fields().len();
     let target_count = source_table.table_schema.fields.len();
     if source_count != target_count {
-        return Err(SqlError::InvalidRequest {
+        return Err(SqlError::SchemaMismatch {
             reason: format!(
                 "COPY FROM schema column count mismatch: source {source_count}, target {target_count}"
             ),
@@ -405,6 +405,7 @@ mod tests {
     use std::{collections::BTreeMap, fs};
 
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
+    use crate::common::diagnostics::DiagnosticError;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
     use super::plan_copy_from_file_statement;
@@ -458,6 +459,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("COPY FROM schema column count mismatch"));
+        assert_eq!(error.error_code().as_str(), "BREWDB_SQL_SCHEMA_MISMATCH");
 
         let _ = fs::remove_file(file);
     }

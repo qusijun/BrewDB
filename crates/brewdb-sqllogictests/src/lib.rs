@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -5,14 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[test]
-fn sqllogic_fixtures_pass_through_shared_server_and_client() {
-    let mut harness = ServerHarness::start();
-    harness.run_fixture("sqllogic/basic.test");
-    harness.run_fixture("sqllogic/copy_from_csv.test");
-}
+use sqllogictest::{DBOutput, DefaultColumnType};
 
-struct ServerHarness {
+pub struct ServerHarness {
     _sandbox: TestDir,
     config_path: PathBuf,
     port: u16,
@@ -21,7 +17,7 @@ struct ServerHarness {
 }
 
 impl ServerHarness {
-    fn start() -> Self {
+    pub fn start() -> Self {
         build_brewdb_bins();
         let target_dir = target_debug_dir();
         let server_bin = binary_path(&target_dir, "brewdbd");
@@ -62,58 +58,22 @@ brewdb.catalog.paimon.warehouse = "{}"
         }
     }
 
-    fn run_fixture(&mut self, path: impl AsRef<Path>) {
+    pub fn run_fixture(&self, path: impl AsRef<Path>) -> Result<(), sqllogictest::TestError> {
         let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
-        let source = fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
-            panic!(
-                "fixture {} must be readable: {error}",
-                fixture_path.display()
-            )
+        let client = self.client();
+        let mut runner = sqllogictest::Runner::new(move || {
+            let client = client.clone();
+            async move { Ok::<_, ClientError>(client) }
         });
-        let source = expand_fixture_variables(&source);
-        let cases = parse_fixture(&source).unwrap_or_else(|error| {
-            panic!("fixture {} is invalid: {error}", fixture_path.display())
-        });
-
-        for case in cases {
-            match case {
-                FixtureCase::Statement { sql } => {
-                    self.run_client(&sql)
-                        .unwrap_or_else(|error| panic!("statement failed:\n{sql}\n\n{error}"));
-                }
-                FixtureCase::Query { sql, expected } => {
-                    let stdout = self
-                        .run_client(&sql)
-                        .unwrap_or_else(|error| panic!("query failed:\n{sql}\n\n{error}"));
-                    let actual = parse_client_rows(&stdout);
-                    assert_eq!(actual, expected, "query output mismatch:\n{sql}");
-                }
-            }
-        }
+        runner.set_var("TEST_DATA_DIR".to_owned(), test_data_dir());
+        runner.run_file(&fixture_path)
     }
 
-    fn run_client(&self, sql: &str) -> Result<String, String> {
-        let output = Command::new(&self.client_bin)
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--database")
-            .arg("brewdb")
-            .arg("--execute")
-            .arg(sql)
-            .output()
-            .map_err(|error| format!("failed to launch brewdb client: {error}"))?;
-        if output.status.success() {
-            return String::from_utf8(output.stdout)
-                .map_err(|error| format!("client stdout was not utf8: {error}"));
+    fn client(&self) -> BrewDbClient {
+        BrewDbClient {
+            client_bin: self.client_bin.clone(),
+            port: self.port,
         }
-        Err(format!(
-            "client exited with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
     }
 }
 
@@ -125,7 +85,67 @@ impl Drop for ServerHarness {
     }
 }
 
-struct TestDir {
+#[derive(Clone)]
+struct BrewDbClient {
+    client_bin: PathBuf,
+    port: u16,
+}
+
+impl sqllogictest::DB for BrewDbClient {
+    type Error = ClientError;
+    type ColumnType = DefaultColumnType;
+
+    fn run(&mut self, sql: &str) -> Result<DBOutput<Self::ColumnType>, Self::Error> {
+        let stdout = self.run_client(sql)?;
+        if let Some(rows) = parse_client_rows(&stdout) {
+            let types = rows
+                .first()
+                .map(|row| vec![DefaultColumnType::Any; row.len()])
+                .unwrap_or_default();
+            return Ok(DBOutput::Rows { types, rows });
+        }
+        Ok(DBOutput::StatementComplete(0))
+    }
+}
+
+impl BrewDbClient {
+    fn run_client(&self, sql: &str) -> Result<String, ClientError> {
+        let output = Command::new(&self.client_bin)
+            .arg("--host")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(self.port.to_string())
+            .arg("--database")
+            .arg("brewdb")
+            .arg("--execute")
+            .arg(sql)
+            .output()
+            .map_err(|error| ClientError(format!("failed to launch brewdb client: {error}")))?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout)
+                .map_err(|error| ClientError(format!("client stdout was not utf8: {error}")));
+        }
+        Err(ClientError(format!(
+            "client exited with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClientError(String);
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+pub struct TestDir {
     path: PathBuf,
 }
 
@@ -136,13 +156,9 @@ impl TestDir {
         Self { path }
     }
 
-    fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-fn test_sandbox_root() -> PathBuf {
-    PathBuf::from("/tmp")
 }
 
 impl Drop for TestDir {
@@ -151,65 +167,28 @@ impl Drop for TestDir {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum FixtureCase {
-    Statement { sql: String },
-    Query { sql: String, expected: Vec<String> },
+pub fn test_sandbox_root() -> PathBuf {
+    PathBuf::from("/tmp")
 }
 
-fn parse_fixture(source: &str) -> Result<Vec<FixtureCase>, String> {
-    source
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|block| !block.is_empty())
-        .filter(|block| !block.starts_with('#'))
-        .map(parse_block)
-        .collect()
-}
-
-fn expand_fixture_variables(source: &str) -> String {
+pub fn test_data_dir() -> String {
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data");
-    source.replace("{{TEST_DATA_DIR}}", &data_dir.to_string_lossy())
+    data_dir.to_string_lossy().into_owned()
 }
 
-fn parse_block(block: &str) -> Result<FixtureCase, String> {
-    let mut lines = block.lines();
-    let directive = lines
-        .next()
-        .ok_or_else(|| "fixture block is empty".to_owned())?
-        .trim();
-    let body = lines.collect::<Vec<_>>().join("\n");
-    match directive {
-        "statement ok" => Ok(FixtureCase::Statement {
-            sql: body.trim().to_owned(),
-        }),
-        "query" => {
-            let (sql, expected) = body
-                .split_once("----")
-                .ok_or_else(|| "query block is missing ---- separator".to_owned())?;
-            Ok(FixtureCase::Query {
-                sql: sql.trim().to_owned(),
-                expected: expected
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect(),
-            })
-        }
-        other => Err(format!("unsupported fixture directive: {other}")),
-    }
-}
-
-fn parse_client_rows(stdout: &str) -> Vec<String> {
+fn parse_client_rows(stdout: &str) -> Option<Vec<Vec<String>>> {
     let table_rows = stdout
         .lines()
         .filter_map(parse_table_row)
         .collect::<Vec<_>>();
-    table_rows.into_iter().skip(1).collect()
+    if table_rows.is_empty() {
+        None
+    } else {
+        Some(table_rows.into_iter().skip(1).collect())
+    }
 }
 
-fn parse_table_row(line: &str) -> Option<String> {
+fn parse_table_row(line: &str) -> Option<Vec<String>> {
     let trimmed = line.trim();
     if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
         return None;
@@ -219,8 +198,8 @@ fn parse_table_row(line: &str) -> Option<String> {
             .trim_matches('|')
             .split('|')
             .map(str::trim)
-            .collect::<Vec<_>>()
-            .join(" "),
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -279,39 +258,10 @@ fn wait_for_server(port: u16) {
 mod tests {
     use std::path::Path;
 
-    use super::{FixtureCase, expand_fixture_variables, parse_client_rows, parse_fixture};
+    use super::{ClientError, parse_client_rows, test_data_dir};
 
     #[test]
-    fn parser_reads_statement_and_query_blocks() {
-        let cases = parse_fixture(
-            r#"
-statement ok
-create table orders (id int);
-
-query
-select 1;
-----
-1
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            cases,
-            vec![
-                FixtureCase::Statement {
-                    sql: "create table orders (id int);".to_owned()
-                },
-                FixtureCase::Query {
-                    sql: "select 1;".to_owned(),
-                    expected: vec!["1".to_owned()]
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn client_table_output_rows_are_normalized() {
+    fn client_table_output_rows_are_converted_to_sqllogictest_rows() {
         let rows = parse_client_rows(
             r#"
 +----+-------+
@@ -325,15 +275,46 @@ SELECT
 "#,
         );
 
-        assert_eq!(rows, vec!["1 alice".to_owned(), "2 bob".to_owned()]);
+        assert_eq!(
+            rows,
+            Some(vec![
+                vec!["1".to_owned(), "alice".to_owned()],
+                vec!["2".to_owned(), "bob".to_owned()]
+            ])
+        );
     }
 
     #[test]
-    fn fixture_variables_expand_to_test_data_directory() {
-        let expanded = expand_fixture_variables("copy from '{{TEST_DATA_DIR}}/orders.csv'");
+    fn client_without_table_output_is_a_statement() {
+        assert_eq!(parse_client_rows("CREATE TABLE\n"), None);
+    }
 
-        assert!(expanded.contains("crates/tests/data/orders.csv"));
-        assert!(!expanded.contains("{{TEST_DATA_DIR}}"));
+    #[test]
+    fn sqllogictest_error_regex_matches_client_error_code() {
+        let error = ClientError("brewdb failed: BREWDB_SQL_SCHEMA_MISMATCH: bad".to_owned());
+        let record = sqllogictest::parse::<sqllogictest::DefaultColumnType>(
+            r#"
+statement error BREWDB_SQL_SCHEMA_MISMATCH:
+select bad;
+"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+
+        let mut runner = sqllogictest::Runner::new(move || {
+            let error = error.clone();
+            async move { Ok::<_, ClientError>(AlwaysFails(error)) }
+        });
+
+        runner.run(record).unwrap();
+    }
+
+    #[test]
+    fn test_data_dir_points_to_fixture_data_directory() {
+        let data_dir = test_data_dir();
+
+        assert!(data_dir.contains("crates/brewdb-sqllogictests/data"));
     }
 
     #[test]
@@ -348,5 +329,19 @@ SELECT
                 .to_string_lossy()
                 .starts_with("brewdb-sqllogic-")
         );
+    }
+
+    struct AlwaysFails(ClientError);
+
+    impl sqllogictest::DB for AlwaysFails {
+        type Error = ClientError;
+        type ColumnType = sqllogictest::DefaultColumnType;
+
+        fn run(
+            &mut self,
+            _sql: &str,
+        ) -> Result<sqllogictest::DBOutput<Self::ColumnType>, Self::Error> {
+            Err(self.0.clone())
+        }
     }
 }

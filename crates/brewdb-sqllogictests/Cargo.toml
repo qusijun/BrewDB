@@ -1,5 +1,5 @@
 [package]
-name = "brewdb-integration-tests"
+name = "brewdb-sqllogictests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,9 @@ rust-version.workspace = true
 
 [[test]]
 name = "integration_tests"
-path = "integration_tests.rs"
+path = "bin/integration_tests.rs"
+harness = false
 
-[dev-dependencies]
+[dependencies]
+sqllogictest.workspace = true
 uuid.workspace = true
