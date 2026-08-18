@@ -14,6 +14,7 @@ const COMMON_INVALID_TABLE_REFERENCE: ErrorCode =
     ErrorCode::new("BREWDB_COMMON_INVALID_TABLE_REFERENCE");
 const SQL_INVALID_REQUEST: ErrorCode = ErrorCode::new("BREWDB_SQL_INVALID_REQUEST");
 const SQL_PARSE_FAILED: ErrorCode = ErrorCode::new("BREWDB_SQL_PARSE_FAILED");
+const SQL_SCHEMA_MISMATCH: ErrorCode = ErrorCode::new("BREWDB_SQL_SCHEMA_MISMATCH");
 const SQL_UNSUPPORTED_STATEMENT: ErrorCode = ErrorCode::new("BREWDB_SQL_UNSUPPORTED_STATEMENT");
 const SQL_MISSING_DEFAULT_CATALOG: ErrorCode = ErrorCode::new("BREWDB_SQL_MISSING_DEFAULT_CATALOG");
 const SQL_MISSING_DEFAULT_DATABASE: ErrorCode =
@@ -67,6 +68,7 @@ impl DiagnosticError for CommonError {
 pub enum SqlError {
     InvalidRequest { reason: String },
     Parse { reason: String },
+    SchemaMismatch { reason: String },
     UnsupportedStatement { reason: String },
     MissingDefaultCatalog,
     MissingDefaultDatabase,
@@ -77,6 +79,7 @@ impl fmt::Display for SqlError {
         match self {
             Self::InvalidRequest { reason } => write!(f, "invalid sql request: {reason}"),
             Self::Parse { reason } => write!(f, "sql parse failed: {reason}"),
+            Self::SchemaMismatch { reason } => write!(f, "sql schema mismatch: {reason}"),
             Self::UnsupportedStatement { reason } => write!(f, "unsupported statement: {reason}"),
             Self::MissingDefaultCatalog => write!(f, "missing default catalog in session context"),
             Self::MissingDefaultDatabase => {
@@ -93,6 +96,7 @@ impl DiagnosticError for SqlError {
         match self {
             Self::InvalidRequest { .. } => SQL_INVALID_REQUEST,
             Self::Parse { .. } => SQL_PARSE_FAILED,
+            Self::SchemaMismatch { .. } => SQL_SCHEMA_MISMATCH,
             Self::UnsupportedStatement { .. } => SQL_UNSUPPORTED_STATEMENT,
             Self::MissingDefaultCatalog => SQL_MISSING_DEFAULT_CATALOG,
             Self::MissingDefaultDatabase => SQL_MISSING_DEFAULT_DATABASE,

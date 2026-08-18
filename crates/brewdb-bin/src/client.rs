@@ -80,11 +80,20 @@ impl ClientOptions {
 #[derive(Debug)]
 pub enum ClientError {
     Io(io::Error),
-    InvalidArgs { reason: String },
-    LineEditor { reason: String },
+    InvalidArgs {
+        reason: String,
+    },
+    LineEditor {
+        reason: String,
+    },
     Usage(String),
-    Protocol { reason: String },
-    Server { reason: String },
+    Protocol {
+        reason: String,
+    },
+    Server {
+        reason: String,
+        error_code: Option<String>,
+    },
 }
 
 impl fmt::Display for ClientError {
@@ -95,7 +104,10 @@ impl fmt::Display for ClientError {
             Self::LineEditor { reason } => write!(f, "{reason}"),
             Self::Usage(message) => write!(f, "{message}"),
             Self::Protocol { reason } => write!(f, "{reason}"),
-            Self::Server { reason } => write!(f, "{reason}"),
+            Self::Server { reason, error_code } => match error_code {
+                Some(error_code) => write!(f, "{error_code}: {reason}"),
+                None => write!(f, "{reason}"),
+            },
         }
     }
 }
@@ -194,8 +206,10 @@ impl<S: Read + Write> PgWireSession<S> {
                 b'Z' => return Ok(()),
                 b'N' => {}
                 b'E' => {
+                    let error = parse_error(&payload);
                     return Err(ClientError::Server {
-                        reason: parse_error(&payload),
+                        reason: error.message,
+                        error_code: error.code,
                     });
                 }
                 other => {
@@ -230,8 +244,11 @@ impl<S: Read + Write> PgWireSession<S> {
             }
         }
 
-        if let Some(reason) = server_error {
-            return Err(ClientError::Server { reason });
+        if let Some(error) = server_error {
+            return Err(ClientError::Server {
+                reason: error.message,
+                error_code: error.code,
+            });
         }
 
         Ok(QueryResult {
@@ -516,9 +533,16 @@ fn parse_cstring(payload: &[u8]) -> Result<String, ClientError> {
     Ok(value)
 }
 
-fn parse_error(payload: &[u8]) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerErrorFields {
+    message: String,
+    code: Option<String>,
+}
+
+fn parse_error(payload: &[u8]) -> ServerErrorFields {
     let mut offset = 0;
     let mut message = None;
+    let mut code = None;
     while offset < payload.len() {
         let field_type = payload[offset];
         offset += 1;
@@ -530,12 +554,17 @@ fn parse_error(payload: &[u8]) -> String {
             offset += 1;
         }
         let value = std::str::from_utf8(&payload[start..offset]).unwrap_or("");
-        if field_type == b'M' {
-            message = Some(value.to_owned());
+        match field_type {
+            b'M' => message = Some(value.to_owned()),
+            b'C' => code = Some(value.to_owned()),
+            _ => {}
         }
         offset += 1;
     }
-    message.unwrap_or_else(|| "server returned an error".to_owned())
+    ServerErrorFields {
+        message: message.unwrap_or_else(|| "server returned an error".to_owned()),
+        code,
+    }
 }
 
 fn read_i16(payload: &[u8], offset: &mut usize) -> Result<i16, ClientError> {

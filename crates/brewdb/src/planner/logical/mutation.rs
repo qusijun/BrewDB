@@ -277,21 +277,24 @@ fn plan_copy_from_file_statement(
     );
     let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table.clone()));
     let source_name = normalize_file_path(filename);
-    let source_table = TableCatalogEntry::temporary_file(
+    let source_table = TableCatalogEntry::temporary_file_with_schema(
         source_name.clone(),
         filename.to_owned(),
+        target_table.table_schema.clone(),
         file_options.clone(),
     )
     .map_err(|error| SqlError::InvalidRequest {
         reason: error.to_string(),
     })?;
-    let source_engine: Arc<dyn TableEngine> = Arc::new(
+    let source_engine =
         FileTableEngine::try_new(filename.to_owned(), file_options).map_err(|error| {
             SqlError::InvalidRequest {
                 reason: error.to_string(),
             }
-        })?,
-    );
+        })?;
+    let source_file_schema = source_engine.schema_ref();
+    validate_copy_from_schema(&source_table, source_file_schema.clone())?;
+    let source_engine: Arc<dyn TableEngine> = Arc::new(source_engine);
     let source: Arc<dyn TableSource> = Arc::new(
         DefaultTableSource::new_with_engine(source_table, source_engine).map_err(|error| {
             SqlError::InvalidRequest {
@@ -303,7 +306,7 @@ fn plan_copy_from_file_statement(
         .map_err(|error| SqlError::InvalidRequest {
             reason: error.to_string(),
         })?
-        .project(copy_projection(&target_table)?)
+        .project(copy_projection(&target_table, &source_file_schema)?)
         .map_err(|error| SqlError::InvalidRequest {
             reason: error.to_string(),
         })?
@@ -350,37 +353,59 @@ fn bind_copy_from_file_options(
             }
         }
     }
+    file_options
+        .entry("has_header".to_owned())
+        .or_insert_with(|| "false".to_owned());
     Ok(file_options)
 }
 
 fn copy_projection(
     target_table: &TableCatalogEntry,
+    source_schema: &arrow::datatypes::SchemaRef,
 ) -> Result<Vec<datafusion_expr::Expr>, SqlError> {
-    let schema = target_table
+    let projection = target_table
         .table_schema
         .fields
         .iter()
-        .map(|field| {
-            field
+        .zip(source_schema.fields().iter())
+        .map(|(target_field, source_field)| {
+            target_field
                 .data_type
                 .to_arrow_data_type()
                 .map_err(|error| SqlError::InvalidRequest {
                     reason: error.to_string(),
                 })
-                .map(|data_type| (field.name.as_str(), data_type))
+                .map(|data_type| {
+                    cast(col(source_field.name().as_str()), data_type)
+                        .alias(target_field.name.clone())
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(schema
-        .into_iter()
-        .map(|(name, data_type)| cast(col(name), data_type).alias(name))
-        .collect())
+    Ok(projection)
+}
+
+fn validate_copy_from_schema(
+    source_table: &TableCatalogEntry,
+    source_schema: arrow::datatypes::SchemaRef,
+) -> Result<(), SqlError> {
+    let source_count = source_schema.fields().len();
+    let target_count = source_table.table_schema.fields.len();
+    if source_count != target_count {
+        return Err(SqlError::SchemaMismatch {
+            reason: format!(
+                "COPY FROM schema column count mismatch: source {source_count}, target {target_count}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeMap, fs};
 
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
+    use crate::common::diagnostics::DiagnosticError;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
 
     use super::plan_copy_from_file_statement;
@@ -417,5 +442,25 @@ mod tests {
             .contains("COPY FROM expects a single file"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn copy_from_rejects_source_schema_column_count_mismatch() {
+        let file = std::env::temp_dir().join(format!(
+            "brewdb-copy-from-mismatch-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&file, "1,2\n").unwrap();
+
+        let error =
+            plan_copy_from_file_statement(target_table(), &file.to_string_lossy(), BTreeMap::new())
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("COPY FROM schema column count mismatch"));
+        assert_eq!(error.error_code().as_str(), "BREWDB_SQL_SCHEMA_MISMATCH");
+
+        let _ = fs::remove_file(file);
     }
 }

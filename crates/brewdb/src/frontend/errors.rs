@@ -16,11 +16,22 @@ const FRONTEND_QUERY_EXECUTION_FAILED: ErrorCode =
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendError {
-    AuthenticationFailed { reason: String },
-    InvalidRequest { reason: String },
-    SessionNotFound { session_id: String },
-    UnsupportedProtocolMessage { message: String },
-    QueryExecutionFailed { reason: String },
+    AuthenticationFailed {
+        reason: String,
+    },
+    InvalidRequest {
+        reason: String,
+    },
+    SessionNotFound {
+        session_id: String,
+    },
+    UnsupportedProtocolMessage {
+        message: String,
+    },
+    QueryExecutionFailed {
+        reason: String,
+        error_code: Option<ErrorCode>,
+    },
 }
 
 impl fmt::Display for FrontendError {
@@ -36,7 +47,7 @@ impl fmt::Display for FrontendError {
             Self::UnsupportedProtocolMessage { message } => {
                 write!(f, "unsupported protocol message: {message}")
             }
-            Self::QueryExecutionFailed { reason } => {
+            Self::QueryExecutionFailed { reason, .. } => {
                 write!(f, "query execution failed: {reason}")
             }
         }
@@ -52,7 +63,9 @@ impl DiagnosticError for FrontendError {
             Self::InvalidRequest { .. } => FRONTEND_INVALID_REQUEST,
             Self::SessionNotFound { .. } => FRONTEND_SESSION_NOT_FOUND,
             Self::UnsupportedProtocolMessage { .. } => FRONTEND_UNSUPPORTED_PROTOCOL_MESSAGE,
-            Self::QueryExecutionFailed { .. } => FRONTEND_QUERY_EXECUTION_FAILED,
+            Self::QueryExecutionFailed { error_code, .. } => {
+                error_code.unwrap_or(FRONTEND_QUERY_EXECUTION_FAILED)
+            }
         }
     }
 
