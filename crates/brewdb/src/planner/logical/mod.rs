@@ -127,8 +127,11 @@ impl LogicalPlanner {
                 bind_create_table_statement(ctx, &planning_session, create_table)
             }
             AstStatement::Drop {
-                object_type, names, ..
-            } => bind_drop_statement(&planning_session, ctx, object_type, names),
+                object_type,
+                if_exists,
+                names,
+                ..
+            } => bind_drop_statement(&planning_session, ctx, object_type, *if_exists, names),
             AstStatement::AlterTable(alter_table) => {
                 bind_alter_statement(planning_session, ctx, alter_table)
             }
@@ -390,6 +393,7 @@ mod tests {
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::frontend::ingress::{SqlRequestContext, SqlSessionContext};
     use crate::runtime::driver::sql_to_statement;
+    use crate::SqlError;
     use datafusion_expr::TableSource;
     use uuid::Uuid;
 
@@ -476,25 +480,27 @@ mod tests {
     }
 
     fn bind(sql: &str) -> datafusion_expr::LogicalPlan {
+        bind_result(sql).unwrap()
+    }
+
+    fn bind_result(sql: &str) -> Result<datafusion_expr::LogicalPlan, SqlError> {
         let service = catalog_service();
         let parsed = sql_to_statement(sql).unwrap();
-        LogicalPlanner::default()
-            .plan(
-                parsed,
-                &LogicalPlanningContext {
-                    session: &SqlSessionContext {
-                        session_id: Uuid::nil(),
-                        user_name: "brew".to_owned(),
-                        catalog_name: Some(MANAGED_PAIMON_CATALOG_NAME.to_owned()),
-                        database_name: Some("brewdb".to_owned()),
-                    },
-                    request: &SqlRequestContext {
-                        request_id: Uuid::nil(),
-                    },
-                    catalog_service: &service,
+        LogicalPlanner::default().plan(
+            parsed,
+            &LogicalPlanningContext {
+                session: &SqlSessionContext {
+                    session_id: Uuid::nil(),
+                    user_name: "brew".to_owned(),
+                    catalog_name: Some(MANAGED_PAIMON_CATALOG_NAME.to_owned()),
+                    database_name: Some("brewdb".to_owned()),
                 },
-            )
-            .unwrap()
+                request: &SqlRequestContext {
+                    request_id: Uuid::nil(),
+                },
+                catalog_service: &service,
+            },
+        )
     }
 
     #[test]
@@ -516,6 +522,23 @@ mod tests {
             datafusion_expr::LogicalPlan::Dml(_) => {}
             other => panic!("expected DataFusion logical plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logical_planner_honors_drop_table_if_exists_for_missing_table() {
+        let planned = bind("drop table if exists missing_orders");
+
+        assert!(matches!(
+            planned,
+            datafusion_expr::LogicalPlan::EmptyRelation(_)
+        ));
+    }
+
+    #[test]
+    fn logical_planner_rejects_drop_table_for_missing_table() {
+        let error = bind_result("drop table missing_orders").unwrap_err();
+
+        assert!(error.to_string().contains("table not found"));
     }
 
     #[test]
@@ -555,7 +578,8 @@ mod tests {
                 assert_eq!(table.catalog_mode, CatalogMode::Temporary);
                 assert_eq!(table.path.table(), source_name);
                 assert_eq!(table.table_location, csv_path.to_string_lossy());
-                assert!(table.table_schema.fields.is_empty());
+                assert_eq!(table.table_schema.fields.len(), 1);
+                assert_eq!(table.table_schema.fields[0].name, "id");
                 assert!(source.table_engine().is_some());
                 assert_eq!(source.schema().field(0).name(), "id");
                 assert_eq!(table.table_options.get("file_type"), None);
@@ -810,6 +834,25 @@ mod tests {
         assert!(observed_rules
             .iter()
             .any(|rule| rule == "brewdb_logical_extension"));
+    }
+
+    #[test]
+    fn logical_optimizer_runs_datafusion_analyzer_before_optimization() {
+        let planned = bind("select 1");
+        let mut analyzer_rules = Vec::new();
+
+        let _optimized = LogicalOptimizer::default()
+            .optimize_with_observers(
+                planned,
+                |_, rule| analyzer_rules.push(rule.name().to_owned()),
+                |_, _| {},
+            )
+            .unwrap();
+
+        assert!(analyzer_rules
+            .iter()
+            .any(|rule| rule == "resolve_grouping_function"));
+        assert!(analyzer_rules.iter().any(|rule| rule == "type_coercion"));
     }
 
     fn brewdb_show_plan(plan: &datafusion_expr::LogicalPlan) -> Option<&Show> {
