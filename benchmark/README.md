@@ -81,6 +81,15 @@ cargo run --manifest-path benchmark/Cargo.toml -- \
   --queries-dir benchmark/tpch/queries
 ```
 
+To run a single SQL file:
+
+```bash
+cargo run --manifest-path benchmark/Cargo.toml -- \
+  run tpch \
+  --no-setup \
+  --query-file benchmark/tpch/queries/q01.sql
+```
+
 Results are emitted as CSV:
 
 ```text
@@ -101,3 +110,4 @@ Built-in workloads are query-directory based:
 
 You can point either workload at another directory with `--queries-dir`.
 Files are sorted by name and every `.sql` file is executed once per iteration.
+Use `--query-file` to run exactly one SQL file.

@@ -97,10 +97,10 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
         database: "brewdb".to_owned(),
         data_dir: None,
         queries_dir: None,
+        query_file: None,
         iterations: 1,
         setup: true,
-        brewdb_bin: PathBuf::from("../target/debug/brewdb"),
-        brewdbd_bin: PathBuf::from("../target/debug/brewdbd"),
+        brewdb_bin: default_brewdb_bin(),
         config_path: None,
     };
 
@@ -119,6 +119,7 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
             "--queries-dir" => {
                 config.queries_dir = Some(PathBuf::from(take_value(arg, &mut iter)?))
             }
+            "--query-file" => config.query_file = Some(PathBuf::from(take_value(arg, &mut iter)?)),
             "--iterations" | "-n" => {
                 let value = take_value(arg, &mut iter)?;
                 config.iterations = value
@@ -127,7 +128,6 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
             }
             "--no-setup" => config.setup = false,
             "--brewdb-bin" => config.brewdb_bin = PathBuf::from(take_value(arg, &mut iter)?),
-            "--brewdbd-bin" => config.brewdbd_bin = PathBuf::from(take_value(arg, &mut iter)?),
             "--config" => config.config_path = Some(PathBuf::from(take_value(arg, &mut iter)?)),
             other => return Err(format!("unknown run flag `{other}`")),
         }
@@ -135,6 +135,9 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
 
     if config.iterations == 0 {
         return Err("--iterations must be greater than 0".to_owned());
+    }
+    if config.query_file.is_some() && config.queries_dir.is_some() {
+        return Err("cannot specify both --query-file and --queries-dir".to_owned());
     }
 
     Ok(Command::Run(config))
@@ -150,5 +153,13 @@ fn take_value<'a>(
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  benchmark gen tpch --scale-factor <sf> --output <dir> [--overwrite]\n  benchmark gen clickbench --output <dir> [--overwrite]\n  benchmark run <tpch|clickbench> [--data-dir <dir>] [--queries-dir <dir>] [--iterations <n>] [--host <host>] [--port <port>] [--database <db>] [--no-setup]\n"
+    "Usage:\n  benchmark gen tpch --scale-factor <sf> --output <dir> [--overwrite]\n  benchmark gen clickbench --output <dir> [--overwrite]\n  benchmark run <tpch|clickbench> [--data-dir <dir>] [--queries-dir <dir>] [--query-file <file>] [--iterations <n>] [--host <host>] [--port <port>] [--database <db>] [--no-setup]\n"
+}
+
+fn default_brewdb_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join("brewdb")
 }

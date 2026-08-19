@@ -7,6 +7,7 @@ use crate::planner::errors::PlannerError;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::{AggregateFunction, ScalarFunction, WildcardOptions};
 use datafusion_expr::registry::FunctionRegistry;
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
     col, lit, BinaryExpr, Expr as DataFusionExpr, Operator as DataFusionOperator,
 };
@@ -268,13 +269,41 @@ fn bind_function(
                 reason: format!("unsupported aggregate function null treatment `{function}`"),
             });
         }
-        return Ok(DataFusionExpr::AggregateFunction(
+        return Ok(plan_aggregate_function(
+            &function_name,
             AggregateFunction::new_udf(udaf, args, distinct, filter, Vec::new(), None),
         ));
     }
     Err(PlannerError::UnsupportedPlan {
         reason: format!("function `{function_name}` not found in DataFusion function registry"),
     })
+}
+
+#[allow(deprecated)]
+fn plan_aggregate_function(function_name: &str, function: AggregateFunction) -> DataFusionExpr {
+    let expr = DataFusionExpr::AggregateFunction(function);
+    if function_name.eq_ignore_ascii_case("count") {
+        match &expr {
+            DataFusionExpr::AggregateFunction(function)
+                if function.params.args.is_empty()
+                    || matches!(
+                        function.params.args.as_slice(),
+                        [DataFusionExpr::Wildcard { .. }]
+                    ) =>
+            {
+                return DataFusionExpr::AggregateFunction(AggregateFunction::new_udf(
+                    function.func.clone(),
+                    vec![DataFusionExpr::Literal(COUNT_STAR_EXPANSION, None)],
+                    function.params.distinct,
+                    function.params.filter.clone(),
+                    function.params.order_by.clone(),
+                    function.params.null_treatment,
+                ));
+            }
+            _ => {}
+        }
+    }
+    expr
 }
 
 fn bind_function_arg(

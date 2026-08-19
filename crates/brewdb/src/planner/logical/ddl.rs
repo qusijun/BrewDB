@@ -104,6 +104,7 @@ pub(crate) fn bind_drop_statement(
     session: &LogicalPlanningSession,
     ctx: &LogicalPlanningContext<'_>,
     object_type: &crate::parser::ast::ObjectType,
+    if_exists: bool,
     names: &[ObjectName],
 ) -> Result<DataFusionLogicalPlan, SqlError> {
     let Some(name) = names.first() else {
@@ -114,7 +115,26 @@ pub(crate) fn bind_drop_statement(
 
     match object_type {
         crate::parser::ast::ObjectType::Table => {
-            let table = resolve_table(ctx, session, name)?;
+            let table = match resolve_table(ctx, session, name) {
+                Ok(table) => table,
+                Err(error) => {
+                    if if_exists
+                        && matches!(
+                        &error,
+                        SqlError::InvalidRequest { reason }
+                            if reason.contains("table not found")
+                        )
+                    {
+                        return Ok(DataFusionLogicalPlan::EmptyRelation(
+                            datafusion_expr::EmptyRelation {
+                                produce_one_row: false,
+                                schema: empty_df_schema(),
+                            },
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
             Ok(DataFusionLogicalPlan::Ddl(DdlStatement::DropTable(
                 DropTable {
                     name: TableReference::full(
@@ -122,7 +142,7 @@ pub(crate) fn bind_drop_statement(
                         table.path.database(),
                         table.path.table(),
                     ),
-                    if_exists: false,
+                    if_exists,
                     schema: empty_df_schema(),
                 },
             )))

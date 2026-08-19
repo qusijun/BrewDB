@@ -1,15 +1,20 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::catalog::TableCatalogEntry;
 use crate::parser::ast::{
-    Join, JoinConstraint, JoinOperator as AstJoinOperator, Query, Select, SetExpr,
-    Statement as AstStatement, TableAlias, TableFactor, TableWithJoins,
+    Distinct as AstDistinct, Join, JoinConstraint, JoinOperator as AstJoinOperator, LimitClause,
+    OrderBy, OrderByKind, Query, Select, SetExpr, Statement as AstStatement, TableAlias,
+    TableFactor, TableWithJoins,
 };
 use crate::planner::errors::PlannerError;
 use crate::SqlError;
-use datafusion_common::Column;
+use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion_common::{Column, ScalarValue};
+use datafusion_expr::expr::Sort as DataFusionSort;
 use datafusion_expr::logical_plan::JoinType as DataFusionJoinType;
 use datafusion_expr::registry::FunctionRegistry;
+use datafusion_expr::utils::expr_as_column_expr;
 use datafusion_expr::{
     BinaryExpr, Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPlan, LogicalPlanBuilder,
     Operator as DataFusionOperator, TableSource,
@@ -31,6 +36,14 @@ struct QueryExpression {
     selection: Option<DataFusionExpr>,
     group_by: QueryGroupBy,
     having: Option<DataFusionExpr>,
+    order_by: Vec<DataFusionSort>,
+    limit: Option<QueryLimit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueryLimit {
+    skip: Option<DataFusionExpr>,
+    fetch: Option<DataFusionExpr>,
 }
 
 #[derive(Debug)]
@@ -90,14 +103,11 @@ fn build_query_input(
             .map_err(map_df_plan_error)?;
     }
     if needs_aggregate(query) {
-        let aggregates = query
-            .projection
-            .iter()
-            .filter(|expr| matches!(expr, DataFusionExpr::AggregateFunction(_)))
-            .cloned()
-            .collect::<Vec<_>>();
+        let aggregates = aggregate_exprs(query);
         let group_keys = match &query.group_by {
-            QueryGroupBy::Expressions(expressions) => expressions.clone(),
+            QueryGroupBy::Expressions(expressions) => {
+                resolve_group_by_positions(expressions, &query.projection)?
+            }
             QueryGroupBy::None | QueryGroupBy::All => Vec::new(),
         };
         input = LogicalPlanBuilder::from(input)
@@ -105,22 +115,55 @@ fn build_query_input(
             .map_err(map_df_plan_error)?
             .build()
             .map_err(map_df_plan_error)?;
+        let aggregate_projection_exprs = aggregate_projection_exprs(&input)?;
         if let Some(predicate) = &query.having {
+            let predicate = rebase_expr(predicate, &aggregate_projection_exprs, &input)?;
             input = LogicalPlanBuilder::from(input)
-                .filter(predicate.clone())
+                .filter(predicate)
                 .map_err(map_df_plan_error)?
                 .build()
                 .map_err(map_df_plan_error)?;
         }
+        let projection = query
+            .projection
+            .iter()
+            .map(|expr| rebase_expr(expr, &aggregate_projection_exprs, &input))
+            .collect::<Result<Vec<_>, _>>()?;
+        input = LogicalPlanBuilder::from(input)
+            .project(projection)
+            .map_err(map_df_plan_error)?
+            .build()
+            .map_err(map_df_plan_error)?;
+    } else if !projection_is_passthrough_wildcard(&query.projection) {
+        input = LogicalPlanBuilder::from(input)
+            .project(query.projection.clone())
+            .map_err(map_df_plan_error)?
+            .build()
+            .map_err(map_df_plan_error)?;
     }
-    if projection_is_passthrough_wildcard(&query.projection) {
-        return Ok(input);
+    if query.distinct {
+        input = LogicalPlanBuilder::from(input)
+            .distinct()
+            .map_err(map_df_plan_error)?
+            .build()
+            .map_err(map_df_plan_error)?;
     }
-    LogicalPlanBuilder::from(input)
-        .project(query.projection.clone())
-        .map_err(map_df_plan_error)?
-        .build()
-        .map_err(map_df_plan_error)
+    if !query.order_by.is_empty() {
+        let order_by = resolve_sort_positions(&query.order_by, &query.projection)?;
+        input = LogicalPlanBuilder::from(input)
+            .sort(order_by)
+            .map_err(map_df_plan_error)?
+            .build()
+            .map_err(map_df_plan_error)?;
+    }
+    if let Some(limit) = &query.limit {
+        input = LogicalPlanBuilder::from(input)
+            .limit_by_expr(limit.skip.clone(), limit.fetch.clone())
+            .map_err(map_df_plan_error)?
+            .build()
+            .map_err(map_df_plan_error)?;
+    }
+    Ok(input)
 }
 
 fn build_from_input(
@@ -165,8 +208,76 @@ fn needs_aggregate(query: &QueryExpression) -> bool {
         QueryGroupBy::None => query
             .projection
             .iter()
-            .any(|expr| matches!(expr, DataFusionExpr::AggregateFunction(_))),
+            .chain(query.having.iter())
+            .any(expr_contains_aggregate),
     }
+}
+
+fn aggregate_exprs(query: &QueryExpression) -> Vec<DataFusionExpr> {
+    let mut aggregates = Vec::new();
+    for expr in query.projection.iter().chain(query.having.iter()) {
+        collect_aggregate_exprs(expr, &mut aggregates);
+    }
+    aggregates
+}
+
+fn collect_aggregate_exprs(expr: &DataFusionExpr, aggregates: &mut Vec<DataFusionExpr>) {
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+
+    let _ = expr.apply(|node| {
+        if matches!(node, DataFusionExpr::AggregateFunction(_)) && !aggregates.contains(node) {
+            aggregates.push(node.clone());
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+}
+
+fn expr_contains_aggregate(expr: &DataFusionExpr) -> bool {
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+
+    let mut found = false;
+    let _ = expr.apply(|node| {
+        if matches!(node, DataFusionExpr::AggregateFunction(_)) {
+            found = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    found
+}
+
+fn aggregate_projection_exprs(
+    plan: &DataFusionLogicalPlan,
+) -> Result<Vec<DataFusionExpr>, PlannerError> {
+    let DataFusionLogicalPlan::Aggregate(aggregate) = plan else {
+        return Err(PlannerError::InvalidPlan {
+            reason: format!("expected aggregate plan, got `{plan:?}`"),
+        });
+    };
+    Ok(aggregate
+        .group_expr
+        .iter()
+        .chain(aggregate.aggr_expr.iter())
+        .cloned()
+        .collect())
+}
+
+fn rebase_expr(
+    expr: &DataFusionExpr,
+    base_exprs: &[DataFusionExpr],
+    plan: &DataFusionLogicalPlan,
+) -> Result<DataFusionExpr, PlannerError> {
+    expr.clone()
+        .transform_down(|nested_expr| {
+            if base_exprs.contains(&nested_expr) {
+                expr_as_column_expr(&nested_expr, plan).map(Transformed::yes)
+            } else {
+                Ok(Transformed::no(nested_expr))
+            }
+        })
+        .data()
+        .map_err(map_df_plan_error)
 }
 
 fn bind_select_query(
@@ -174,7 +285,7 @@ fn bind_select_query(
     function_registry: &dyn FunctionRegistry,
 ) -> Result<QueryExpression, PlannerError> {
     match query.body.as_ref() {
-        SetExpr::Select(select) => bind_select(select, function_registry),
+        SetExpr::Select(select) => bind_select(query, select, function_registry),
         other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported query body `{other}`"),
         }),
@@ -182,6 +293,7 @@ fn bind_select_query(
 }
 
 fn bind_select(
+    query: &Query,
     select: &Select,
     function_registry: &dyn FunctionRegistry,
 ) -> Result<QueryExpression, PlannerError> {
@@ -198,21 +310,220 @@ fn bind_select(
             reason: format!("unsupported select shape `{select}`"),
         });
     }
+    let projection = bind_projection(&select.projection, function_registry)?;
+    let aliases = extract_aliases(&projection);
+    let group_by = match bind_group_by(&select.group_by, function_registry)? {
+        QueryGroupBy::Expressions(expressions) => QueryGroupBy::Expressions(
+            expressions
+                .into_iter()
+                .map(|expr| resolve_aliases_to_exprs(expr, &aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        group_by => group_by,
+    };
+    let having = select
+        .having
+        .as_ref()
+        .map(|expr| bind_expr(expr, function_registry))
+        .transpose()?
+        .map(|expr| resolve_aliases_to_exprs(expr, &aliases))
+        .transpose()?;
     Ok(QueryExpression {
-        distinct: select.distinct.is_some(),
-        projection: bind_projection(&select.projection, function_registry)?,
+        distinct: bind_distinct(&select.distinct)?,
+        order_by: bind_order_by(query.order_by.as_ref(), function_registry)?,
+        limit: bind_limit(query.limit_clause.as_ref(), function_registry)?,
+        projection,
         selection: select
             .selection
             .as_ref()
             .map(|expr| bind_expr(expr, function_registry))
             .transpose()?,
-        group_by: bind_group_by(&select.group_by, function_registry)?,
-        having: select
-            .having
-            .as_ref()
-            .map(|expr| bind_expr(expr, function_registry))
-            .transpose()?,
+        group_by,
+        having,
     })
+}
+
+fn bind_distinct(distinct: &Option<AstDistinct>) -> Result<bool, PlannerError> {
+    match distinct {
+        None | Some(AstDistinct::All) => Ok(false),
+        Some(AstDistinct::Distinct) => Ok(true),
+        Some(AstDistinct::On(exprs)) => Err(PlannerError::UnsupportedPlan {
+            reason: format!("distinct on is not supported yet: {exprs:?}"),
+        }),
+    }
+}
+
+fn bind_order_by(
+    order_by: Option<&OrderBy>,
+    function_registry: &dyn FunctionRegistry,
+) -> Result<Vec<DataFusionSort>, PlannerError> {
+    let Some(order_by) = order_by else {
+        return Ok(Vec::new());
+    };
+    if order_by.interpolate.is_some() {
+        return Err(PlannerError::UnsupportedPlan {
+            reason: format!("unsupported order by shape `{order_by}`"),
+        });
+    }
+    let OrderByKind::Expressions(expressions) = &order_by.kind else {
+        return Err(PlannerError::UnsupportedPlan {
+            reason: format!("unsupported order by shape `{order_by}`"),
+        });
+    };
+    expressions
+        .iter()
+        .map(|expr| {
+            if expr.with_fill.is_some() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported order by expression `{expr}`"),
+                });
+            }
+            Ok(DataFusionSort::new(
+                bind_expr(&expr.expr, function_registry)?,
+                expr.options.asc.unwrap_or(true),
+                expr.options.nulls_first.unwrap_or(false),
+            ))
+        })
+        .collect()
+}
+
+fn bind_limit(
+    limit_clause: Option<&LimitClause>,
+    function_registry: &dyn FunctionRegistry,
+) -> Result<Option<QueryLimit>, PlannerError> {
+    let Some(limit_clause) = limit_clause else {
+        return Ok(None);
+    };
+    let limit = match limit_clause {
+        LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        } => {
+            if !limit_by.is_empty() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("limit by is not supported yet: {limit_by:?}"),
+                });
+            }
+            QueryLimit {
+                skip: offset
+                    .as_ref()
+                    .map(|offset| bind_expr(&offset.value, function_registry))
+                    .transpose()?,
+                fetch: limit
+                    .as_ref()
+                    .map(|limit| bind_expr(limit, function_registry))
+                    .transpose()?,
+            }
+        }
+        LimitClause::OffsetCommaLimit { offset, limit } => QueryLimit {
+            skip: Some(bind_expr(offset, function_registry)?),
+            fetch: Some(bind_expr(limit, function_registry)?),
+        },
+    };
+    Ok(Some(limit))
+}
+
+fn resolve_group_by_positions(
+    group_by: &[DataFusionExpr],
+    projection: &[DataFusionExpr],
+) -> Result<Vec<DataFusionExpr>, PlannerError> {
+    group_by
+        .iter()
+        .map(|expr| match expr {
+            DataFusionExpr::Literal(ScalarValue::Int64(Some(position)), _)
+                if *position > 0 && (*position as usize) <= projection.len() =>
+            {
+                Ok(unalias_expr(projection[*position as usize - 1].clone()))
+            }
+            DataFusionExpr::Literal(ScalarValue::Int64(Some(position)), _) => {
+                Err(PlannerError::InvalidPlan {
+                    reason: format!("GROUP BY position {position} is out of range"),
+                })
+            }
+            _ => Ok(expr.clone()),
+        })
+        .collect()
+}
+
+fn unalias_expr(expr: DataFusionExpr) -> DataFusionExpr {
+    match expr {
+        DataFusionExpr::Alias(alias) => *alias.expr,
+        _ => expr,
+    }
+}
+
+fn resolve_sort_positions(
+    sort_exprs: &[DataFusionSort],
+    projection: &[DataFusionExpr],
+) -> Result<Vec<DataFusionSort>, PlannerError> {
+    sort_exprs
+        .iter()
+        .map(|sort| {
+            Ok(DataFusionSort::new(
+                resolve_position_to_expr(sort.expr.clone(), projection)?,
+                sort.asc,
+                sort.nulls_first,
+            ))
+        })
+        .collect()
+}
+
+fn resolve_position_to_expr(
+    expr: DataFusionExpr,
+    projection: &[DataFusionExpr],
+) -> Result<DataFusionExpr, PlannerError> {
+    match expr {
+        DataFusionExpr::Literal(ScalarValue::Int64(Some(position)), _)
+            if position > 0 && (position as usize) <= projection.len() =>
+        {
+            Ok(projected_column_expr(&projection[position as usize - 1]))
+        }
+        DataFusionExpr::Literal(ScalarValue::Int64(Some(position)), _) => {
+            Err(PlannerError::InvalidPlan {
+                reason: format!("ORDER BY position {position} is out of range"),
+            })
+        }
+        _ => Ok(expr),
+    }
+}
+
+fn projected_column_expr(expr: &DataFusionExpr) -> DataFusionExpr {
+    match expr {
+        DataFusionExpr::Alias(alias) => {
+            DataFusionExpr::Column(Column::from_name(alias.name.clone()))
+        }
+        DataFusionExpr::Column(column) => DataFusionExpr::Column(column.clone()),
+        _ => DataFusionExpr::Column(Column::from_name(expr.schema_name().to_string())),
+    }
+}
+
+fn extract_aliases(exprs: &[DataFusionExpr]) -> HashMap<String, DataFusionExpr> {
+    exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            DataFusionExpr::Alias(alias) => Some((alias.name.clone(), *alias.expr.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn resolve_aliases_to_exprs(
+    expr: DataFusionExpr,
+    aliases: &HashMap<String, DataFusionExpr>,
+) -> Result<DataFusionExpr, PlannerError> {
+    expr.transform_up(|nested_expr| match nested_expr {
+        DataFusionExpr::Column(column) if column.relation.is_none() => {
+            if let Some(alias_expr) = aliases.get(&column.name) {
+                Ok(Transformed::yes(alias_expr.clone()))
+            } else {
+                Ok(Transformed::no(DataFusionExpr::Column(column)))
+            }
+        }
+        other => Ok(Transformed::no(other)),
+    })
+    .data()
+    .map_err(map_df_plan_error)
 }
 
 fn build_table_with_joins(
