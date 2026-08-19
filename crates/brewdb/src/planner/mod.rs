@@ -61,6 +61,29 @@ mod tests {
         }
     }
 
+    fn find_aggregate<'a>(
+        plan: &'a DataFusionLogicalPlan,
+    ) -> Option<&'a datafusion_expr::Aggregate> {
+        match plan {
+            DataFusionLogicalPlan::Aggregate(aggregate) => Some(aggregate),
+            _ => plan.inputs().into_iter().find_map(find_aggregate),
+        }
+    }
+
+    fn find_filter<'a>(plan: &'a DataFusionLogicalPlan) -> Option<&'a datafusion_expr::Filter> {
+        match plan {
+            DataFusionLogicalPlan::Filter(filter) => Some(filter),
+            _ => plan.inputs().into_iter().find_map(find_filter),
+        }
+    }
+
+    fn find_sort<'a>(plan: &'a DataFusionLogicalPlan) -> Option<&'a datafusion_expr::Sort> {
+        match plan {
+            DataFusionLogicalPlan::Sort(sort) => Some(sort),
+            _ => plan.inputs().into_iter().find_map(find_sort),
+        }
+    }
+
     fn make_table(table_name: &str) -> TableCatalogEntry {
         TableCatalogEntry::new(
             uuid::Uuid::new_v4(),
@@ -398,6 +421,161 @@ mod tests {
             panic!("expected scan local plan in child fragment");
         };
         assert_eq!(scan.table_name.table(), "orders");
+    }
+
+    #[test]
+    fn logical_planner_keeps_aliased_aggregate_out_of_projection() {
+        let plan = build_query_plan(
+            "select count(id) as lineitem_count from orders",
+            vec![make_table("orders")],
+        );
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+        assert_eq!(aggregate.aggr_expr.len(), 1);
+        assert!(matches!(
+            aggregate.aggr_expr[0],
+            DataFusionExpr::Alias(_) | DataFusionExpr::AggregateFunction(_)
+        ));
+    }
+
+    #[test]
+    fn logical_planner_rewrites_count_star_to_count_one() {
+        let plan = build_query_plan(
+            "select count(*) as lineitem_count from orders",
+            vec![make_table("orders")],
+        );
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+        assert_eq!(aggregate.aggr_expr.len(), 1);
+        let DataFusionExpr::AggregateFunction(function) = &aggregate.aggr_expr[0] else {
+            panic!("expected aggregate function");
+        };
+        assert!(matches!(
+            function.params.args.as_slice(),
+            [DataFusionExpr::Literal(_, _)]
+        ));
+    }
+
+    #[test]
+    fn logical_planner_rewrites_count_without_args_to_count_one() {
+        let plan = build_query_plan("select count() from orders", vec![make_table("orders")]);
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+        assert_eq!(aggregate.aggr_expr.len(), 1);
+        let DataFusionExpr::AggregateFunction(function) = &aggregate.aggr_expr[0] else {
+            panic!("expected aggregate function");
+        };
+        assert!(matches!(
+            function.params.args.as_slice(),
+            [DataFusionExpr::Literal(_, _)]
+        ));
+    }
+
+    #[test]
+    fn logical_planner_builds_distinct_order_limit_tree() {
+        let plan = build_query_plan(
+            "select distinct id from orders order by id desc limit 5",
+            vec![make_table("orders")],
+        );
+
+        let DataFusionLogicalPlan::Sort(sort) =
+            plan.fragments[0].root.as_ref().expect("expected root plan")
+        else {
+            panic!("expected sort root");
+        };
+        assert_eq!(sort.fetch, Some(5));
+        assert_eq!(sort.expr.len(), 1);
+        assert!(!sort.expr[0].asc);
+        let DataFusionLogicalPlan::Aggregate(aggregate) = sort.input.as_ref() else {
+            panic!("expected distinct aggregate under sort");
+        };
+        assert_eq!(aggregate.group_expr.len(), 1);
+        assert!(aggregate.aggr_expr.is_empty());
+    }
+
+    #[test]
+    fn logical_planner_resolves_group_by_position() {
+        let plan = build_query_plan(
+            "select id, count(*) from orders group by 1",
+            vec![make_table("orders")],
+        );
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+
+        assert_eq!(aggregate.group_expr.len(), 1);
+        assert!(matches!(aggregate.group_expr[0], DataFusionExpr::Column(_)));
+    }
+
+    #[test]
+    fn logical_planner_collects_having_aggregate() {
+        let plan = build_query_plan(
+            "select id from orders group by id having count(*) > 1",
+            vec![make_table("orders")],
+        );
+        find_filter(plan.fragments[0].root.as_ref().unwrap()).expect("expected having filter");
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+
+        assert_eq!(aggregate.aggr_expr.len(), 1);
+    }
+
+    #[test]
+    fn logical_planner_resolves_group_by_alias() {
+        let plan = build_query_plan(
+            "select id as order_id, count(*) from orders group by order_id",
+            vec![make_table("orders")],
+        );
+        let aggregate = find_aggregate(plan.fragments[0].root.as_ref().unwrap())
+            .expect("expected aggregate plan");
+
+        assert_eq!(aggregate.group_expr.len(), 1);
+        assert!(matches!(aggregate.group_expr[0], DataFusionExpr::Column(_)));
+    }
+
+    #[test]
+    fn logical_planner_resolves_having_alias() {
+        let plan = build_query_plan(
+            "select id, count(*) as order_count from orders group by id having order_count > 1",
+            vec![make_table("orders")],
+        );
+        let filter =
+            find_filter(plan.fragments[0].root.as_ref().unwrap()).expect("expected having filter");
+        let DataFusionExpr::BinaryExpr(binary) = &filter.predicate else {
+            panic!("expected binary having predicate");
+        };
+
+        assert!(matches!(binary.left.as_ref(), DataFusionExpr::Column(_)));
+    }
+
+    #[test]
+    fn logical_planner_resolves_order_by_position() {
+        let plan = build_query_plan(
+            "select id from orders order by 1 desc",
+            vec![make_table("orders")],
+        );
+        let DataFusionLogicalPlan::Sort(sort) =
+            plan.fragments[0].root.as_ref().expect("expected root plan")
+        else {
+            panic!("expected sort root");
+        };
+
+        assert_eq!(sort.expr.len(), 1);
+        assert!(!sort.expr[0].asc);
+        assert!(matches!(sort.expr[0].expr, DataFusionExpr::Column(_)));
+    }
+
+    #[test]
+    fn logical_planner_resolves_order_by_position_to_projected_alias() {
+        let plan = build_query_plan(
+            "select id as order_id from orders order by 1 desc",
+            vec![make_table("orders")],
+        );
+        let sort = find_sort(plan.fragments[0].root.as_ref().unwrap()).expect("expected sort");
+        let DataFusionExpr::Column(column) = &sort.expr[0].expr else {
+            panic!("expected order by position to resolve to projected column");
+        };
+
+        assert_eq!(column.name, "order_id");
     }
 
     #[test]

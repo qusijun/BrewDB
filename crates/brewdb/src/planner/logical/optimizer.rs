@@ -6,13 +6,14 @@ use datafusion_common::tree_node::Transformed;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
 use datafusion_optimizer::{
-    ApplyOrder, Optimizer, OptimizerConfig, OptimizerContext, OptimizerRule,
+    Analyzer, AnalyzerRule, ApplyOrder, Optimizer, OptimizerConfig, OptimizerContext, OptimizerRule,
 };
 
 use crate::planner::logical::plan::LogicalPlanNode;
 
 #[derive(Debug)]
 pub struct LogicalOptimizer {
+    analyzer: Analyzer,
     optimizer: Optimizer,
 }
 
@@ -21,6 +22,7 @@ impl Default for LogicalOptimizer {
         let mut rules = Optimizer::new().rules;
         rules.push(Arc::new(LogicalPlanExtensionRule));
         Self {
+            analyzer: Analyzer::new(),
             optimizer: Optimizer::with_rules(rules),
         }
     }
@@ -39,8 +41,26 @@ impl LogicalOptimizer {
     where
         F: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
     {
+        self.optimize_with_observers(plan, |_, _| {}, observer)
+    }
+
+    pub fn optimize_with_observers<A, O>(
+        &self,
+        plan: DataFusionLogicalPlan,
+        analyzer_observer: A,
+        optimizer_observer: O,
+    ) -> Result<DataFusionLogicalPlan>
+    where
+        A: FnMut(&DataFusionLogicalPlan, &dyn AnalyzerRule),
+        O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
+    {
+        let optimizer_context = OptimizerContext::new();
+        let options = optimizer_context.options();
+        let analyzed = self
+            .analyzer
+            .execute_and_check(plan, &options, analyzer_observer)?;
         self.optimizer
-            .optimize(plan, &OptimizerContext::new(), observer)
+            .optimize(analyzed, &optimizer_context, optimizer_observer)
     }
 }
 

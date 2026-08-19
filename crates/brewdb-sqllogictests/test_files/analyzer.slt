@@ -1,0 +1,16 @@
+statement ok
+create table analyzer_orders (id int, amount int);
+
+statement ok
+insert into analyzer_orders values (1, 10), (2, 20), (3, 30);
+
+query I
+select id from analyzer_orders where id = '2';
+----
+2
+
+query II
+select id, amount from analyzer_orders where amount >= '20' order by id;
+----
+2 20
+3 30

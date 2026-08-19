@@ -38,10 +38,10 @@ pub struct BenchmarkRunConfig {
     pub database: String,
     pub data_dir: Option<PathBuf>,
     pub queries_dir: Option<PathBuf>,
+    pub query_file: Option<PathBuf>,
     pub iterations: usize,
     pub setup: bool,
     pub brewdb_bin: PathBuf,
-    pub brewdbd_bin: PathBuf,
     pub config_path: Option<PathBuf>,
 }
 
@@ -74,7 +74,7 @@ pub fn run_benchmark(config: &BenchmarkRunConfig) -> io::Result<BenchmarkReport>
                 Workload::Tpch => tpch_load_sql(data_dir),
                 Workload::ClickBench => clickbench_load_sql(data_dir),
             };
-            execute_sql(config, &setup_sql)?;
+            execute_setup_sql(config, &setup_sql)?;
         }
     }
 
@@ -101,6 +101,19 @@ pub fn run_benchmark(config: &BenchmarkRunConfig) -> io::Result<BenchmarkReport>
     })
 }
 
+fn execute_setup_sql(config: &BenchmarkRunConfig, sql: &str) -> io::Result<()> {
+    for (index, statement) in split_sql_statements(sql).into_iter().enumerate() {
+        let output = execute_sql(config, &statement)?;
+        if !output.status.success() {
+            return Err(sql_execution_error(
+                format!("setup statement {} failed", index + 1),
+                &output,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn execute_sql(config: &BenchmarkRunConfig, sql: &str) -> io::Result<std::process::Output> {
     Command::new(&config.brewdb_bin)
         .arg("--host")
@@ -114,13 +127,81 @@ fn execute_sql(config: &BenchmarkRunConfig, sql: &str) -> io::Result<std::proces
         .output()
 }
 
+fn sql_execution_error(context: String, output: &std::process::Output) -> io::Error {
+    let mut details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if details.is_empty() {
+        details = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    }
+    if details.is_empty() {
+        details = format!("process exited with status {}", output.status);
+    }
+    io::Error::other(format!("{context}: {details}"))
+}
+
 pub fn load_queries(config: &BenchmarkRunConfig) -> io::Result<Vec<QueryCase>> {
+    if let Some(query_file) = &config.query_file {
+        return load_queries_from_file(query_file);
+    }
     let query_dir = config.queries_dir.clone().unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(config.workload.name())
             .join("queries")
     });
     load_queries_from_dir(&query_dir)
+}
+
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut statement = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '-' && !in_single_quote && chars.peek() == Some(&'-') {
+            chars.next();
+            for comment_char in chars.by_ref() {
+                if comment_char == '\n' {
+                    statement.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '\'' {
+            statement.push(ch);
+            if in_single_quote && chars.peek() == Some(&'\'') {
+                statement.push(chars.next().expect("peeked quote"));
+                continue;
+            }
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if ch == ';' && !in_single_quote {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                statements.push(trimmed.to_owned());
+            }
+            statement.clear();
+            continue;
+        }
+        statement.push(ch);
+    }
+
+    let trimmed = statement.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_owned());
+    }
+    statements
+}
+
+pub fn load_queries_from_file(query_file: &Path) -> io::Result<Vec<QueryCase>> {
+    let sql = fs::read_to_string(query_file)?;
+    let name = query_file
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    Ok(vec![QueryCase { name, sql }])
 }
 
 pub fn load_queries_from_dir(query_dir: &Path) -> io::Result<Vec<QueryCase>> {
@@ -146,16 +227,30 @@ pub fn load_queries_from_dir(query_dir: &Path) -> io::Result<Vec<QueryCase>> {
 
 pub fn render_report(report: &BenchmarkReport) -> String {
     let mut output = String::new();
-    output.push_str("workload,query,iteration,success,elapsed_ms\n");
+    output.push_str("workload,query,iteration,success,elapsed_ms,error\n");
     for result in &report.results {
+        let error = if result.success {
+            String::new()
+        } else {
+            result.stderr.clone()
+        };
         output.push_str(&format!(
-            "{},{},{},{},{}\n",
+            "{},{},{},{},{},{}\n",
             report.workload.name(),
             result.query_name,
             result.iteration,
             result.success,
-            result.elapsed.as_secs_f64() * 1000.0
+            result.elapsed.as_secs_f64() * 1000.0,
+            csv_field(&error)
         ));
     }
     output
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '\n', '\r', '"']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
