@@ -20,6 +20,9 @@ crate::register_storage_engine!("paimon", open_paimon_storage_engine);
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use crate::catalog::{
         CatalogMode, CreateTableRequest, PaimonSchemaAdapter, StorageFormatSchemaAdapter,
         StorageKind, TableCatalogEntry, TablePath,
@@ -40,6 +43,20 @@ mod tests {
             TablePath::new("prod", "sales", "orders").unwrap(),
             TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             format!("memory:/brewdb-paimon-test-{}", uuid::Uuid::new_v4()),
+            storage_kind,
+            CatalogMode::Managed,
+        )
+    }
+
+    fn make_file_table(storage_kind: StorageKind) -> TableCatalogEntry {
+        let location = format!("/tmp/brewdb-paimon-test-{}", uuid::Uuid::new_v4());
+        TableCatalogEntry::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            TablePath::new("prod", "sales", "orders").unwrap(),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            location,
             storage_kind,
             CatalogMode::Managed,
         )
@@ -140,5 +157,96 @@ mod tests {
 
             assert_eq!(count.value(0), 2);
         });
+    }
+
+    #[test]
+    fn paimon_table_provider_writes_vortex_data_files_when_table_option_is_set() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let storage = PaimonStorageEngine;
+            let table =
+                make_file_table(StorageKind::Paimon).with_options([("file.format", "vortex")]);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = storage.table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider).unwrap();
+
+            ctx.sql("insert into orders values (cast(1 as int)), (cast(2 as int))")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+
+            let data_files = data_file_paths(Path::new(&table.table_location));
+            assert!(
+                data_files
+                    .iter()
+                    .any(|path| path.extension().is_some_and(|ext| ext == "vortex")),
+                "expected at least one vortex data file under {}, got {data_files:?}",
+                table.table_location
+            );
+            assert!(
+                !data_files
+                    .iter()
+                    .any(|path| path.extension().is_some_and(|ext| ext == "parquet")),
+                "expected vortex table not to write parquet data files, got {data_files:?}"
+            );
+
+            let batches = ctx
+                .sql("select count(*) from orders")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let count = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            assert_eq!(count.value(0), 2);
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    fn data_file_paths(path: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_data_file_paths(path, &mut files);
+        files.sort();
+        files
+    }
+
+    fn collect_data_file_paths(path: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_data_file_paths(&path, files);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("data-"))
+            {
+                files.push(path);
+            }
+        }
     }
 }

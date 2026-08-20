@@ -615,6 +615,40 @@ mod tests {
     }
 
     #[test]
+    fn logical_planner_keeps_dotted_paimon_table_options() {
+        let planned = bind("create table t1 (id int not null) with (file.format = vortex)");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Ddl(
+                datafusion_expr::DdlStatement::CreateExternalTable(statement),
+            ) => {
+                assert_eq!(
+                    statement.options.get("file.format").map(String::as_str),
+                    Some("vortex")
+                );
+            }
+            other => panic!("expected create table statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_keeps_dotted_paimon_table_options_with_quoted_value() {
+        let planned = bind("create table t1 (id int not null) with (file.format = 'vortex')");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Ddl(
+                datafusion_expr::DdlStatement::CreateExternalTable(statement),
+            ) => {
+                assert_eq!(
+                    statement.options.get("file.format").map(String::as_str),
+                    Some("vortex")
+                );
+            }
+            other => panic!("expected create table statement, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn logical_planner_turns_create_table_partitioning_into_table_layout() {
         let planned = bind(
             "create table t1 (id int not null, dt text, region text) partitioned by (dt, region)",

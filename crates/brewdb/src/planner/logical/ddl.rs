@@ -5,7 +5,7 @@ use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema}
 use crate::parser::ast::{
     AlterTable, ColumnDef, ColumnOption, CreateTable, CreateTableOptions, DataType as AstDataType,
     ExactNumberInfo, Expr, Ident, ObjectName, PrimaryKeyConstraint, ShowStatementOptions,
-    SqlOption, TableConstraint, ValueWithSpan, WrappedCollection,
+    SqlOption, TableConstraint, Value, ValueWithSpan, WrappedCollection,
 };
 use crate::SqlError;
 use datafusion_common::{Constraint, Constraints, DFSchema, TableReference};
@@ -564,7 +564,29 @@ fn ident_list(idents: &[Ident]) -> String {
 
 fn expr_to_string(expr: &Expr) -> String {
     match expr {
-        Expr::Value(ValueWithSpan { value, .. }) => value.to_string(),
+        Expr::Value(value) => value_to_string(value),
         other => other.to_string(),
+    }
+}
+
+fn value_to_string(value: &ValueWithSpan) -> String {
+    match &value.value {
+        Value::SingleQuotedString(inner)
+        | Value::DoubleQuotedString(inner)
+        | Value::EscapedStringLiteral(inner)
+        | Value::NationalStringLiteral(inner)
+        | Value::HexStringLiteral(inner)
+        | Value::SingleQuotedByteStringLiteral(inner)
+        | Value::DoubleQuotedByteStringLiteral(inner)
+        | Value::SingleQuotedRawStringLiteral(inner)
+        | Value::DoubleQuotedRawStringLiteral(inner)
+        | Value::TripleSingleQuotedString(inner)
+        | Value::TripleDoubleQuotedString(inner)
+        | Value::TripleSingleQuotedRawStringLiteral(inner)
+        | Value::TripleDoubleQuotedRawStringLiteral(inner)
+        | Value::UnicodeStringLiteral(inner)
+        | Value::TripleSingleQuotedByteStringLiteral(inner)
+        | Value::TripleDoubleQuotedByteStringLiteral(inner) => inner.clone(),
+        _ => value.to_string(),
     }
 }

@@ -4,6 +4,8 @@ use std::path::Path;
 
 use flate2::read::GzDecoder;
 
+use crate::benchmark::PaimonFileFormat;
+
 const HITS_CSV_GZ_URL: &str = "https://datasets.clickhouse.com/hits_compatible/hits.csv.gz";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +39,11 @@ pub fn write_clickbench_csv_from_gzip<R: Read>(
     Ok(())
 }
 
-pub fn clickbench_load_sql(data_dir: &Path) -> String {
-    let schema = include_str!("../clickbench/schema.sql");
+pub fn clickbench_load_sql(data_dir: &Path, file_format: PaimonFileFormat) -> String {
+    let schema = match file_format {
+        PaimonFileFormat::Parquet => include_str!("../clickbench/parquet/schema.sql"),
+        PaimonFileFormat::Vortex => include_str!("../clickbench/vortex/schema.sql"),
+    };
     let load = include_str!("../clickbench/load.sql");
     format!(
         "{schema}\n{}",

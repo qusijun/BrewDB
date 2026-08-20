@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use crate::benchmark::PaimonFileFormat;
 use tpchgen::csv::{
     CustomerCsv, LineItemCsv, NationCsv, OrderCsv, PartCsv, PartSuppCsv, RegionCsv, SupplierCsv,
 };
@@ -120,8 +121,11 @@ where
     writer.flush()
 }
 
-pub fn tpch_load_sql(data_dir: &Path) -> String {
-    let schema = include_str!("../tpch/schema.sql");
+pub fn tpch_load_sql(data_dir: &Path, file_format: PaimonFileFormat) -> String {
+    let schema = match file_format {
+        PaimonFileFormat::Parquet => include_str!("../tpch/parquet/schema.sql"),
+        PaimonFileFormat::Vortex => include_str!("../tpch/vortex/schema.sql"),
+    };
     let load = include_str!("../tpch/load.sql");
     format!(
         "{schema}\n{}",

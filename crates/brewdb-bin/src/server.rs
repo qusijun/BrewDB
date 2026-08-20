@@ -92,11 +92,12 @@ impl BrewDbServer {
         let frontend_config = FrontendConfig::from_config_set(&config)?;
         let catalog_service = CatalogService::with_config_and_default_managed_paimon_catalog(
             open_catalog_store(&catalog_config),
-            config,
+            config.clone(),
             catalog_config,
             frontend_config.default_catalog(),
         )?;
         let mut server = Self::with_catalog_service(catalog_service, QueryCoordinator::default());
+        server.frontend = FrontendService::with_system_settings(config);
         server.client_defaults =
             ClientDefaults::default().with_catalog(frontend_config.default_catalog());
         server.listen_address = frontend_config.pgwire_listen_addr().to_owned();
@@ -113,7 +114,7 @@ impl BrewDbServer {
         coordinator: QueryCoordinator,
     ) -> Self {
         Self {
-            frontend: FrontendService,
+            frontend: FrontendService::new(),
             client_defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
             listen_address: "127.0.0.1:5432".to_owned(),
             protocols: ProtocolRegistry::with_builtin_plugins(),
@@ -125,7 +126,7 @@ impl BrewDbServer {
         &self,
         request: &SqlRequest,
     ) -> Result<QueryExecutionHandle, BrewDbServerError> {
-        let ingress = self.frontend.build_sql_ingress_request(request)?;
+        let ingress = self.frontend.build_ingress_sql(request)?;
         self.sql_driver.execute(ingress).map_err(Into::into)
     }
 

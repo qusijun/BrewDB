@@ -52,6 +52,7 @@ Start `brewdbd` separately, then run a workload through the BrewDB CLI:
 cargo run --manifest-path benchmark/Cargo.toml -- \
   run tpch \
   --data-dir /tmp/brewdb-bench/tpch \
+  --paimon-file-format parquet \
   --iterations 3 \
   --host 127.0.0.1 \
   --port 5432
@@ -60,8 +61,12 @@ cargo run --manifest-path benchmark/Cargo.toml -- \
 For TPC-H, setup is enabled by default. It runs generated DDL and `COPY FROM`
 statements before executing query files. The setup SQL is file-backed:
 
-- `benchmark/tpch/schema.sql`
+- `benchmark/tpch/parquet/schema.sql`
+- `benchmark/tpch/vortex/schema.sql`
 - `benchmark/tpch/load.sql`
+
+Use `--paimon-file-format vortex` to create managed Paimon benchmark tables with
+Vortex data files. The default is `parquet`.
 
 For ClickBench, setup expects a header-less CSV file at:
 
@@ -69,7 +74,8 @@ For ClickBench, setup expects a header-less CSV file at:
 
 The setup SQL is also file-backed:
 
-- `benchmark/clickbench/schema.sql`
+- `benchmark/clickbench/parquet/schema.sql`
+- `benchmark/clickbench/vortex/schema.sql`
 - `benchmark/clickbench/load.sql`
 
 To run existing tables without loading data:
@@ -101,10 +107,12 @@ tpch,q01,1,true,12.34
 
 Built-in workloads are query-directory based:
 
-- `benchmark/tpch/schema.sql`
+- `benchmark/tpch/parquet/schema.sql`
+- `benchmark/tpch/vortex/schema.sql`
 - `benchmark/tpch/load.sql`
 - `benchmark/tpch/queries/*.sql`
-- `benchmark/clickbench/schema.sql`
+- `benchmark/clickbench/parquet/schema.sql`
+- `benchmark/clickbench/vortex/schema.sql`
 - `benchmark/clickbench/load.sql`
 - `benchmark/clickbench/queries/*.sql`
 

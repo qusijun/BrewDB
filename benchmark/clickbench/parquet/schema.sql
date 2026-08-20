@@ -114,4 +114,4 @@ create table if not exists hits (
   RefererHash bigint,
   URLHash bigint,
   CLID int
-);
+) with (file.format = parquet);
