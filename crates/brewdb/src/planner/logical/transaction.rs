@@ -1,5 +1,5 @@
 use crate::parser::ast::{TransactionAccessMode, TransactionMode as AstTransactionMode};
-use crate::SqlError;
+use crate::planner::PlannerError;
 use datafusion_expr::{
     LogicalPlan as DataFusionLogicalPlan, Statement as DataFusionStatement,
     TransactionAccessMode as DataFusionTransactionAccessMode,
@@ -9,7 +9,7 @@ use datafusion_expr::{
 
 pub(crate) fn bind_start_transaction_statement(
     modes: &[AstTransactionMode],
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     Ok(DataFusionLogicalPlan::Statement(
         DataFusionStatement::TransactionStart(TransactionStart {
             access_mode: bind_txn_access_mode(modes),
@@ -18,7 +18,7 @@ pub(crate) fn bind_start_transaction_statement(
     ))
 }
 
-pub(crate) fn bind_commit_statement() -> Result<DataFusionLogicalPlan, SqlError> {
+pub(crate) fn bind_commit_statement() -> Result<DataFusionLogicalPlan, PlannerError> {
     Ok(DataFusionLogicalPlan::Statement(
         DataFusionStatement::TransactionEnd(DataFusionTransactionEnd {
             conclusion: DataFusionTransactionConclusion::Commit,
@@ -27,7 +27,7 @@ pub(crate) fn bind_commit_statement() -> Result<DataFusionLogicalPlan, SqlError>
     ))
 }
 
-pub(crate) fn bind_rollback_statement() -> Result<DataFusionLogicalPlan, SqlError> {
+pub(crate) fn bind_rollback_statement() -> Result<DataFusionLogicalPlan, PlannerError> {
     Ok(DataFusionLogicalPlan::Statement(
         DataFusionStatement::TransactionEnd(DataFusionTransactionEnd {
             conclusion: DataFusionTransactionConclusion::Rollback,

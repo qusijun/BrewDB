@@ -8,8 +8,7 @@ use crate::parser::ast::{
     CopyLegacyOption, CopyOption, CopySource, CopyTarget, Delete, Insert, Merge, SetExpr,
     Statement as AstStatement, Update,
 };
-use crate::planner::errors::PlannerError;
-use crate::SqlError;
+use crate::planner::PlannerError;
 use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::logical_plan::dml::{DmlStatement, InsertOp, WriteOp};
 use datafusion_expr::registry::FunctionRegistry;
@@ -21,8 +20,8 @@ use crate::planner::errors::{map_common_error, map_df_plan_error};
 use crate::planner::logical::expr::bind_expr;
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::{
-    planner_to_sql_error, resolve_query_tables, resolve_table, resolve_table_object,
-    LogicalPlanningContext, LogicalPlanningSession,
+    resolve_query_tables, resolve_table, resolve_table_object, LogicalPlanningContext,
+    LogicalPlanningSession,
 };
 use crate::storage::file::FileTableEngine;
 use crate::storage::TableEngine;
@@ -33,7 +32,7 @@ pub(crate) fn bind_insert_statement(
     ctx: &LogicalPlanningContext<'_>,
     insert: &Insert,
     function_registry: &dyn FunctionRegistry,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let target_table = resolve_table_object(ctx, session, &insert.table)?;
     let source_tables = insert
         .source
@@ -41,8 +40,7 @@ pub(crate) fn bind_insert_statement(
         .map(|query| resolve_query_tables(ctx, session, query))
         .transpose()?
         .unwrap_or_default();
-    let plan = plan_insert_statement(ast, target_table.clone(), function_registry)
-        .map_err(planner_to_sql_error)?;
+    let plan = plan_insert_statement(ast, target_table.clone(), function_registry)?;
     let mut table_catalogs = Vec::with_capacity(source_tables.len() + 1);
     table_catalogs.push(target_table);
     table_catalogs.extend(source_tables);
@@ -60,15 +58,15 @@ pub(crate) fn bind_copy_statement(
     options: &[CopyOption],
     legacy_options: &[CopyLegacyOption],
     values: &[Option<String>],
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     if to {
-        return Err(SqlError::UnsupportedStatement {
+        return Err(PlannerError::UnsupportedPlan {
             reason: "COPY TO is not supported yet; use SELECT for reads and COPY FROM for imports"
                 .to_string(),
         });
     }
     if !legacy_options.is_empty() || !values.is_empty() {
-        return Err(SqlError::UnsupportedStatement {
+        return Err(PlannerError::UnsupportedPlan {
             reason: "legacy COPY options and inline COPY payloads are not supported yet"
                 .to_string(),
         });
@@ -89,13 +87,13 @@ pub(crate) fn bind_copy_statement(
             CopyTarget::File { filename },
         ) => (filename.as_str(), table_name, columns),
         _ => {
-            return Err(SqlError::UnsupportedStatement {
+            return Err(PlannerError::UnsupportedPlan {
                 reason: "COPY FROM supports a file source and table target".to_string(),
             });
         }
     };
     if !columns.is_empty() {
-        return Err(SqlError::UnsupportedStatement {
+        return Err(PlannerError::UnsupportedPlan {
             reason: "COPY FROM with an explicit column list is not supported yet".to_string(),
         });
     }
@@ -110,9 +108,9 @@ pub(crate) fn bind_delete_statement(
     session: &LogicalPlanningSession,
     ctx: &LogicalPlanningContext<'_>,
     delete: &Delete,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let _ = (ast, session, ctx, delete);
-    Err(SqlError::UnsupportedStatement {
+    Err(PlannerError::UnsupportedPlan {
         reason: "DELETE is not supported yet".to_owned(),
     })
 }
@@ -122,9 +120,9 @@ pub(crate) fn bind_update_statement(
     session: &LogicalPlanningSession,
     ctx: &LogicalPlanningContext<'_>,
     update: &Update,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let _ = (ast, session, ctx, update);
-    Err(SqlError::UnsupportedStatement {
+    Err(PlannerError::UnsupportedPlan {
         reason: "UPDATE is not supported yet".to_owned(),
     })
 }
@@ -134,9 +132,9 @@ pub(crate) fn bind_merge_statement(
     session: &LogicalPlanningSession,
     ctx: &LogicalPlanningContext<'_>,
     merge: &Merge,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let _ = (ast, session, ctx, merge);
-    Err(SqlError::UnsupportedStatement {
+    Err(PlannerError::UnsupportedPlan {
         reason: "MERGE is not supported yet".to_owned(),
     })
 }
@@ -268,7 +266,7 @@ fn plan_copy_from_file_statement(
     target_table: TableCatalogEntry,
     filename: &str,
     file_options: BTreeMap<String, String>,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     ensure_copy_from_single_file(filename)?;
     let table_name = TableReference::full(
         target_table.path.catalog(),
@@ -283,12 +281,12 @@ fn plan_copy_from_file_statement(
         target_table.table_schema.clone(),
         file_options.clone(),
     )
-    .map_err(|error| SqlError::InvalidRequest {
+    .map_err(|error| PlannerError::InvalidPlan {
         reason: error.to_string(),
     })?;
     let source_engine =
         FileTableEngine::try_new(filename.to_owned(), file_options).map_err(|error| {
-            SqlError::InvalidRequest {
+            PlannerError::InvalidPlan {
                 reason: error.to_string(),
             }
         })?;
@@ -297,21 +295,21 @@ fn plan_copy_from_file_statement(
     let source_engine: Arc<dyn TableEngine> = Arc::new(source_engine);
     let source: Arc<dyn TableSource> = Arc::new(
         DefaultTableSource::new_with_engine(source_table, source_engine).map_err(|error| {
-            SqlError::InvalidRequest {
+            PlannerError::InvalidPlan {
                 reason: error.to_string(),
             }
         })?,
     );
     let input = LogicalPlanBuilder::scan(source_name, source, None)
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?
         .project(copy_projection(&target_table, &source_file_schema)?)
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?
         .build()
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?;
     Ok(DataFusionLogicalPlan::Dml(DmlStatement::new(
@@ -322,21 +320,21 @@ fn plan_copy_from_file_statement(
     )))
 }
 
-fn ensure_copy_from_single_file(location: &str) -> Result<(), SqlError> {
-    let metadata = fs::metadata(location).map_err(|error| SqlError::InvalidRequest {
+fn ensure_copy_from_single_file(location: &str) -> Result<(), PlannerError> {
+    let metadata = fs::metadata(location).map_err(|error| PlannerError::InvalidPlan {
         reason: error.to_string(),
     })?;
     if metadata.is_file() {
         return Ok(());
     }
-    Err(SqlError::InvalidRequest {
+    Err(PlannerError::InvalidPlan {
         reason: format!("COPY FROM expects a single file: {location}"),
     })
 }
 
 fn bind_copy_from_file_options(
     options: &[CopyOption],
-) -> Result<BTreeMap<String, String>, SqlError> {
+) -> Result<BTreeMap<String, String>, PlannerError> {
     let mut file_options = BTreeMap::new();
     for option in options {
         match option {
@@ -347,7 +345,7 @@ fn bind_copy_from_file_options(
                 file_options.insert("has_header".to_owned(), has_header.to_string());
             }
             other => {
-                return Err(SqlError::UnsupportedStatement {
+                return Err(PlannerError::UnsupportedPlan {
                     reason: format!("unsupported COPY FROM option `{other}`"),
                 });
             }
@@ -362,7 +360,7 @@ fn bind_copy_from_file_options(
 fn copy_projection(
     target_table: &TableCatalogEntry,
     source_schema: &arrow::datatypes::SchemaRef,
-) -> Result<Vec<datafusion_expr::Expr>, SqlError> {
+) -> Result<Vec<datafusion_expr::Expr>, PlannerError> {
     let projection = target_table
         .table_schema
         .fields
@@ -372,7 +370,7 @@ fn copy_projection(
             target_field
                 .data_type
                 .to_arrow_data_type()
-                .map_err(|error| SqlError::InvalidRequest {
+                .map_err(|error| PlannerError::InvalidPlan {
                     reason: error.to_string(),
                 })
                 .map(|data_type| {
@@ -387,11 +385,11 @@ fn copy_projection(
 fn validate_copy_from_schema(
     source_table: &TableCatalogEntry,
     source_schema: arrow::datatypes::SchemaRef,
-) -> Result<(), SqlError> {
+) -> Result<(), PlannerError> {
     let source_count = source_schema.fields().len();
     let target_count = source_table.table_schema.fields.len();
     if source_count != target_count {
-        return Err(SqlError::SchemaMismatch {
+        return Err(PlannerError::Schema {
             reason: format!(
                 "COPY FROM schema column count mismatch: source {source_count}, target {target_count}"
             ),
@@ -459,7 +457,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("COPY FROM schema column count mismatch"));
-        assert_eq!(error.error_code().as_str(), "BREWDB_SQL_SCHEMA_MISMATCH");
+        assert_eq!(error.error_code().as_str(), "BREWDB_PLANNER_SCHEMA_ERROR");
 
         let _ = fs::remove_file(file);
     }

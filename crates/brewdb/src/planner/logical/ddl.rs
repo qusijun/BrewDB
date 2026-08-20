@@ -7,7 +7,7 @@ use crate::parser::ast::{
     ExactNumberInfo, Expr, Ident, ObjectName, PrimaryKeyConstraint, ShowStatementOptions,
     SqlOption, TableConstraint, Value, ValueWithSpan, WrappedCollection,
 };
-use crate::SqlError;
+use crate::planner::PlannerError;
 use datafusion_common::{Constraint, Constraints, DFSchema, TableReference};
 use datafusion_expr::{
     CreateExternalTable, DdlStatement, DropTable, LogicalPlan as DataFusionLogicalPlan,
@@ -22,7 +22,7 @@ use crate::planner::logical::{
 pub(crate) fn bind_create_database_statement(
     session: LogicalPlanningSession,
     db_name: &ObjectName,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     Ok(extension_plan(LogicalPlanNode::Ddl(Ddl::CreateDatabase(
         CreateDatabase {
             catalog_name: session.catalog_name,
@@ -35,9 +35,9 @@ pub(crate) fn bind_create_table_statement(
     ctx: &LogicalPlanningContext<'_>,
     session: &LogicalPlanningSession,
     create_table: &CreateTable,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     if create_table.columns.is_empty() {
-        return Err(SqlError::InvalidRequest {
+        return Err(PlannerError::InvalidPlan {
             reason: "CREATE TABLE must define at least one column".to_string(),
         });
     }
@@ -46,7 +46,7 @@ pub(crate) fn bind_create_table_statement(
     let catalog = ctx
         .catalog_service
         .open_catalog(&catalog_name)
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?;
     let file_type = catalog.entry().storage_kind.as_str();
@@ -64,7 +64,7 @@ pub(crate) fn bind_create_table_statement(
             .columns
             .iter()
             .map(bind_column_def)
-            .collect::<Result<Vec<_>, SqlError>>()?,
+            .collect::<Result<Vec<_>, PlannerError>>()?,
     )
     .with_primary_keys(primary_keys.clone())
     .with_partition_keys(partition_keys.clone())
@@ -74,11 +74,11 @@ pub(crate) fn bind_create_table_statement(
     table_schema.bucket_function = distribution.bucket_function;
     let schema = table_schema
         .to_arrow_schema()
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })
         .and_then(|schema| {
-            DFSchema::try_from(schema).map_err(|error| SqlError::InvalidRequest {
+            DFSchema::try_from(schema).map_err(|error| PlannerError::InvalidPlan {
                 reason: error.to_string(),
             })
         })?;
@@ -106,9 +106,9 @@ pub(crate) fn bind_drop_statement(
     object_type: &crate::parser::ast::ObjectType,
     if_exists: bool,
     names: &[ObjectName],
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let Some(name) = names.first() else {
-        return Err(SqlError::InvalidRequest {
+        return Err(PlannerError::InvalidPlan {
             reason: "DROP statement must carry at least one object name".to_string(),
         });
     };
@@ -121,7 +121,7 @@ pub(crate) fn bind_drop_statement(
                     if if_exists
                         && matches!(
                         &error,
-                        SqlError::InvalidRequest { reason }
+                        PlannerError::InvalidPlan { reason }
                             if reason.contains("table not found")
                         )
                     {
@@ -156,7 +156,7 @@ pub(crate) fn bind_drop_statement(
                 },
             ))))
         }
-        _ => Err(SqlError::UnsupportedStatement {
+        _ => Err(PlannerError::UnsupportedPlan {
             reason: format!("DROP {object_type}"),
         }),
     }
@@ -166,21 +166,21 @@ pub(crate) fn bind_alter_statement(
     session: LogicalPlanningSession,
     ctx: &LogicalPlanningContext<'_>,
     alter_table: &AlterTable,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let _ = (session, ctx, alter_table);
-    Err(SqlError::UnsupportedStatement {
+    Err(PlannerError::UnsupportedPlan {
         reason: "ALTER TABLE is not supported by DataFusion DDL yet".to_string(),
     })
 }
 
-pub(crate) fn bind_show_catalogs_statement() -> Result<DataFusionLogicalPlan, SqlError> {
+pub(crate) fn bind_show_catalogs_statement() -> Result<DataFusionLogicalPlan, PlannerError> {
     Ok(show_plan(Show::Catalogs))
 }
 
 pub(crate) fn bind_show_databases_statement(
     session: LogicalPlanningSession,
     show_options: &ShowStatementOptions,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let catalog_name = show_options
         .show_in
         .as_ref()
@@ -193,7 +193,7 @@ pub(crate) fn bind_show_databases_statement(
 pub(crate) fn bind_show_tables_statement(
     session: LogicalPlanningSession,
     show_options: &ShowStatementOptions,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let (catalog_name, database_name) = show_options
         .show_in
         .as_ref()
@@ -203,7 +203,7 @@ pub(crate) fn bind_show_tables_statement(
             match parts.as_slice() {
                 [database] => Ok((session.catalog_name.clone(), database.clone())),
                 [catalog, database] => Ok((catalog.clone(), database.clone())),
-                _ => Err(SqlError::InvalidRequest {
+                _ => Err(PlannerError::InvalidPlan {
                     reason: format!("invalid SHOW TABLES target `{name}`"),
                 }),
             }
@@ -219,8 +219,8 @@ pub(crate) fn bind_show_tables_statement(
 
 pub(crate) fn bind_show_variable_statement(
     variable: &[Ident],
-) -> Result<DataFusionLogicalPlan, SqlError> {
-    Err(SqlError::UnsupportedStatement {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
+    Err(PlannerError::UnsupportedPlan {
         reason: format!("unsupported SHOW statement `SHOW {}`", ident_list(variable)),
     })
 }
@@ -251,7 +251,7 @@ fn sql_option_entry(option: &SqlOption) -> Option<(String, String)> {
     }
 }
 
-fn bind_column_def(column: &ColumnDef) -> Result<ColumnField, SqlError> {
+fn bind_column_def(column: &ColumnDef) -> Result<ColumnField, PlannerError> {
     let mut planned = ColumnField::new(
         column.name.value.clone(),
         bind_data_type(&column.data_type)?,
@@ -265,13 +265,13 @@ fn bind_column_def(column: &ColumnDef) -> Result<ColumnField, SqlError> {
     Ok(planned)
 }
 
-fn bind_primary_keys(create_table: &CreateTable) -> Result<Vec<String>, SqlError> {
+fn bind_primary_keys(create_table: &CreateTable) -> Result<Vec<String>, PlannerError> {
     let mut primary_keys = Vec::new();
     for column in &create_table.columns {
         for option in &column.options {
             if matches!(option.option, ColumnOption::PrimaryKey(_)) {
                 if !primary_keys.is_empty() {
-                    return Err(SqlError::InvalidRequest {
+                    return Err(PlannerError::InvalidPlan {
                         reason: "CREATE TABLE must not define multiple PRIMARY KEY constraints"
                             .to_string(),
                     });
@@ -284,7 +284,7 @@ fn bind_primary_keys(create_table: &CreateTable) -> Result<Vec<String>, SqlError
     for constraint in &create_table.constraints {
         if let TableConstraint::PrimaryKey(PrimaryKeyConstraint { columns, .. }) = constraint {
             if !primary_keys.is_empty() {
-                return Err(SqlError::InvalidRequest {
+                return Err(PlannerError::InvalidPlan {
                     reason: "CREATE TABLE must not define multiple PRIMARY KEY constraints"
                         .to_string(),
                 });
@@ -300,17 +300,22 @@ fn bind_primary_keys(create_table: &CreateTable) -> Result<Vec<String>, SqlError
     Ok(primary_keys)
 }
 
-fn primary_key_column_name(column: &crate::parser::ast::IndexColumn) -> Result<String, SqlError> {
+fn primary_key_column_name(
+    column: &crate::parser::ast::IndexColumn,
+) -> Result<String, PlannerError> {
     match &column.column.expr {
         Expr::Identifier(ident) => Ok(ident.value.clone()),
         Expr::CompoundIdentifier(parts) if parts.len() == 1 => Ok(parts[0].value.clone()),
-        other => Err(SqlError::InvalidRequest {
+        other => Err(PlannerError::InvalidPlan {
             reason: format!("PRIMARY KEY column must be a simple column name, got `{other}`"),
         }),
     }
 }
 
-fn validate_primary_keys(columns: &[ColumnDef], primary_keys: &[String]) -> Result<(), SqlError> {
+fn validate_primary_keys(
+    columns: &[ColumnDef],
+    primary_keys: &[String],
+) -> Result<(), PlannerError> {
     if primary_keys.is_empty() {
         return Ok(());
     }
@@ -318,7 +323,7 @@ fn validate_primary_keys(columns: &[ColumnDef], primary_keys: &[String]) -> Resu
     let mut seen = BTreeSet::new();
     for key in primary_keys {
         if !seen.insert(key.clone()) {
-            return Err(SqlError::InvalidRequest {
+            return Err(PlannerError::InvalidPlan {
                 reason: format!("PRIMARY KEY must not contain duplicate column `{key}`"),
             });
         }
@@ -330,7 +335,7 @@ fn validate_primary_keys(columns: &[ColumnDef], primary_keys: &[String]) -> Resu
         .collect::<BTreeSet<_>>();
     for key in primary_keys {
         if !column_names.contains(key.as_str()) {
-            return Err(SqlError::InvalidRequest {
+            return Err(PlannerError::InvalidPlan {
                 reason: format!("PRIMARY KEY column `{key}` is not defined in CREATE TABLE"),
             });
         }
@@ -341,7 +346,7 @@ fn validate_primary_keys(columns: &[ColumnDef], primary_keys: &[String]) -> Resu
 fn primary_key_constraints(
     schema: &TableSchema,
     primary_keys: &[String],
-) -> Result<Constraints, SqlError> {
+) -> Result<Constraints, PlannerError> {
     if primary_keys.is_empty() {
         return Ok(Constraints::default());
     }
@@ -353,7 +358,7 @@ fn primary_key_constraints(
             .iter()
             .position(|field| field.name == *primary_key)
         else {
-            return Err(SqlError::InvalidRequest {
+            return Err(PlannerError::InvalidPlan {
                 reason: format!(
                     "PRIMARY KEY column `{primary_key}` is not defined in CREATE TABLE"
                 ),
@@ -366,7 +371,7 @@ fn primary_key_constraints(
     )]))
 }
 
-fn bind_table_partitioning(create_table: &CreateTable) -> Result<Vec<String>, SqlError> {
+fn bind_table_partitioning(create_table: &CreateTable) -> Result<Vec<String>, PlannerError> {
     if create_table.partitioned_by.is_empty() {
         return Ok(Vec::new());
     }
@@ -385,7 +390,7 @@ fn bind_table_partitioning(create_table: &CreateTable) -> Result<Vec<String>, Sq
     Ok(partition_columns)
 }
 
-fn bind_table_clustering(create_table: &CreateTable) -> Result<Vec<String>, SqlError> {
+fn bind_table_clustering(create_table: &CreateTable) -> Result<Vec<String>, PlannerError> {
     let Some(cluster_by) = &create_table.cluster_by else {
         return Ok(Vec::new());
     };
@@ -405,11 +410,11 @@ fn bind_table_clustering(create_table: &CreateTable) -> Result<Vec<String>, SqlE
     Ok(cluster_columns)
 }
 
-fn cluster_column_name(expr: &Expr) -> Result<String, SqlError> {
+fn cluster_column_name(expr: &Expr) -> Result<String, PlannerError> {
     match expr {
         Expr::Identifier(ident) => Ok(ident.value.clone()),
         Expr::CompoundIdentifier(parts) if parts.len() == 1 => Ok(parts[0].value.clone()),
-        other => Err(SqlError::InvalidRequest {
+        other => Err(PlannerError::InvalidPlan {
             reason: format!("CLUSTER BY column must be a simple column name, got `{other}`"),
         }),
     }
@@ -420,11 +425,11 @@ fn validate_column_names(
     names: &[String],
     clause_name: &str,
     column_role: &str,
-) -> Result<(), SqlError> {
+) -> Result<(), PlannerError> {
     let mut seen = BTreeSet::new();
     for name in names {
         if !seen.insert(name.clone()) {
-            return Err(SqlError::InvalidRequest {
+            return Err(PlannerError::InvalidPlan {
                 reason: format!("{clause_name} must not contain duplicate column `{name}`"),
             });
         }
@@ -436,7 +441,7 @@ fn validate_column_names(
         .collect::<BTreeSet<_>>();
     for name in names {
         if !column_names.contains(name.as_str()) {
-            return Err(SqlError::InvalidRequest {
+            return Err(PlannerError::InvalidPlan {
                 reason: format!(
                     "{clause_name} {column_role} column `{name}` is not defined in CREATE TABLE"
                 ),
@@ -453,12 +458,12 @@ struct TableDistribution {
     bucket_function: Option<String>,
 }
 
-fn bind_table_distribution(create_table: &CreateTable) -> Result<TableDistribution, SqlError> {
+fn bind_table_distribution(create_table: &CreateTable) -> Result<TableDistribution, PlannerError> {
     let Some(distribution) = &create_table.distributed_by else {
         return Ok(TableDistribution::default());
     };
     if distribution.columns.is_empty() && distribution.function.is_some() {
-        return Err(SqlError::InvalidRequest {
+        return Err(PlannerError::InvalidPlan {
             reason: "bucket function requires at least one bucket key".to_string(),
         });
     }
@@ -477,7 +482,7 @@ fn bind_table_distribution(create_table: &CreateTable) -> Result<TableDistributi
     let bucket_count = distribution
         .buckets
         .map(|bucket_count| {
-            u32::try_from(bucket_count).map_err(|_| SqlError::InvalidRequest {
+            u32::try_from(bucket_count).map_err(|_| PlannerError::InvalidPlan {
                 reason: format!("bucket count `{bucket_count}` is too large"),
             })
         })
@@ -492,7 +497,7 @@ fn bind_table_distribution(create_table: &CreateTable) -> Result<TableDistributi
     })
 }
 
-fn bind_data_type(data_type: &AstDataType) -> Result<DataType, SqlError> {
+fn bind_data_type(data_type: &AstDataType) -> Result<DataType, PlannerError> {
     match data_type {
         AstDataType::Boolean => Ok(DataType::Boolean),
         AstDataType::TinyInt(_) => Ok(DataType::Int8),
@@ -529,7 +534,7 @@ fn bind_data_type(data_type: &AstDataType) -> Result<DataType, SqlError> {
             let (precision, scale) = decimal_precision_scale(info);
             Ok(DataType::Decimal { precision, scale })
         }
-        other => Err(SqlError::UnsupportedStatement {
+        other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported data type `{other}`"),
         }),
     }

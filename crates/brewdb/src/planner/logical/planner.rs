@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::catalog::{CatalogPath, CatalogService, TableCatalogEntry};
 use crate::parser::ast::{ObjectName, ObjectNamePart, Statement as AstStatement, TableObject};
 
-use crate::{SessionContext, SqlError, SqlRequestContext, Statement};
+use crate::{SessionContext, SqlRequestContext, Statement};
 use datafusion_common::{DFSchema, DFSchemaRef};
 use datafusion_expr::registry::MemoryFunctionRegistry;
 use datafusion_expr::{Extension, LogicalPlan as DataFusionLogicalPlan};
@@ -64,7 +64,7 @@ impl LogicalPlanner {
         &self,
         statement: Statement,
         ctx: &LogicalPlanningContext<'_>,
-    ) -> Result<DataFusionLogicalPlan, SqlError> {
+    ) -> Result<DataFusionLogicalPlan, PlannerError> {
         let planning_session = planning_session(ctx)?;
         let ast = statement.clone();
         match &ast {
@@ -140,24 +140,30 @@ impl LogicalPlanner {
             AstStatement::Explain {
                 statement, format, ..
             } => bind_explain_statement(self, statement, *format, ctx),
-            _ => Err(SqlError::UnsupportedStatement {
+            _ => Err(PlannerError::UnsupportedPlan {
                 reason: statement.to_string(),
             }),
         }
     }
 }
 
-fn planning_session(ctx: &LogicalPlanningContext<'_>) -> Result<LogicalPlanningSession, SqlError> {
-    let catalog_name = ctx
-        .session
-        .catalog_name
-        .clone()
-        .ok_or(SqlError::MissingDefaultCatalog)?;
-    let database_name = ctx
-        .session
-        .database_name
-        .clone()
-        .ok_or(SqlError::MissingDefaultDatabase)?;
+fn planning_session(
+    ctx: &LogicalPlanningContext<'_>,
+) -> Result<LogicalPlanningSession, PlannerError> {
+    let catalog_name =
+        ctx.session
+            .catalog_name
+            .clone()
+            .ok_or_else(|| PlannerError::InvalidPlan {
+                reason: "missing default catalog in session context".to_string(),
+            })?;
+    let database_name =
+        ctx.session
+            .database_name
+            .clone()
+            .ok_or_else(|| PlannerError::InvalidPlan {
+                reason: "missing default database in session context".to_string(),
+            })?;
     Ok(LogicalPlanningSession {
         session_id: ctx.session.session_id,
         user_name: ctx.session.user_name.clone(),
@@ -175,13 +181,6 @@ fn default_function_registry() -> MemoryFunctionRegistry {
     registry
 }
 
-pub(crate) fn planner_to_sql_error(error: PlannerError) -> SqlError {
-    match error {
-        PlannerError::InvalidPlan { reason } => SqlError::InvalidRequest { reason },
-        PlannerError::UnsupportedPlan { reason } => SqlError::UnsupportedStatement { reason },
-    }
-}
-
 pub(crate) fn empty_df_schema() -> DFSchemaRef {
     Arc::new(DFSchema::empty())
 }
@@ -195,11 +194,11 @@ pub(crate) fn extension_plan(node: LogicalPlanNode) -> DataFusionLogicalPlan {
 pub(crate) fn qualify_database_name(
     session: &LogicalPlanningSession,
     name: &ObjectName,
-) -> Result<(String, String), SqlError> {
+) -> Result<(String, String), PlannerError> {
     match name_parts(name)?.as_slice() {
         [database] => Ok((session.catalog_name.clone(), database.clone())),
         [catalog, database] => Ok((catalog.clone(), database.clone())),
-        _ => Err(SqlError::InvalidRequest {
+        _ => Err(PlannerError::InvalidPlan {
             reason: format!("invalid database name `{name}`"),
         }),
     }
@@ -208,7 +207,7 @@ pub(crate) fn qualify_database_name(
 pub(crate) fn qualify_table_name(
     session: &LogicalPlanningSession,
     name: &ObjectName,
-) -> Result<(String, String, String), SqlError> {
+) -> Result<(String, String, String), PlannerError> {
     match name_parts(name)?.as_slice() {
         [table] => Ok((
             session.catalog_name.clone(),
@@ -221,7 +220,7 @@ pub(crate) fn qualify_table_name(
             table.clone(),
         )),
         [catalog, database, table] => Ok((catalog.clone(), database.clone(), table.clone())),
-        _ => Err(SqlError::InvalidRequest {
+        _ => Err(PlannerError::InvalidPlan {
             reason: format!("invalid table name `{name}`"),
         }),
     }
@@ -231,7 +230,7 @@ pub(crate) fn resolve_table(
     ctx: &LogicalPlanningContext<'_>,
     session: &LogicalPlanningSession,
     name: &ObjectName,
-) -> Result<TableCatalogEntry, SqlError> {
+) -> Result<TableCatalogEntry, PlannerError> {
     let (catalog_name, database_name, table_name) = qualify_table_name(session, name)?;
     resolve_table_parts(ctx, &catalog_name, &database_name, &table_name)
 }
@@ -240,10 +239,10 @@ pub(crate) fn resolve_table_object(
     ctx: &LogicalPlanningContext<'_>,
     session: &LogicalPlanningSession,
     table: &TableObject,
-) -> Result<TableCatalogEntry, SqlError> {
+) -> Result<TableCatalogEntry, PlannerError> {
     match table {
         TableObject::TableName(name) => resolve_table(ctx, session, name),
-        _ => Err(SqlError::UnsupportedStatement {
+        _ => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported table target `{table}`"),
         }),
     }
@@ -260,7 +259,7 @@ pub(crate) fn resolve_query_tables(
     ctx: &LogicalPlanningContext<'_>,
     session: &LogicalPlanningSession,
     query: &crate::parser::ast::Query,
-) -> Result<Vec<TableCatalogEntry>, SqlError> {
+) -> Result<Vec<TableCatalogEntry>, PlannerError> {
     let mut names = Vec::new();
     collect_query_table_names(query, &mut names)?;
     let mut seen = BTreeSet::new();
@@ -277,9 +276,9 @@ pub(crate) fn resolve_query_tables(
 fn collect_query_table_names(
     query: &crate::parser::ast::Query,
     names: &mut Vec<ObjectName>,
-) -> Result<(), SqlError> {
+) -> Result<(), PlannerError> {
     if query.with.is_some() {
-        return Err(SqlError::UnsupportedStatement {
+        return Err(PlannerError::UnsupportedPlan {
             reason: "WITH queries are not supported yet".to_string(),
         });
     }
@@ -289,7 +288,7 @@ fn collect_query_table_names(
 fn collect_set_expr_table_names(
     set_expr: &crate::parser::ast::SetExpr,
     names: &mut Vec<ObjectName>,
-) -> Result<(), SqlError> {
+) -> Result<(), PlannerError> {
     match set_expr {
         crate::parser::ast::SetExpr::Select(select) => {
             for from in &select.from {
@@ -298,27 +297,191 @@ fn collect_set_expr_table_names(
                     collect_table_factor_names(&join.relation, names)?;
                 }
             }
+            for projection in &select.projection {
+                collect_select_item_table_names(projection, names)?;
+            }
+            if let Some(selection) = &select.selection {
+                collect_expr_table_names(selection, names)?;
+            }
+            match &select.group_by {
+                crate::parser::ast::GroupByExpr::Expressions(expressions, _) => {
+                    for expr in expressions {
+                        collect_expr_table_names(expr, names)?;
+                    }
+                }
+                crate::parser::ast::GroupByExpr::All(_) => {}
+            }
+            if let Some(having) = &select.having {
+                collect_expr_table_names(having, names)?;
+            }
             Ok(())
         }
         crate::parser::ast::SetExpr::Query(query) => collect_query_table_names(query, names),
         crate::parser::ast::SetExpr::Values(_) => Ok(()),
-        other => Err(SqlError::UnsupportedStatement {
+        other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported query body `{other}`"),
         }),
+    }
+}
+
+fn collect_select_item_table_names(
+    item: &crate::parser::ast::SelectItem,
+    names: &mut Vec<ObjectName>,
+) -> Result<(), PlannerError> {
+    match item {
+        crate::parser::ast::SelectItem::UnnamedExpr(expr)
+        | crate::parser::ast::SelectItem::ExprWithAlias { expr, .. }
+        | crate::parser::ast::SelectItem::ExprWithAliases { expr, .. } => {
+            collect_expr_table_names(expr, names)
+        }
+        crate::parser::ast::SelectItem::Wildcard(_)
+        | crate::parser::ast::SelectItem::QualifiedWildcard(_, _) => Ok(()),
+    }
+}
+
+fn collect_expr_table_names(
+    expr: &crate::parser::ast::Expr,
+    names: &mut Vec<ObjectName>,
+) -> Result<(), PlannerError> {
+    use crate::parser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
+
+    match expr {
+        Expr::Nested(expr)
+        | Expr::UnaryOp { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr) => collect_expr_table_names(expr, names),
+        Expr::BinaryOp { left, right, .. } => {
+            collect_expr_table_names(left, names)?;
+            collect_expr_table_names(right, names)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_expr_table_names(expr, names)?;
+            collect_expr_table_names(low, names)?;
+            collect_expr_table_names(high, names)
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_expr_table_names(expr, names)?;
+            for item in list {
+                collect_expr_table_names(item, names)?;
+            }
+            Ok(())
+        }
+        Expr::InSubquery { expr, subquery, .. } => {
+            collect_expr_table_names(expr, names)?;
+            collect_query_table_names(subquery, names)
+        }
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
+            collect_query_table_names(subquery, names)
+        }
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            collect_expr_table_names(expr, names)?;
+            collect_expr_table_names(pattern, names)
+        }
+        Expr::Interval(interval) => collect_expr_table_names(&interval.value, names),
+        Expr::Extract { expr, .. } => collect_expr_table_names(expr, names),
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            collect_expr_table_names(expr, names)?;
+            if let Some(from) = substring_from {
+                collect_expr_table_names(from, names)?;
+            }
+            if let Some(for_expr) = substring_for {
+                collect_expr_table_names(for_expr, names)?;
+            }
+            Ok(())
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            if let Some(operand) = operand {
+                collect_expr_table_names(operand, names)?;
+            }
+            for condition in conditions {
+                collect_expr_table_names(&condition.condition, names)?;
+                collect_expr_table_names(&condition.result, names)?;
+            }
+            if let Some(else_result) = else_result {
+                collect_expr_table_names(else_result, names)?;
+            }
+            Ok(())
+        }
+        Expr::Function(function) => {
+            if let FunctionArguments::List(arguments) = &function.args {
+                for arg in &arguments.args {
+                    match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                        | FunctionArg::Named {
+                            arg: FunctionArgExpr::Expr(expr),
+                            ..
+                        } => collect_expr_table_names(expr, names)?,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(filter) = &function.filter {
+                collect_expr_table_names(filter, names)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
 fn collect_table_factor_names(
     factor: &crate::parser::ast::TableFactor,
     names: &mut Vec<ObjectName>,
-) -> Result<(), SqlError> {
-    let Some(name) = table_factor_object_name(factor) else {
-        return Err(SqlError::UnsupportedStatement {
+) -> Result<(), PlannerError> {
+    match factor {
+        crate::parser::ast::TableFactor::Table { .. } => {
+            let Some(name) = table_factor_object_name(factor) else {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported table factor `{factor}`"),
+                });
+            };
+            names.push(name.clone());
+            Ok(())
+        }
+        crate::parser::ast::TableFactor::Derived {
+            lateral,
+            subquery,
+            sample,
+            ..
+        } => {
+            if *lateral || sample.is_some() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported table factor `{factor}`"),
+                });
+            }
+            collect_query_table_names(subquery, names)
+        }
+        crate::parser::ast::TableFactor::NestedJoin {
+            table_with_joins,
+            alias,
+        } => {
+            if alias.is_some() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported nested join alias `{factor}`"),
+                });
+            }
+            collect_table_factor_names(&table_with_joins.relation, names)?;
+            for join in &table_with_joins.joins {
+                collect_table_factor_names(&join.relation, names)?;
+            }
+            Ok(())
+        }
+        _ => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported table factor `{factor}`"),
-        });
-    };
-    names.push(name.clone());
-    Ok(())
+        }),
+    }
 }
 
 fn resolve_table_parts(
@@ -326,34 +489,34 @@ fn resolve_table_parts(
     catalog_name: &str,
     database_name: &str,
     table_name: &str,
-) -> Result<TableCatalogEntry, SqlError> {
-    let path = CatalogPath::new(catalog_name).map_err(|error| SqlError::InvalidRequest {
+) -> Result<TableCatalogEntry, PlannerError> {
+    let path = CatalogPath::new(catalog_name).map_err(|error| PlannerError::InvalidPlan {
         reason: error.to_string(),
     })?;
     let catalog = ctx
         .catalog_service
         .open_catalog(path.catalog())
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?;
     catalog
         .get_table(database_name, table_name)
-        .map_err(|error| SqlError::InvalidRequest {
+        .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })
 }
 
-pub(crate) fn name_parts(name: &ObjectName) -> Result<Vec<String>, SqlError> {
+pub(crate) fn name_parts(name: &ObjectName) -> Result<Vec<String>, PlannerError> {
     name.0
         .iter()
         .map(object_name_part_value)
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn object_name_part_value(part: &ObjectNamePart) -> Result<String, SqlError> {
+fn object_name_part_value(part: &ObjectNamePart) -> Result<String, PlannerError> {
     match part {
         ObjectNamePart::Identifier(ident) => Ok(ident.value.clone()),
-        ObjectNamePart::Function(_) => Err(SqlError::UnsupportedStatement {
+        ObjectNamePart::Function(_) => Err(PlannerError::UnsupportedPlan {
             reason: "dynamic object names are not supported".to_string(),
         }),
     }
@@ -381,8 +544,8 @@ mod tests {
     use crate::common::defaults::MANAGED_PAIMON_CATALOG_NAME;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::frontend::ingress::SqlRequestContext;
+    use crate::planner::PlannerError;
     use crate::runtime::driver::sql_to_statement;
-    use crate::SqlError;
     use datafusion_expr::TableSource;
     use uuid::Uuid;
 
@@ -465,6 +628,21 @@ mod tests {
                 .with_options([("bucket", "1")]),
             )
             .unwrap();
+        catalog
+            .create_table(
+                CreateTableRequest::new(
+                    "brewdb",
+                    "tpch_exprs",
+                    TableSchema::new(vec![
+                        ColumnField::new("p_type", DataType::String),
+                        ColumnField::new("p_size", DataType::Int32),
+                        ColumnField::new("o_orderdate", DataType::Date),
+                        ColumnField::new("l_shipdate", DataType::Date),
+                    ]),
+                )
+                .with_options([("bucket", "1")]),
+            )
+            .unwrap();
         service
     }
 
@@ -472,7 +650,7 @@ mod tests {
         bind_result(sql).unwrap()
     }
 
-    fn bind_result(sql: &str) -> Result<datafusion_expr::LogicalPlan, SqlError> {
+    fn bind_result(sql: &str) -> Result<datafusion_expr::LogicalPlan, PlannerError> {
         let service = catalog_service();
         let parsed = sql_to_statement(sql).unwrap();
         LogicalPlanner::default().plan(
@@ -490,6 +668,32 @@ mod tests {
                 },
                 catalog_service: &service,
             },
+        )
+    }
+
+    fn plan_has_correlated_exists(plan: &datafusion_expr::LogicalPlan) -> bool {
+        match plan {
+            datafusion_expr::LogicalPlan::Filter(filter) => {
+                expr_is_correlated_exists(&filter.predicate)
+                    || plan_has_correlated_exists(&filter.input)
+            }
+            datafusion_expr::LogicalPlan::Projection(projection) => {
+                plan_has_correlated_exists(&projection.input)
+            }
+            datafusion_expr::LogicalPlan::Aggregate(aggregate) => {
+                plan_has_correlated_exists(&aggregate.input)
+            }
+            datafusion_expr::LogicalPlan::Sort(sort) => plan_has_correlated_exists(&sort.input),
+            datafusion_expr::LogicalPlan::Limit(limit) => plan_has_correlated_exists(&limit.input),
+            _ => false,
+        }
+    }
+
+    fn expr_is_correlated_exists(expr: &datafusion_expr::Expr) -> bool {
+        matches!(
+            expr,
+            datafusion_expr::Expr::Exists(exists)
+                if !exists.subquery.outer_ref_columns.is_empty()
         )
     }
 
@@ -512,6 +716,84 @@ mod tests {
             datafusion_expr::LogicalPlan::Dml(_) => {}
             other => panic!("expected DataFusion logical plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logical_planner_binds_like_expression() {
+        bind("select p_type from tpch_exprs where p_type like '%BRASS'");
+    }
+
+    #[test]
+    fn logical_planner_binds_typed_date_expression() {
+        bind("select o_orderdate from tpch_exprs where o_orderdate >= date '1995-03-15'");
+    }
+
+    #[test]
+    fn logical_planner_binds_date_interval_expression() {
+        bind(
+            "select o_orderdate from tpch_exprs where o_orderdate < date '1995-03-15' + interval '3' month",
+        );
+    }
+
+    #[test]
+    fn logical_planner_binds_case_when_expression() {
+        bind("select case when p_type like 'PROMO%' then 1 else 0 end as promo from tpch_exprs");
+    }
+
+    #[test]
+    fn logical_planner_binds_in_list_expression() {
+        bind("select p_size from tpch_exprs where p_size in (1, 2, 3)");
+    }
+
+    #[test]
+    fn logical_planner_binds_extract_expression() {
+        bind("select extract(year from l_shipdate) from tpch_exprs");
+    }
+
+    #[test]
+    fn logical_planner_binds_substring_expression() {
+        bind("select substring(p_type from 1 for 2) from tpch_exprs");
+    }
+
+    #[test]
+    fn logical_planner_collects_multiple_nested_aggregates() {
+        bind(
+            "select sum(case when p_type like 'PROMO%' then p_size else 0 end) / sum(p_size) from tpch_exprs",
+        );
+    }
+
+    #[test]
+    fn logical_planner_binds_derived_table() {
+        bind("select item_size from (select p_size as item_size from tpch_exprs) as items");
+    }
+
+    #[test]
+    fn logical_planner_binds_derived_table_column_aliases() {
+        bind("select renamed_size from (select p_size from tpch_exprs) as items (renamed_size)");
+    }
+
+    #[test]
+    fn logical_planner_binds_scalar_subquery_expression() {
+        bind("select p_size from tpch_exprs where p_size = (select max(p_size) from tpch_exprs)");
+    }
+
+    #[test]
+    fn logical_planner_binds_in_subquery_expression() {
+        bind("select p_size from tpch_exprs where p_size in (select p_size from tpch_exprs)");
+    }
+
+    #[test]
+    fn logical_planner_binds_exists_subquery_expression() {
+        bind("select p_size from tpch_exprs where exists (select p_size from tpch_exprs)");
+    }
+
+    #[test]
+    fn logical_planner_binds_correlated_exists_subquery_expression() {
+        let planned = bind(
+            "select o.id from orders as o where exists (select * from customers as c where c.id = o.id)",
+        );
+
+        assert!(plan_has_correlated_exists(&planned));
     }
 
     #[test]
@@ -693,7 +975,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid sql request: PARTITIONED BY partition column `dt` is not defined in CREATE TABLE"
+            "invalid planner input: PARTITIONED BY partition column `dt` is not defined in CREATE TABLE"
         );
     }
 
@@ -755,7 +1037,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid sql request: CLUSTER BY cluster column `dt` is not defined in CREATE TABLE"
+            "invalid planner input: CLUSTER BY cluster column `dt` is not defined in CREATE TABLE"
         );
     }
 
@@ -814,7 +1096,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid sql request: CREATE TABLE must define at least one column"
+            "invalid planner input: CREATE TABLE must define at least one column"
         );
     }
 

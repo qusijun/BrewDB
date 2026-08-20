@@ -158,15 +158,20 @@ fn sql_execution_error(context: String, output: &std::process::Output) -> io::Er
 }
 
 pub fn load_queries(config: &BenchmarkRunConfig) -> io::Result<Vec<QueryCase>> {
-    if let Some(query_file) = &config.query_file {
-        return load_queries_from_file(query_file);
-    }
-    let query_dir = config.queries_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(config.workload.name())
-            .join("queries")
-    });
-    load_queries_from_dir(&query_dir)
+    let queries = if let Some(query_file) = &config.query_file {
+        load_queries_from_file(query_file)?
+    } else {
+        let query_dir = config.queries_dir.clone().unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(config.workload.name())
+                .join("queries")
+        });
+        load_queries_from_dir(&query_dir)?
+    };
+    Ok(match config.workload {
+        Workload::Tpch => render_tpch_query_parameters(queries),
+        Workload::ClickBench => queries,
+    })
 }
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
@@ -242,6 +247,55 @@ pub fn load_queries_from_dir(query_dir: &Path) -> io::Result<Vec<QueryCase>> {
             Ok(QueryCase { name, sql })
         })
         .collect()
+}
+
+fn render_tpch_query_parameters(queries: Vec<QueryCase>) -> Vec<QueryCase> {
+    queries
+        .into_iter()
+        .map(|query| {
+            let sql = tpch_query_parameters(&query.name)
+                .map(|parameters| replace_template_parameters(&query.sql, parameters))
+                .unwrap_or(query.sql);
+            QueryCase { sql, ..query }
+        })
+        .collect()
+}
+
+fn replace_template_parameters(sql: &str, parameters: &[&str]) -> String {
+    let mut rendered = sql.to_owned();
+    for index in (1..=parameters.len()).rev() {
+        rendered = rendered.replace(&format!(":{index}"), parameters[index - 1]);
+    }
+    rendered
+}
+
+fn tpch_query_parameters(query_name: &str) -> Option<&'static [&'static str]> {
+    Some(match query_name {
+        "q02" => &["15", "BRASS", "EUROPE"],
+        "q03" => &["BUILDING", "1995-03-15"],
+        "q04" => &["1993-07-01"],
+        "q05" => &["ASIA", "1994-01-01"],
+        "q06" => &["1994-01-01", "0.06", "24"],
+        "q07" => &["FRANCE", "GERMANY"],
+        "q08" => &["BRAZIL", "AMERICA", "ECONOMY ANODIZED STEEL"],
+        "q09" => &["green"],
+        "q10" => &["1993-10-01"],
+        "q11" => &["GERMANY", "0.0001"],
+        "q12" => &["MAIL", "SHIP", "1994-01-01"],
+        "q13" => &["special", "requests"],
+        "q14" => &["1995-09-01"],
+        "q15" => &["1996-01-01"],
+        "q16" => &[
+            "Brand#45", "MEDIUM POLISHED", "49", "14", "23", "45", "19", "3", "36", "9",
+        ],
+        "q17" => &["Brand#23", "MED BOX"],
+        "q18" => &["300"],
+        "q19" => &["Brand#12", "Brand#23", "Brand#34", "1", "10", "20"],
+        "q20" => &["forest", "1994-01-01", "CANADA"],
+        "q21" => &["SAUDI ARABIA"],
+        "q22" => &["13", "31", "23", "29", "30", "18", "17"],
+        _ => return None,
+    })
 }
 
 pub fn render_report(report: &BenchmarkReport) -> String {

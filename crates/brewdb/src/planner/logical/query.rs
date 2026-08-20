@@ -7,8 +7,8 @@ use crate::parser::ast::{
     OrderBy, OrderByKind, Query, Select, SetExpr, Statement as AstStatement, TableAlias,
     TableFactor, TableWithJoins,
 };
-use crate::planner::errors::PlannerError;
-use crate::SqlError;
+use crate::planner::PlannerError;
+use arrow::datatypes::FieldRef;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::Sort as DataFusionSort;
@@ -20,13 +20,14 @@ use datafusion_expr::{
     Operator as DataFusionOperator, TableSource,
 };
 
-use crate::planner::errors::map_df_plan_error;
+use crate::planner::errors::{map_common_error, map_df_plan_error};
 use crate::planner::logical::expr::{
-    bind_expr, bind_group_by, bind_projection, projection_is_passthrough_wildcard, QueryGroupBy,
+    bind_expr_with_subqueries, bind_group_by_with_subqueries, bind_projection_with_subqueries,
+    projection_is_passthrough_wildcard, QueryGroupBy,
 };
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::{
-    planner_to_sql_error, resolve_query_tables, LogicalPlanningContext, LogicalPlanningSession,
+    resolve_query_tables, LogicalPlanningContext, LogicalPlanningSession,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,12 +54,34 @@ struct JoinCondition {
     filter: Option<DataFusionExpr>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct QueryBindScope {
+    local: Vec<VisibleField>,
+    outer: Vec<VisibleField>,
+}
+
+#[derive(Clone, Debug)]
+struct VisibleField {
+    qualifier: Option<String>,
+    name: String,
+    field: FieldRef,
+}
+
 pub(crate) fn plan_query_statement(
     ast: AstStatement,
     tables: Vec<TableCatalogEntry>,
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
-    let query = bind_query_expression(&ast, function_registry)?;
+    plan_query_statement_with_outer(ast, tables, function_registry, Vec::new())
+}
+
+fn plan_query_statement_with_outer(
+    ast: AstStatement,
+    tables: Vec<TableCatalogEntry>,
+    function_registry: &dyn FunctionRegistry,
+    outer_scope: Vec<VisibleField>,
+) -> Result<DataFusionLogicalPlan, PlannerError> {
+    let query = bind_query_expression(&ast, &tables, function_registry, outer_scope)?;
     build_query_input(&ast, &tables, &query, function_registry)
 }
 
@@ -68,24 +91,25 @@ pub(crate) fn bind_query_statement(
     ctx: &LogicalPlanningContext<'_>,
     query: &Query,
     function_registry: &dyn FunctionRegistry,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let tables = resolve_query_tables(ctx, session, query)?;
-    let plan = plan_query_statement(ast, tables.clone(), function_registry)
-        .map_err(planner_to_sql_error)?;
+    let plan = plan_query_statement(ast, tables.clone(), function_registry)?;
     let _ = tables;
     Ok(plan)
 }
 
 fn bind_query_expression(
     statement: &AstStatement,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
+    outer_scope: Vec<VisibleField>,
 ) -> Result<QueryExpression, PlannerError> {
     let AstStatement::Query(query) = statement else {
         return Err(PlannerError::InvalidPlan {
             reason: format!("expected query statement, got `{statement}`"),
         });
     };
-    bind_select_query(query, function_registry)
+    bind_select_query(query, tables, function_registry, outer_scope)
 }
 
 fn build_query_input(
@@ -225,9 +249,17 @@ fn collect_aggregate_exprs(expr: &DataFusionExpr, aggregates: &mut Vec<DataFusio
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 
     let _ = expr.apply(|node| {
+        if matches!(
+            node,
+            DataFusionExpr::ScalarSubquery(_)
+                | DataFusionExpr::InSubquery(_)
+                | DataFusionExpr::Exists(_)
+        ) {
+            return Ok(TreeNodeRecursion::Jump);
+        }
         if matches!(node, DataFusionExpr::AggregateFunction(_)) && !aggregates.contains(node) {
             aggregates.push(node.clone());
-            return Ok(TreeNodeRecursion::Stop);
+            return Ok(TreeNodeRecursion::Jump);
         }
         Ok(TreeNodeRecursion::Continue)
     });
@@ -238,6 +270,14 @@ fn expr_contains_aggregate(expr: &DataFusionExpr) -> bool {
 
     let mut found = false;
     let _ = expr.apply(|node| {
+        if matches!(
+            node,
+            DataFusionExpr::ScalarSubquery(_)
+                | DataFusionExpr::InSubquery(_)
+                | DataFusionExpr::Exists(_)
+        ) {
+            return Ok(TreeNodeRecursion::Jump);
+        }
         if matches!(node, DataFusionExpr::AggregateFunction(_)) {
             found = true;
             return Ok(TreeNodeRecursion::Stop);
@@ -268,10 +308,24 @@ fn rebase_expr(
     base_exprs: &[DataFusionExpr],
     plan: &DataFusionLogicalPlan,
 ) -> Result<DataFusionExpr, PlannerError> {
+    use datafusion_common::tree_node::TreeNodeRecursion;
+
     expr.clone()
         .transform_down(|nested_expr| {
-            if base_exprs.contains(&nested_expr) {
-                expr_as_column_expr(&nested_expr, plan).map(Transformed::yes)
+            if matches!(
+                nested_expr,
+                DataFusionExpr::ScalarSubquery(_)
+                    | DataFusionExpr::InSubquery(_)
+                    | DataFusionExpr::Exists(_)
+            ) {
+                return Ok(Transformed::new(
+                    nested_expr,
+                    false,
+                    TreeNodeRecursion::Jump,
+                ));
+            }
+            if let Some(base_expr) = matching_base_expr(&nested_expr, base_exprs) {
+                expr_as_column_expr(base_expr, plan).map(Transformed::yes)
             } else {
                 Ok(Transformed::no(nested_expr))
             }
@@ -280,12 +334,50 @@ fn rebase_expr(
         .map_err(map_df_plan_error)
 }
 
+fn matching_base_expr<'a>(
+    expr: &DataFusionExpr,
+    base_exprs: &'a [DataFusionExpr],
+) -> Option<&'a DataFusionExpr> {
+    base_exprs
+        .iter()
+        .find(|base_expr| *base_expr == expr)
+        .or_else(|| {
+            base_exprs.iter().find(|base_expr| {
+                matches!(base_expr, DataFusionExpr::AggregateFunction(_))
+                    && matches!(expr, DataFusionExpr::AggregateFunction(_))
+                    && normalize_expr_name(&base_expr.schema_name().to_string())
+                        == normalize_expr_name(&expr.schema_name().to_string())
+            })
+        })
+}
+
+fn normalize_expr_name(name: &str) -> String {
+    let mut normalized = String::new();
+    let mut token_start = 0;
+    for ch in name.chars() {
+        if ch == '.' {
+            normalized.truncate(token_start);
+            token_start = normalized.len();
+            continue;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            token_start = normalized.len() + ch.len_utf8();
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
 fn bind_select_query(
     query: &Query,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
+    outer_scope: Vec<VisibleField>,
 ) -> Result<QueryExpression, PlannerError> {
     match query.body.as_ref() {
-        SetExpr::Select(select) => bind_select(query, select, function_registry),
+        SetExpr::Select(select) => {
+            bind_select(query, select, tables, function_registry, outer_scope)
+        }
         other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported query body `{other}`"),
         }),
@@ -295,7 +387,9 @@ fn bind_select_query(
 fn bind_select(
     query: &Query,
     select: &Select,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
+    outer_scope: Vec<VisibleField>,
 ) -> Result<QueryExpression, PlannerError> {
     if select.prewhere.is_some()
         || !select.lateral_views.is_empty()
@@ -310,37 +404,255 @@ fn bind_select(
             reason: format!("unsupported select shape `{select}`"),
         });
     }
-    let projection = bind_projection(&select.projection, function_registry)?;
-    let aliases = extract_aliases(&projection);
-    let group_by = match bind_group_by(&select.group_by, function_registry)? {
-        QueryGroupBy::Expressions(expressions) => QueryGroupBy::Expressions(
-            expressions
-                .into_iter()
-                .map(|expr| resolve_aliases_to_exprs(expr, &aliases))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        group_by => group_by,
+    let scope = QueryBindScope {
+        local: visible_fields_for_select(select, tables)?,
+        outer: outer_scope,
     };
+    let projection =
+        bind_projection_for_query(&select.projection, tables, function_registry, &scope)?;
+    let aliases = extract_aliases(&projection);
+    let group_by =
+        match bind_group_by_for_query(&select.group_by, tables, function_registry, &scope)? {
+            QueryGroupBy::Expressions(expressions) => QueryGroupBy::Expressions(
+                expressions
+                    .into_iter()
+                    .map(|expr| resolve_aliases_to_exprs(expr, &aliases))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            group_by => group_by,
+        };
     let having = select
         .having
         .as_ref()
-        .map(|expr| bind_expr(expr, function_registry))
+        .map(|expr| bind_expr_for_query(expr, tables, function_registry, &scope))
         .transpose()?
         .map(|expr| resolve_aliases_to_exprs(expr, &aliases))
         .transpose()?;
     Ok(QueryExpression {
         distinct: bind_distinct(&select.distinct)?,
-        order_by: bind_order_by(query.order_by.as_ref(), function_registry)?,
-        limit: bind_limit(query.limit_clause.as_ref(), function_registry)?,
+        order_by: bind_order_by(query.order_by.as_ref(), tables, function_registry, &scope)?,
+        limit: bind_limit(
+            query.limit_clause.as_ref(),
+            tables,
+            function_registry,
+            &scope,
+        )?,
         projection,
         selection: select
             .selection
             .as_ref()
-            .map(|expr| bind_expr(expr, function_registry))
+            .map(|expr| bind_expr_for_query(expr, tables, function_registry, &scope))
             .transpose()?,
         group_by,
         having,
     })
+}
+
+fn bind_expr_for_query(
+    expr: &crate::parser::ast::Expr,
+    tables: &[TableCatalogEntry],
+    function_registry: &dyn FunctionRegistry,
+    scope: &QueryBindScope,
+) -> Result<DataFusionExpr, PlannerError> {
+    let child_outer_scope = scope.child_outer_scope();
+    let mut subquery_planner = |subquery: &Query| {
+        plan_query_statement_with_outer(
+            AstStatement::Query(Box::new(subquery.clone())),
+            tables.to_vec(),
+            function_registry,
+            child_outer_scope.clone(),
+        )
+    };
+    let expr = bind_expr_with_subqueries(expr, function_registry, &mut subquery_planner)?;
+    rewrite_outer_references(expr, scope)
+}
+
+fn bind_projection_for_query(
+    projection: &[crate::parser::ast::SelectItem],
+    tables: &[TableCatalogEntry],
+    function_registry: &dyn FunctionRegistry,
+    scope: &QueryBindScope,
+) -> Result<Vec<DataFusionExpr>, PlannerError> {
+    let child_outer_scope = scope.child_outer_scope();
+    let mut subquery_planner = |subquery: &Query| {
+        plan_query_statement_with_outer(
+            AstStatement::Query(Box::new(subquery.clone())),
+            tables.to_vec(),
+            function_registry,
+            child_outer_scope.clone(),
+        )
+    };
+    bind_projection_with_subqueries(projection, function_registry, &mut subquery_planner)?
+        .into_iter()
+        .map(|expr| rewrite_outer_references(expr, scope))
+        .collect()
+}
+
+fn bind_group_by_for_query(
+    group_by: &crate::parser::ast::GroupByExpr,
+    tables: &[TableCatalogEntry],
+    function_registry: &dyn FunctionRegistry,
+    scope: &QueryBindScope,
+) -> Result<QueryGroupBy, PlannerError> {
+    let child_outer_scope = scope.child_outer_scope();
+    let mut subquery_planner = |subquery: &Query| {
+        plan_query_statement_with_outer(
+            AstStatement::Query(Box::new(subquery.clone())),
+            tables.to_vec(),
+            function_registry,
+            child_outer_scope.clone(),
+        )
+    };
+    match bind_group_by_with_subqueries(group_by, function_registry, &mut subquery_planner)? {
+        QueryGroupBy::Expressions(expressions) => Ok(QueryGroupBy::Expressions(
+            expressions
+                .into_iter()
+                .map(|expr| rewrite_outer_references(expr, scope))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        group_by => Ok(group_by),
+    }
+}
+
+impl QueryBindScope {
+    fn child_outer_scope(&self) -> Vec<VisibleField> {
+        self.local
+            .iter()
+            .cloned()
+            .chain(self.outer.iter().cloned())
+            .collect()
+    }
+}
+
+fn rewrite_outer_references(
+    expr: DataFusionExpr,
+    scope: &QueryBindScope,
+) -> Result<DataFusionExpr, PlannerError> {
+    expr.transform_up(|nested_expr| match nested_expr {
+        DataFusionExpr::Column(column) => {
+            if scope.matches_local(&column) {
+                return Ok(Transformed::no(DataFusionExpr::Column(column)));
+            }
+            if let Some(field) = scope.resolve_outer(&column) {
+                return Ok(Transformed::yes(DataFusionExpr::OuterReferenceColumn(
+                    field.field.clone(),
+                    Column::new(column.relation.clone(), column.name.clone()),
+                )));
+            }
+            Ok(Transformed::no(DataFusionExpr::Column(column)))
+        }
+        other => Ok(Transformed::no(other)),
+    })
+    .data()
+    .map_err(map_df_plan_error)
+}
+
+impl QueryBindScope {
+    fn matches_local(&self, column: &Column) -> bool {
+        self.local.iter().any(|field| field.matches(column))
+    }
+
+    fn resolve_outer(&self, column: &Column) -> Option<&VisibleField> {
+        let mut matches = self.outer.iter().filter(|field| field.matches(column));
+        let field = matches.next()?;
+        matches.next().is_none().then_some(field)
+    }
+}
+
+impl VisibleField {
+    fn matches(&self, column: &Column) -> bool {
+        if self.name != column.name {
+            return false;
+        }
+        let Some(relation) = &column.relation else {
+            return true;
+        };
+        self.qualifier.as_deref().is_some_and(|qualifier| {
+            qualifier == relation.table() || qualifier == relation.to_string()
+        })
+    }
+}
+
+fn visible_fields_for_select(
+    select: &Select,
+    tables: &[TableCatalogEntry],
+) -> Result<Vec<VisibleField>, PlannerError> {
+    let mut fields = Vec::new();
+    for from in &select.from {
+        collect_visible_fields_for_table_with_joins(from, tables, &mut fields)?;
+    }
+    Ok(fields)
+}
+
+fn collect_visible_fields_for_table_with_joins(
+    from: &TableWithJoins,
+    tables: &[TableCatalogEntry],
+    fields: &mut Vec<VisibleField>,
+) -> Result<(), PlannerError> {
+    collect_visible_fields_for_table_factor(&from.relation, tables, fields)?;
+    for join in &from.joins {
+        collect_visible_fields_for_table_factor(&join.relation, tables, fields)?;
+    }
+    Ok(())
+}
+
+fn collect_visible_fields_for_table_factor(
+    factor: &TableFactor,
+    tables: &[TableCatalogEntry],
+    fields: &mut Vec<VisibleField>,
+) -> Result<(), PlannerError> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => {
+            let table = resolve_table_entry(name, tables)?;
+            let qualifier = alias_name(alias).unwrap_or_else(|| name.to_string());
+            append_table_visible_fields(&table, Some(qualifier), fields)
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => collect_visible_fields_for_table_with_joins(table_with_joins, tables, fields),
+        TableFactor::Derived { alias, .. } => {
+            if let Some(alias) = alias {
+                for column in &alias.columns {
+                    fields.push(VisibleField {
+                        qualifier: Some(alias.name.value.clone()),
+                        name: column.name.value.clone(),
+                        field: Arc::new(arrow::datatypes::Field::new(
+                            column.name.value.clone(),
+                            arrow::datatypes::DataType::Null,
+                            true,
+                        )),
+                    });
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn append_table_visible_fields(
+    table: &TableCatalogEntry,
+    qualifier: Option<String>,
+    fields: &mut Vec<VisibleField>,
+) -> Result<(), PlannerError> {
+    for field in &table.table_schema.fields {
+        fields.push(VisibleField {
+            qualifier: qualifier.clone(),
+            name: field.name.clone(),
+            field: Arc::new(field.to_arrow_field().map_err(map_common_error)?),
+        });
+    }
+    Ok(())
+}
+
+fn visible_fields_for_tables(
+    tables: &[TableCatalogEntry],
+) -> Result<Vec<VisibleField>, PlannerError> {
+    let mut fields = Vec::new();
+    for table in tables {
+        append_table_visible_fields(table, Some(table.path.table().to_owned()), &mut fields)?;
+    }
+    Ok(fields)
 }
 
 fn bind_distinct(distinct: &Option<AstDistinct>) -> Result<bool, PlannerError> {
@@ -355,7 +667,9 @@ fn bind_distinct(distinct: &Option<AstDistinct>) -> Result<bool, PlannerError> {
 
 fn bind_order_by(
     order_by: Option<&OrderBy>,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
+    scope: &QueryBindScope,
 ) -> Result<Vec<DataFusionSort>, PlannerError> {
     let Some(order_by) = order_by else {
         return Ok(Vec::new());
@@ -379,7 +693,7 @@ fn bind_order_by(
                 });
             }
             Ok(DataFusionSort::new(
-                bind_expr(&expr.expr, function_registry)?,
+                bind_expr_for_query(&expr.expr, tables, function_registry, scope)?,
                 expr.options.asc.unwrap_or(true),
                 expr.options.nulls_first.unwrap_or(false),
             ))
@@ -389,7 +703,9 @@ fn bind_order_by(
 
 fn bind_limit(
     limit_clause: Option<&LimitClause>,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
+    scope: &QueryBindScope,
 ) -> Result<Option<QueryLimit>, PlannerError> {
     let Some(limit_clause) = limit_clause else {
         return Ok(None);
@@ -408,17 +724,29 @@ fn bind_limit(
             QueryLimit {
                 skip: offset
                     .as_ref()
-                    .map(|offset| bind_expr(&offset.value, function_registry))
+                    .map(|offset| {
+                        bind_expr_for_query(&offset.value, tables, function_registry, scope)
+                    })
                     .transpose()?,
                 fetch: limit
                     .as_ref()
-                    .map(|limit| bind_expr(limit, function_registry))
+                    .map(|limit| bind_expr_for_query(limit, tables, function_registry, scope))
                     .transpose()?,
             }
         }
         LimitClause::OffsetCommaLimit { offset, limit } => QueryLimit {
-            skip: Some(bind_expr(offset, function_registry)?),
-            fetch: Some(bind_expr(limit, function_registry)?),
+            skip: Some(bind_expr_for_query(
+                offset,
+                tables,
+                function_registry,
+                scope,
+            )?),
+            fetch: Some(bind_expr_for_query(
+                limit,
+                tables,
+                function_registry,
+                scope,
+            )?),
         },
     };
     Ok(Some(limit))
@@ -531,7 +859,7 @@ fn build_table_with_joins(
     tables: &[crate::catalog::TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
-    let mut input = build_table_factor(&from.relation, tables)?;
+    let mut input = build_table_factor(&from.relation, tables, function_registry)?;
     for join in &from.joins {
         input = build_join(input, join, tables, function_registry)?;
     }
@@ -544,7 +872,7 @@ fn build_join(
     tables: &[crate::catalog::TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
-    let right = build_table_factor(&join.relation, tables)?;
+    let right = build_table_factor(&join.relation, tables, function_registry)?;
     if matches!(join.join_operator, AstJoinOperator::CrossJoin(_)) {
         return LogicalPlanBuilder::from(left)
             .cross_join(right)
@@ -552,7 +880,8 @@ fn build_join(
             .build()
             .map_err(map_df_plan_error);
     }
-    let (join_type, condition) = bind_join_operator(&join.join_operator, function_registry)?;
+    let (join_type, condition) =
+        bind_join_operator(&join.join_operator, tables, function_registry)?;
     let condition = condition.unwrap_or(JoinCondition {
         left_keys: Vec::new(),
         right_keys: Vec::new(),
@@ -572,24 +901,25 @@ fn build_join(
 
 fn bind_join_operator(
     join_operator: &AstJoinOperator,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
 ) -> Result<(DataFusionJoinType, Option<JoinCondition>), PlannerError> {
     match join_operator {
         AstJoinOperator::Join(constraint) | AstJoinOperator::Inner(constraint) => Ok((
             DataFusionJoinType::Inner,
-            bind_join_constraint(constraint, function_registry)?,
+            bind_join_constraint(constraint, tables, function_registry)?,
         )),
         AstJoinOperator::Left(constraint) | AstJoinOperator::LeftOuter(constraint) => Ok((
             DataFusionJoinType::Left,
-            bind_join_constraint(constraint, function_registry)?,
+            bind_join_constraint(constraint, tables, function_registry)?,
         )),
         AstJoinOperator::Right(constraint) | AstJoinOperator::RightOuter(constraint) => Ok((
             DataFusionJoinType::Right,
-            bind_join_constraint(constraint, function_registry)?,
+            bind_join_constraint(constraint, tables, function_registry)?,
         )),
         AstJoinOperator::FullOuter(constraint) => Ok((
             DataFusionJoinType::Full,
-            bind_join_constraint(constraint, function_registry)?,
+            bind_join_constraint(constraint, tables, function_registry)?,
         )),
         AstJoinOperator::CrossJoin(_) => unreachable!("cross join handled before join binding"),
         other => Err(PlannerError::UnsupportedPlan {
@@ -600,11 +930,20 @@ fn bind_join_operator(
 
 fn bind_join_constraint(
     constraint: &JoinConstraint,
+    tables: &[TableCatalogEntry],
     function_registry: &dyn FunctionRegistry,
 ) -> Result<Option<JoinCondition>, PlannerError> {
     match constraint {
         JoinConstraint::On(expr) => {
-            let condition = bind_expr(expr, function_registry)?;
+            let condition = bind_expr_for_query(
+                expr,
+                tables,
+                function_registry,
+                &QueryBindScope {
+                    local: visible_fields_for_tables(tables)?,
+                    outer: Vec::new(),
+                },
+            )?;
             let structured = extract_join_condition(condition);
             Ok(
                 (!structured.left_keys.is_empty() || structured.filter.is_some())
@@ -680,6 +1019,7 @@ fn combine_conjuncts(filters: Vec<DataFusionExpr>) -> Option<DataFusionExpr> {
 fn build_table_factor(
     factor: &TableFactor,
     tables: &[crate::catalog::TableCatalogEntry],
+    function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
     match factor {
         TableFactor::Table {
@@ -715,10 +1055,89 @@ fn build_table_factor(
                 .build()
                 .map_err(map_df_plan_error)
         }
+        TableFactor::Derived {
+            lateral,
+            subquery,
+            alias,
+            sample,
+        } => {
+            if *lateral || sample.is_some() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported table factor `{factor}`"),
+                });
+            }
+            let mut input = plan_query_statement(
+                AstStatement::Query(Box::new(subquery.as_ref().clone())),
+                tables.to_vec(),
+                function_registry,
+            )?;
+            if let Some(alias) = alias {
+                input = apply_derived_column_aliases(input, alias)?;
+                input = LogicalPlanBuilder::from(input)
+                    .alias(alias.name.value.clone())
+                    .map_err(map_df_plan_error)?
+                    .build()
+                    .map_err(map_df_plan_error)?;
+            }
+            Ok(input)
+        }
+        TableFactor::NestedJoin {
+            table_with_joins,
+            alias,
+        } => {
+            if alias.is_some() {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported nested join alias `{factor}`"),
+                });
+            }
+            build_table_with_joins(table_with_joins, tables, function_registry)
+        }
         other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported table factor `{other}`"),
         }),
     }
+}
+
+fn apply_derived_column_aliases(
+    input: DataFusionLogicalPlan,
+    alias: &TableAlias,
+) -> Result<DataFusionLogicalPlan, PlannerError> {
+    if alias.columns.is_empty() {
+        return Ok(input);
+    }
+    if let Some(column) = alias
+        .columns
+        .iter()
+        .find(|column| column.data_type.is_some())
+    {
+        return Err(PlannerError::UnsupportedPlan {
+            reason: format!("typed derived table column alias `{column}` is not supported yet"),
+        });
+    }
+    let fields = input.schema().iter().collect::<Vec<_>>();
+    if alias.columns.len() != fields.len() {
+        return Err(PlannerError::InvalidPlan {
+            reason: format!(
+                "derived table alias `{}` defines {} columns but subquery returns {} columns",
+                alias.name,
+                alias.columns.len(),
+                fields.len()
+            ),
+        });
+    }
+    let projection = fields
+        .iter()
+        .zip(alias.columns.iter())
+        .map(|((qualifier, field), alias_column)| {
+            DataFusionExpr::Column(Column::new(qualifier.cloned(), field.name()))
+                .alias(alias_column.name.value.clone())
+        })
+        .collect::<Vec<_>>();
+    LogicalPlanBuilder::from(input)
+        .project(projection)
+        .map_err(map_df_plan_error)?
+        .build()
+        .map_err(map_df_plan_error)
 }
 
 fn resolve_table_entry(

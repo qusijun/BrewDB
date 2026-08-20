@@ -291,10 +291,10 @@ SELECT
 
     #[test]
     fn sqllogictest_error_regex_matches_client_error_code() {
-        let error = ClientError("brewdb failed: BREWDB_SQL_SCHEMA_MISMATCH: bad".to_owned());
+        let error = ClientError("brewdb failed: BREWDB_PLANNER_SCHEMA_ERROR: bad".to_owned());
         let record = sqllogictest::parse::<sqllogictest::DefaultColumnType>(
             r#"
-statement error BREWDB_SQL_SCHEMA_MISMATCH:
+statement error BREWDB_PLANNER_SCHEMA_ERROR:
 select bad;
 "#,
         )

@@ -1,5 +1,5 @@
 use crate::parser::ast::{Expr, ObjectName, Set, Use, Value, ValueWithSpan};
-use crate::SqlError;
+use crate::planner::PlannerError;
 use datafusion_expr::{
     LogicalPlan as DataFusionLogicalPlan, SetVariable, Statement as DataFusionStatement,
 };
@@ -11,7 +11,7 @@ use crate::planner::logical::{
 pub(crate) fn bind_set_statement(
     set: &Set,
     _session: LogicalPlanningSession,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     match set {
         Set::SingleAssignment {
             scope,
@@ -23,7 +23,7 @@ pub(crate) fn bind_set_statement(
                 values
                     .first()
                     .map(expr_to_string)
-                    .ok_or_else(|| SqlError::InvalidRequest {
+                    .ok_or_else(|| PlannerError::InvalidPlan {
                         reason: "SET statement must carry at least one value".to_string(),
                     })?;
             let _ = scope;
@@ -43,7 +43,7 @@ pub(crate) fn bind_set_statement(
                 }),
             ))
         }
-        _ => Err(SqlError::UnsupportedStatement {
+        _ => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported SET statement `{set}`"),
         }),
     }
@@ -52,14 +52,14 @@ pub(crate) fn bind_set_statement(
 pub(crate) fn bind_use_statement(
     session: LogicalPlanningSession,
     use_stmt: &Use,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let database_name = match use_stmt {
         Use::Object(name) | Use::Database(name) | Use::Schema(name) => {
             qualify_database_from_use(&session, name)?
         }
         Use::Default => session.database_name,
         _ => {
-            return Err(SqlError::UnsupportedStatement {
+            return Err(PlannerError::UnsupportedPlan {
                 reason: format!("unsupported USE statement `{use_stmt}`"),
             });
         }
@@ -76,7 +76,7 @@ pub(crate) fn bind_use_statement(
 fn qualify_database_from_use(
     session: &LogicalPlanningSession,
     name: &ObjectName,
-) -> Result<String, SqlError> {
+) -> Result<String, PlannerError> {
     let (_, database_name) = qualify_database_name(session, name)?;
     Ok(database_name)
 }

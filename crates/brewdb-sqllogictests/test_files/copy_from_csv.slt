@@ -34,5 +34,5 @@ select id, amount from inferred_copy_orders order by id;
 statement ok
 create table mismatch_copy_orders (id int);
 
-statement error BREWDB_SQL_SCHEMA_MISMATCH:
+statement error BREWDB_PLANNER_SCHEMA_ERROR:
 copy from '$TEST_DATA_DIR/copy_orders_no_header.csv' to mismatch_copy_orders;

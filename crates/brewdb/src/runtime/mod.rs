@@ -3,6 +3,7 @@
 pub mod coordinator;
 pub mod datafusion_context;
 pub mod driver;
+pub mod errors;
 pub mod exchange;
 pub mod exchange_service;
 pub mod execution_graph;
@@ -14,19 +15,21 @@ pub mod transport;
 pub use crate::execution::{FragmentExecutionEnvelope, FragmentService};
 pub use crate::planner::LocalFragmentPlan;
 pub use coordinator::QueryCoordinator;
-pub use driver::{SqlDriver, SqlDriverError};
+pub use driver::SqlDriver;
+pub use errors::{
+    ExchangeRuntimeError, ExecutionRuntimeError, FragmentSchedulerError, SqlDriverError,
+};
 pub use exchange::{
     build_exchange_channels, ExchangeBufferManager, ExchangeChannelDescriptor,
-    ExchangeDataEncoding, ExchangeDataPage, ExchangeId, ExchangeRuntimeError,
+    ExchangeDataEncoding, ExchangeDataPage, ExchangeId,
 };
 pub use exchange_service::{ExchangePageSink, ResultBatchSink, TransportExchangePageSink};
 pub use execution_graph::{
-    ExecutionFragment, ExecutionGraph, ExecutionRuntimeError, FragmentInstance,
-    QueryExecutionHandle, QueryOutput,
+    ExecutionFragment, ExecutionGraph, FragmentInstance, QueryExecutionHandle, QueryOutput,
 };
 pub use scheduler::{
-    AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, FragmentSchedulerError,
-    ResourceManager, StaticResourceManager, WorkerInfo, WorkerSelector,
+    AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, ResourceManager,
+    StaticResourceManager, WorkerInfo, WorkerSelector,
 };
 pub use storage::build_storage_engine;
 pub use transport::{

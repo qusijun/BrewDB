@@ -1,8 +1,7 @@
 //! SQL-to-runtime driver.
 
-use crate::catalog::{CatalogError, CatalogService};
+use crate::catalog::CatalogService;
 use crate::common::context::QueryContext;
-use crate::common::diagnostics::{DiagnosticError, ErrorCode};
 use crate::frontend::ingress::IngressSql;
 use crate::parser::ast::Statement;
 use crate::parser::dialect::PostgreSqlDialect;
@@ -11,93 +10,26 @@ use crate::planner::{
     DistributedFragmentPlanner, FragmentPlanner, LogicalOptimizer, LogicalPlanner,
     LogicalPlanningContext, PlannerError, StandaloneFragmentPlanner,
 };
-use crate::SqlError;
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::runtime::coordinator::QueryCoordinator;
-use crate::runtime::execution_graph::{ExecutionRuntimeError, QueryExecutionHandle};
+use crate::runtime::errors::SqlDriverError;
+use crate::runtime::execution_graph::QueryExecutionHandle;
 
-pub(crate) fn sql_to_statement(sql: &str) -> Result<Statement, SqlError> {
+pub(crate) fn sql_to_statement(sql: &str) -> Result<Statement, SqlDriverError> {
     let dialect = PostgreSqlDialect {};
-    let mut statements = Parser::parse_sql(&dialect, sql)?;
+    let mut statements = Parser::parse_sql(&dialect, sql).map_err(SqlDriverError::Parser)?;
     if statements.is_empty() {
-        return Err(SqlError::Parse {
+        return Err(SqlDriverError::InvalidRequest {
             reason: "parser returned no statement".to_string(),
         });
     }
     if statements.len() > 1 {
-        return Err(SqlError::UnsupportedStatement {
+        return Err(SqlDriverError::UnsupportedStatement {
             reason: "multi-statement SQL is not supported yet".to_string(),
         });
     }
     Ok(statements.remove(0))
-}
-
-#[derive(Debug)]
-pub enum SqlDriverError {
-    Catalog(CatalogError),
-    Sql(SqlError),
-    Planner(PlannerError),
-    Runtime(ExecutionRuntimeError),
-    UnsupportedStatement,
-}
-
-impl fmt::Display for SqlDriverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Catalog(err) => write!(f, "{err}"),
-            Self::Sql(err) => write!(f, "{err}"),
-            Self::Planner(err) => write!(f, "{err}"),
-            Self::Runtime(err) => write!(f, "{err}"),
-            Self::UnsupportedStatement => {
-                write!(f, "statement is not supported by the SQL query driver")
-            }
-        }
-    }
-}
-
-impl Error for SqlDriverError {}
-
-impl DiagnosticError for SqlDriverError {
-    fn error_code(&self) -> ErrorCode {
-        match self {
-            Self::Catalog(error) => error.error_code(),
-            Self::Sql(error) => error.error_code(),
-            Self::Planner(error) => error.error_code(),
-            Self::Runtime(_) => ErrorCode::INTERNAL,
-            Self::UnsupportedStatement => ErrorCode::NOT_IMPLEMENTED,
-        }
-    }
-
-    fn log_target(&self) -> &'static str {
-        "brewdb.runtime"
-    }
-}
-
-impl From<CatalogError> for SqlDriverError {
-    fn from(value: CatalogError) -> Self {
-        Self::Catalog(value)
-    }
-}
-
-impl From<SqlError> for SqlDriverError {
-    fn from(value: SqlError) -> Self {
-        Self::Sql(value)
-    }
-}
-
-impl From<PlannerError> for SqlDriverError {
-    fn from(value: PlannerError) -> Self {
-        Self::Planner(value)
-    }
-}
-
-impl From<ExecutionRuntimeError> for SqlDriverError {
-    fn from(value: ExecutionRuntimeError) -> Self {
-        Self::Runtime(value)
-    }
 }
 
 pub struct SqlDriver {
@@ -696,7 +628,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(matches!(error, super::SqlDriverError::Sql(_)));
+        assert!(matches!(error, super::SqlDriverError::Planner(_)));
     }
 
     #[test]

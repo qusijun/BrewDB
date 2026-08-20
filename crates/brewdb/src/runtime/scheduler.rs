@@ -1,12 +1,11 @@
 //! Fragment scheduling contracts.
 
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::planner::distributed::{FragmentScanSplits, PlanFragment, PlanFragmentKind};
 use uuid::Uuid;
 
+use crate::runtime::errors::FragmentSchedulerError;
 use crate::runtime::execution_graph::{ExecutionGraph, FragmentInstance};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,23 +13,6 @@ pub struct WorkerInfo {
     pub worker_id: Uuid,
     pub endpoint: String,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FragmentSchedulerError {
-    EmptyPlan,
-    NoAvailableWorker,
-}
-
-impl fmt::Display for FragmentSchedulerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyPlan => write!(f, "distributed plan has no fragments"),
-            Self::NoAvailableWorker => write!(f, "no available workers"),
-        }
-    }
-}
-
-impl Error for FragmentSchedulerError {}
 
 pub trait ResourceManager: Send + Sync {
     fn workers(&self) -> Vec<WorkerInfo>;
