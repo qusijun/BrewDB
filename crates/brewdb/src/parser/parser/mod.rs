@@ -42,10 +42,16 @@ use crate::ast::{
         stmt_create_table::{CreateTableBuilder, CreateTableConfiguration},
     },
 };
+use crate::common::diagnostics::{DiagnosticError, ErrorCode};
 use crate::dialect::*;
 use crate::keywords::{Keyword, ALL_KEYWORDS};
 use crate::tokenizer::*;
 use ParserState::ColumnDefinition;
+
+const PARSER_TOKENIZER_ERROR: ErrorCode = ErrorCode::new("BREWDB_PARSER_TOKENIZER_ERROR");
+const PARSER_PARSE_ERROR: ErrorCode = ErrorCode::new("BREWDB_PARSER_PARSE_ERROR");
+const PARSER_RECURSION_LIMIT_EXCEEDED: ErrorCode =
+    ErrorCode::new("BREWDB_PARSER_RECURSION_LIMIT_EXCEEDED");
 
 /// Errors produced by the SQL parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +210,54 @@ impl fmt::Display for ParserError {
 }
 
 impl core::error::Error for ParserError {}
+
+impl DiagnosticError for ParserError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::TokenizerError(_) => PARSER_TOKENIZER_ERROR,
+            Self::ParserError(_) => PARSER_PARSE_ERROR,
+            Self::RecursionLimitExceeded => PARSER_RECURSION_LIMIT_EXCEEDED,
+        }
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.parser"
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use crate::common::diagnostics::DiagnosticError;
+
+    use super::ParserError;
+
+    #[test]
+    fn parser_error_uses_parser_diagnostic_code() {
+        let error = ParserError::ParserError("expected expression".to_owned());
+
+        assert_eq!(error.error_code().as_str(), "BREWDB_PARSER_PARSE_ERROR");
+        assert_eq!(error.log_target(), "brewdb.parser");
+    }
+
+    #[test]
+    fn tokenizer_error_uses_parser_diagnostic_code() {
+        let error = ParserError::TokenizerError("unterminated string".to_owned());
+
+        assert_eq!(error.error_code().as_str(), "BREWDB_PARSER_TOKENIZER_ERROR");
+        assert_eq!(error.log_target(), "brewdb.parser");
+    }
+
+    #[test]
+    fn recursion_limit_error_uses_parser_diagnostic_code() {
+        let error = ParserError::RecursionLimitExceeded;
+
+        assert_eq!(
+            error.error_code().as_str(),
+            "BREWDB_PARSER_RECURSION_LIMIT_EXCEEDED"
+        );
+        assert_eq!(error.log_target(), "brewdb.parser");
+    }
+}
 
 // By default, allow expressions up to this deep before erroring
 const DEFAULT_REMAINING_DEPTH: usize = 50;

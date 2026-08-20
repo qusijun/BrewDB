@@ -1,7 +1,6 @@
 //! Runtime-facing execution bridge contracts.
 
 use std::collections::VecDeque;
-use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +11,7 @@ use crate::planner::distributed::PlanFragment;
 use arrow::record_batch::RecordBatch;
 use uuid::Uuid;
 
+use crate::runtime::errors::ExecutionRuntimeError;
 use crate::runtime::exchange::ExchangeChannelDescriptor;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,29 +164,6 @@ impl crate::runtime::exchange_service::ResultBatchSink for QueryOutput {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExecutionRuntimeError {
-    InvalidPlan { reason: String },
-    RuntimeInitFailed { reason: String },
-    StorageError { reason: String },
-    CatalogError { reason: String },
-}
-
-impl fmt::Display for ExecutionRuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidPlan { reason } => write!(f, "invalid execution plan: {reason}"),
-            Self::RuntimeInitFailed { reason } => {
-                write!(f, "runtime initialization failed: {reason}")
-            }
-            Self::StorageError { reason } => write!(f, "storage error: {reason}"),
-            Self::CatalogError { reason } => write!(f, "catalog error: {reason}"),
-        }
-    }
-}
-
-impl Error for ExecutionRuntimeError {}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -226,10 +203,9 @@ mod tests {
     use super::PlanFragment;
     use crate::execution::executor::FragmentExecutionEnvelope;
     use crate::runtime::coordinator::QueryCoordinator;
-    use crate::runtime::scheduler::{
-        FragmentSchedulerError, StaticResourceManager, WorkerInfo, WorkerSelector,
-    };
+    use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo, WorkerSelector};
     use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
+    use crate::runtime::FragmentSchedulerError;
 
     struct TestDir {
         path: PathBuf,

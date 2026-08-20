@@ -432,14 +432,14 @@ impl LocalFragmentExecutor {
     fn send_exchange_page_inner(
         &self,
         page: ExchangeDataPage,
-    ) -> Result<(), crate::runtime::exchange::ExchangeRuntimeError> {
+    ) -> Result<(), crate::runtime::ExchangeRuntimeError> {
         self.exchange_buffers.enqueue_page(page)
     }
 
     fn drain_exchange_pages_inner(
         &self,
         exchange_id: ExchangeId,
-    ) -> Result<Vec<ExchangeDataPage>, crate::runtime::exchange::ExchangeRuntimeError> {
+    ) -> Result<Vec<ExchangeDataPage>, crate::runtime::ExchangeRuntimeError> {
         self.exchange_buffers.drain_pages_by_id(exchange_id)
     }
 

@@ -17,7 +17,6 @@ pub use optimizer::LogicalOptimizer;
 pub use planner::{LogicalPlanner, LogicalPlanningContext, LogicalPlanningSession};
 
 pub(crate) use planner::{
-    empty_df_schema, extension_plan, name_parts, object_name_to_string, planner_to_sql_error,
-    qualify_database_name, qualify_table_name, resolve_query_tables, resolve_table,
-    resolve_table_object,
+    empty_df_schema, extension_plan, name_parts, object_name_to_string, qualify_database_name,
+    qualify_table_name, resolve_query_tables, resolve_table, resolve_table_object,
 };

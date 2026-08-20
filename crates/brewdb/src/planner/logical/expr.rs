@@ -1,16 +1,29 @@
 use crate::parser::ast::{
-    BinaryOperator as AstBinaryOperator, DuplicateTreatment, Expr as AstExpr, FunctionArg,
-    FunctionArgExpr, FunctionArguments, GroupByExpr, SelectItem, SelectItemQualifiedWildcardKind,
+    BinaryOperator as AstBinaryOperator, DataType as AstDataType, DuplicateTreatment,
+    Expr as AstExpr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
+    Interval as AstInterval, SelectItem, SelectItemQualifiedWildcardKind, TypedString,
     UnaryOperator as AstUnaryOperator, Value,
 };
 use crate::planner::errors::PlannerError;
-use datafusion_common::ScalarValue;
-use datafusion_expr::expr::{AggregateFunction, ScalarFunction, WildcardOptions};
+use arrow::compute::kernels::cast_utils::{
+    parse_interval_month_day_nano_config, IntervalParseConfig, IntervalUnit,
+};
+use arrow::datatypes::DataType as ArrowDataType;
+use datafusion_common::{ScalarValue, Spans};
+use datafusion_expr::expr::{
+    AggregateFunction, Cast, Exists, InList, InSubquery, ScalarFunction, WildcardOptions,
+};
 use datafusion_expr::registry::FunctionRegistry;
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
-    col, lit, BinaryExpr, Expr as DataFusionExpr, Operator as DataFusionOperator,
+    col, lit, Between, BinaryExpr, Case, Expr as DataFusionExpr, Like,
+    LogicalPlan as DataFusionLogicalPlan, Operator as DataFusionOperator,
+    Subquery as DataFusionSubquery,
 };
+use std::sync::Arc;
+
+type SubqueryPlanner<'a> =
+    dyn FnMut(&crate::parser::ast::Query) -> Result<DataFusionLogicalPlan, PlannerError> + 'a;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum QueryGroupBy {
@@ -19,9 +32,10 @@ pub(super) enum QueryGroupBy {
     Expressions(Vec<DataFusionExpr>),
 }
 
-pub(super) fn bind_group_by(
+pub(super) fn bind_group_by_with_subqueries(
     group_by: &GroupByExpr,
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<QueryGroupBy, PlannerError> {
     match group_by {
         GroupByExpr::All(_) => Ok(QueryGroupBy::All),
@@ -31,30 +45,37 @@ pub(super) fn bind_group_by(
         GroupByExpr::Expressions(expressions, _) => Ok(QueryGroupBy::Expressions(
             expressions
                 .iter()
-                .map(|expr| bind_expr(expr, function_registry))
+                .map(|expr| bind_expr_with_subqueries(expr, function_registry, subquery_planner))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
     }
 }
 
-pub(super) fn bind_projection(
+pub(super) fn bind_projection_with_subqueries(
     items: &[SelectItem],
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<Vec<DataFusionExpr>, PlannerError> {
     items
         .iter()
-        .map(|item| bind_select_item(item, function_registry))
+        .map(|item| bind_select_item(item, function_registry, subquery_planner))
         .collect()
 }
 
 fn bind_select_item(
     item: &SelectItem,
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<DataFusionExpr, PlannerError> {
     match item {
-        SelectItem::UnnamedExpr(expr) => bind_expr(expr, function_registry),
+        SelectItem::UnnamedExpr(expr) => {
+            bind_expr_with_subqueries(expr, function_registry, subquery_planner)
+        }
         SelectItem::ExprWithAlias { expr, alias } => {
-            Ok(bind_expr(expr, function_registry)?.alias(alias.value.clone()))
+            Ok(
+                bind_expr_with_subqueries(expr, function_registry, subquery_planner)?
+                    .alias(alias.value.clone()),
+            )
         }
         SelectItem::ExprWithAliases { expr, aliases } => {
             let Some(alias) = aliases.first() else {
@@ -62,7 +83,10 @@ fn bind_select_item(
                     reason: "projection aliases must not be empty".to_string(),
                 });
             };
-            Ok(bind_expr(expr, function_registry)?.alias(alias.value.clone()))
+            Ok(
+                bind_expr_with_subqueries(expr, function_registry, subquery_planner)?
+                    .alias(alias.value.clone()),
+            )
         }
         SelectItem::Wildcard(_) => Ok(wildcard_expr()),
         SelectItem::QualifiedWildcard(kind, _) => bind_qualified_wildcard(kind),
@@ -107,6 +131,14 @@ pub(super) fn bind_expr(
     expr: &AstExpr,
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionExpr, PlannerError> {
+    bind_expr_with_subqueries(expr, function_registry, &mut unsupported_subquery_planner)
+}
+
+pub(super) fn bind_expr_with_subqueries(
+    expr: &AstExpr,
+    function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
+) -> Result<DataFusionExpr, PlannerError> {
     match expr {
         AstExpr::Identifier(ident) => Ok(col(ident.to_string())),
         AstExpr::CompoundIdentifier(idents) => Ok(col(idents
@@ -115,34 +147,419 @@ pub(super) fn bind_expr(
             .collect::<Vec<_>>()
             .join("."))),
         AstExpr::Value(value) => bind_value(value),
-        AstExpr::Nested(expr) => bind_expr(expr, function_registry),
+        AstExpr::Nested(expr) => {
+            bind_expr_with_subqueries(expr, function_registry, subquery_planner)
+        }
         AstExpr::BinaryOp { left, op, right } => Ok(DataFusionExpr::BinaryExpr(BinaryExpr::new(
-            Box::new(bind_expr(left, function_registry)?),
+            Box::new(bind_expr_with_subqueries(
+                left,
+                function_registry,
+                subquery_planner,
+            )?),
             bind_binary_operator(op)?,
-            Box::new(bind_expr(right, function_registry)?),
+            Box::new(bind_expr_with_subqueries(
+                right,
+                function_registry,
+                subquery_planner,
+            )?),
         ))),
-        AstExpr::UnaryOp { op, expr } => bind_unary_expr(op, expr, function_registry),
-        AstExpr::IsNull(expr) => Ok(DataFusionExpr::IsNull(Box::new(bind_expr(
+        AstExpr::UnaryOp { op, expr } => {
+            bind_unary_expr(op, expr, function_registry, subquery_planner)
+        }
+        AstExpr::IsNull(expr) => Ok(DataFusionExpr::IsNull(Box::new(bind_expr_with_subqueries(
             expr,
             function_registry,
+            subquery_planner,
         )?))),
-        AstExpr::IsNotNull(expr) => Ok(DataFusionExpr::IsNotNull(Box::new(bind_expr(
+        AstExpr::IsNotNull(expr) => Ok(DataFusionExpr::IsNotNull(Box::new(
+            bind_expr_with_subqueries(expr, function_registry, subquery_planner)?,
+        ))),
+        AstExpr::Between {
             expr,
+            negated,
+            low,
+            high,
+        } => Ok(DataFusionExpr::Between(Between::new(
+            Box::new(bind_expr_with_subqueries(
+                expr,
+                function_registry,
+                subquery_planner,
+            )?),
+            *negated,
+            Box::new(bind_expr_with_subqueries(
+                low,
+                function_registry,
+                subquery_planner,
+            )?),
+            Box::new(bind_expr_with_subqueries(
+                high,
+                function_registry,
+                subquery_planner,
+            )?),
+        ))),
+        AstExpr::InList {
+            expr,
+            list,
+            negated,
+        } => Ok(DataFusionExpr::InList(InList::new(
+            Box::new(bind_expr_with_subqueries(
+                expr,
+                function_registry,
+                subquery_planner,
+            )?),
+            list.iter()
+                .map(|expr| bind_expr_with_subqueries(expr, function_registry, subquery_planner))
+                .collect::<Result<Vec<_>, _>>()?,
+            *negated,
+        ))),
+        AstExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => {
+            let subquery = plan_subquery(subquery, subquery_planner)?;
+            validate_single_column_subquery(&subquery)?;
+            Ok(DataFusionExpr::InSubquery(InSubquery::new(
+                Box::new(bind_expr_with_subqueries(
+                    expr,
+                    function_registry,
+                    subquery_planner,
+                )?),
+                subquery,
+                *negated,
+            )))
+        }
+        AstExpr::Exists { subquery, negated } => Ok(DataFusionExpr::Exists(Exists::new(
+            plan_subquery(subquery, subquery_planner)?,
+            *negated,
+        ))),
+        AstExpr::Subquery(subquery) => {
+            let subquery = plan_subquery(subquery, subquery_planner)?;
+            validate_single_column_subquery(&subquery)?;
+            Ok(DataFusionExpr::ScalarSubquery(subquery))
+        }
+        AstExpr::Like {
+            negated,
+            any,
+            expr,
+            pattern,
+            escape_char,
+        } => bind_like_expr(
+            *negated,
+            *any,
+            expr,
+            pattern,
+            escape_char.as_ref(),
+            false,
             function_registry,
-        )?))),
-        AstExpr::Function(function) => bind_function(function, function_registry),
+            subquery_planner,
+        ),
+        AstExpr::ILike {
+            negated,
+            any,
+            expr,
+            pattern,
+            escape_char,
+        } => bind_like_expr(
+            *negated,
+            *any,
+            expr,
+            pattern,
+            escape_char.as_ref(),
+            true,
+            function_registry,
+            subquery_planner,
+        ),
+        AstExpr::TypedString(typed) => bind_typed_string(typed),
+        AstExpr::Interval(interval) => bind_interval(interval),
+        AstExpr::Extract { field, expr, .. } => bind_scalar_function(
+            "date_part",
+            vec![
+                lit(field.to_string().to_ascii_lowercase()),
+                bind_expr_with_subqueries(expr, function_registry, subquery_planner)?,
+            ],
+            function_registry,
+        ),
+        AstExpr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => bind_substring(
+            expr,
+            substring_from,
+            substring_for,
+            function_registry,
+            subquery_planner,
+        ),
+        AstExpr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => Ok(DataFusionExpr::Case(Case::new(
+            operand
+                .as_ref()
+                .map(|expr| {
+                    bind_expr_with_subqueries(expr, function_registry, subquery_planner)
+                        .map(Box::new)
+                })
+                .transpose()?,
+            conditions
+                .iter()
+                .map(|when| {
+                    Ok((
+                        Box::new(bind_expr_with_subqueries(
+                            &when.condition,
+                            function_registry,
+                            subquery_planner,
+                        )?),
+                        Box::new(bind_expr_with_subqueries(
+                            &when.result,
+                            function_registry,
+                            subquery_planner,
+                        )?),
+                    ))
+                })
+                .collect::<Result<Vec<_>, PlannerError>>()?,
+            else_result
+                .as_ref()
+                .map(|expr| {
+                    bind_expr_with_subqueries(expr, function_registry, subquery_planner)
+                        .map(Box::new)
+                })
+                .transpose()?,
+        ))),
+        AstExpr::Function(function) => bind_function(function, function_registry, subquery_planner),
         other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported expression `{other}`"),
         }),
     }
 }
 
+fn unsupported_subquery_planner(
+    subquery: &crate::parser::ast::Query,
+) -> Result<DataFusionLogicalPlan, PlannerError> {
+    Err(PlannerError::UnsupportedPlan {
+        reason: format!("unsupported subquery `{subquery}`"),
+    })
+}
+
+fn plan_subquery(
+    subquery: &crate::parser::ast::Query,
+    subquery_planner: &mut SubqueryPlanner<'_>,
+) -> Result<DataFusionSubquery, PlannerError> {
+    let subquery = subquery_planner(subquery)?;
+    let outer_ref_columns = subquery.all_out_ref_exprs();
+    Ok(DataFusionSubquery {
+        subquery: Arc::new(subquery),
+        outer_ref_columns,
+        spans: Spans::new(),
+    })
+}
+
+fn validate_single_column_subquery(subquery: &DataFusionSubquery) -> Result<(), PlannerError> {
+    let column_count = subquery.subquery.schema().fields().len();
+    if column_count == 1 {
+        return Ok(());
+    }
+    Err(PlannerError::Plan {
+        reason: format!("subquery must return exactly one column, got {column_count}"),
+    })
+}
+
+fn bind_scalar_function(
+    name: &str,
+    args: Vec<DataFusionExpr>,
+    function_registry: &dyn FunctionRegistry,
+) -> Result<DataFusionExpr, PlannerError> {
+    function_registry
+        .udf(name)
+        .map(|udf| DataFusionExpr::ScalarFunction(ScalarFunction::new_udf(udf, args)))
+        .map_err(|_| PlannerError::UnsupportedPlan {
+            reason: format!("function `{name}` not found in DataFusion function registry"),
+        })
+}
+
+fn bind_substring(
+    expr: &AstExpr,
+    substring_from: &Option<Box<AstExpr>>,
+    substring_for: &Option<Box<AstExpr>>,
+    function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
+) -> Result<DataFusionExpr, PlannerError> {
+    let mut args = vec![bind_expr_with_subqueries(
+        expr,
+        function_registry,
+        subquery_planner,
+    )?];
+    match (substring_from, substring_for) {
+        (Some(from), Some(for_expr)) => {
+            args.push(bind_expr_with_subqueries(
+                from,
+                function_registry,
+                subquery_planner,
+            )?);
+            args.push(bind_expr_with_subqueries(
+                for_expr,
+                function_registry,
+                subquery_planner,
+            )?);
+        }
+        (Some(from), None) => {
+            args.push(bind_expr_with_subqueries(
+                from,
+                function_registry,
+                subquery_planner,
+            )?);
+        }
+        (None, Some(for_expr)) => {
+            args.push(lit(1_i64));
+            args.push(bind_expr_with_subqueries(
+                for_expr,
+                function_registry,
+                subquery_planner,
+            )?);
+        }
+        (None, None) => {
+            return Err(PlannerError::InvalidPlan {
+                reason: format!("substring without FROM or FOR is not valid: `{expr}`"),
+            });
+        }
+    }
+    bind_scalar_function("substring", args.clone(), function_registry)
+        .or_else(|_| bind_scalar_function("substr", args, function_registry))
+}
+
+fn bind_like_expr(
+    negated: bool,
+    any: bool,
+    expr: &AstExpr,
+    pattern: &AstExpr,
+    escape_char: Option<&crate::parser::ast::ValueWithSpan>,
+    case_insensitive: bool,
+    function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
+) -> Result<DataFusionExpr, PlannerError> {
+    if any {
+        return Err(PlannerError::UnsupportedPlan {
+            reason: "ANY in LIKE expression is not supported yet".to_string(),
+        });
+    }
+    let escape_char = match escape_char.map(|value| &value.value) {
+        Some(Value::SingleQuotedString(value)) if value.chars().count() == 1 => {
+            value.chars().next()
+        }
+        Some(value) => {
+            return Err(PlannerError::InvalidPlan {
+                reason: format!(
+                    "LIKE escape character must be a single quoted character, got `{value}`"
+                ),
+            });
+        }
+        None => None,
+    };
+    Ok(DataFusionExpr::Like(Like::new(
+        negated,
+        Box::new(bind_expr_with_subqueries(
+            expr,
+            function_registry,
+            subquery_planner,
+        )?),
+        Box::new(bind_expr_with_subqueries(
+            pattern,
+            function_registry,
+            subquery_planner,
+        )?),
+        escape_char,
+        case_insensitive,
+    )))
+}
+
+fn bind_interval(interval: &AstInterval) -> Result<DataFusionExpr, PlannerError> {
+    if interval.leading_precision.is_some()
+        || interval.last_field.is_some()
+        || interval.fractional_seconds_precision.is_some()
+    {
+        return Err(PlannerError::UnsupportedPlan {
+            reason: format!("unsupported interval expression `{interval}`"),
+        });
+    }
+    let mut value = interval_literal(interval.value.as_ref(), false)?;
+    if let Some(leading_field) = &interval.leading_field {
+        value = format!("{value} {leading_field}");
+    }
+    let parsed = parse_interval_month_day_nano_config(
+        &value,
+        IntervalParseConfig::new(IntervalUnit::Second),
+    )
+    .map_err(|err| PlannerError::InvalidPlan {
+        reason: format!("invalid interval literal `{interval}`: {err}"),
+    })?;
+    Ok(lit(ScalarValue::IntervalMonthDayNano(Some(parsed))))
+}
+
+fn interval_literal(expr: &AstExpr, negative: bool) -> Result<String, PlannerError> {
+    let value = match expr {
+        AstExpr::Value(value) => match &value.value {
+            Value::SingleQuotedString(value) | Value::DoubleQuotedString(value) => value.clone(),
+            Value::Number(value, long) if !long => value.clone(),
+            Value::Number(_, _) => {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported long interval literal `{expr}`"),
+                });
+            }
+            other => {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported interval literal `{other}`"),
+                });
+            }
+        },
+        AstExpr::UnaryOp { op, expr } => match op {
+            AstUnaryOperator::Minus => interval_literal(expr, !negative)?,
+            AstUnaryOperator::Plus => interval_literal(expr, negative)?,
+            other => {
+                return Err(PlannerError::UnsupportedPlan {
+                    reason: format!("unsupported interval unary operator `{other}`"),
+                });
+            }
+        },
+        other => {
+            return Err(PlannerError::UnsupportedPlan {
+                reason: format!("unsupported interval argument `{other}`"),
+            });
+        }
+    };
+    Ok(if negative { format!("-{value}") } else { value })
+}
+
+fn bind_typed_string(typed: &TypedString) -> Result<DataFusionExpr, PlannerError> {
+    let Some(value) = typed.value.clone().into_string() else {
+        return Err(PlannerError::InvalidPlan {
+            reason: format!("typed literal `{typed}` requires a string payload"),
+        });
+    };
+    let data_type = match &typed.data_type {
+        AstDataType::Date => ArrowDataType::Date32,
+        other => {
+            return Err(PlannerError::UnsupportedPlan {
+                reason: format!("unsupported typed literal data type `{other}`"),
+            });
+        }
+    };
+    Ok(DataFusionExpr::Cast(Cast::new(
+        Box::new(lit(value)),
+        data_type,
+    )))
+}
+
 fn bind_unary_expr(
     op: &AstUnaryOperator,
     expr: &AstExpr,
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<DataFusionExpr, PlannerError> {
-    let expr = bind_expr(expr, function_registry)?;
+    let expr = bind_expr_with_subqueries(expr, function_registry, subquery_planner)?;
     match op {
         AstUnaryOperator::Not => Ok(DataFusionExpr::Not(Box::new(expr))),
         AstUnaryOperator::Minus => Ok(DataFusionExpr::Negative(Box::new(expr))),
@@ -215,6 +632,7 @@ fn bind_value(value: &crate::parser::ast::ValueWithSpan) -> Result<DataFusionExp
 fn bind_function(
     function: &crate::parser::ast::Function,
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<DataFusionExpr, PlannerError> {
     if function.over.is_some()
         || !function.within_group.is_empty()
@@ -228,7 +646,7 @@ fn bind_function(
         FunctionArguments::List(arguments) => arguments
             .args
             .iter()
-            .map(|arg| bind_function_arg(arg, function_registry))
+            .map(|arg| bind_function_arg(arg, function_registry, subquery_planner))
             .collect::<Result<Vec<_>, _>>()?,
         FunctionArguments::None => Vec::new(),
         FunctionArguments::Subquery(query) => {
@@ -261,7 +679,7 @@ fn bind_function(
         let filter = function
             .filter
             .as_ref()
-            .map(|expr| bind_expr(expr, function_registry))
+            .map(|expr| bind_expr_with_subqueries(expr, function_registry, subquery_planner))
             .transpose()?
             .map(Box::new);
         if function.null_treatment.is_some() {
@@ -309,13 +727,14 @@ fn plan_aggregate_function(function_name: &str, function: AggregateFunction) -> 
 fn bind_function_arg(
     arg: &FunctionArg,
     function_registry: &dyn FunctionRegistry,
+    subquery_planner: &mut SubqueryPlanner<'_>,
 ) -> Result<DataFusionExpr, PlannerError> {
     match arg {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
         | FunctionArg::Named {
             arg: FunctionArgExpr::Expr(expr),
             ..
-        } => bind_expr(expr, function_registry),
+        } => bind_expr_with_subqueries(expr, function_registry, subquery_planner),
         FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Ok(wildcard_expr()),
         FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(name)) => {
             bind_qualified_wildcard(&SelectItemQualifiedWildcardKind::ObjectName(name.clone()))

@@ -13,7 +13,6 @@ pub mod runtime;
 pub mod storage;
 
 pub use common::context::SessionContext;
-pub use common::errors::SqlError;
 pub use frontend::{IngressSql, SqlClientCapabilities, SqlRequestContext};
 pub use parser::ast::Statement;
 pub use parser::{ast, dialect, display_utils, keywords, test_utils, tokenizer};
