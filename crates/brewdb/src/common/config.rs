@@ -532,6 +532,14 @@ impl ConfigSet {
         merged
     }
 
+    pub fn merge_config_set(&self, overrides: &ConfigSet) -> Self {
+        let mut merged = self.clone();
+        for (key, value) in overrides.entries() {
+            merged.set(key, value.clone());
+        }
+        merged
+    }
+
     pub fn merged_with_registry(
         &self,
         registry: &ConfigRegistry,

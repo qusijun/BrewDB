@@ -9,6 +9,7 @@ use datafusion_optimizer::{
     Analyzer, AnalyzerRule, ApplyOrder, Optimizer, OptimizerConfig, OptimizerContext, OptimizerRule,
 };
 
+use crate::common::context::QueryContext;
 use crate::planner::logical::plan::LogicalPlanNode;
 
 #[derive(Debug)]
@@ -33,6 +34,14 @@ impl LogicalOptimizer {
         self.optimize_with_observer(plan, |_, _| {})
     }
 
+    pub fn optimize_with_query_context(
+        &self,
+        plan: DataFusionLogicalPlan,
+        query_context: &QueryContext,
+    ) -> Result<DataFusionLogicalPlan> {
+        self.optimize_with_query_context_and_observers(query_context, plan, |_, _| {}, |_, _| {})
+    }
+
     pub fn optimize_with_observer<F>(
         &self,
         plan: DataFusionLogicalPlan,
@@ -55,6 +64,46 @@ impl LogicalOptimizer {
         O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
     {
         let optimizer_context = OptimizerContext::new();
+        self.optimize_with_context(
+            plan,
+            optimizer_context,
+            analyzer_observer,
+            optimizer_observer,
+        )
+    }
+
+    pub fn optimize_with_query_context_and_observers<A, O>(
+        &self,
+        query_context: &QueryContext,
+        plan: DataFusionLogicalPlan,
+        analyzer_observer: A,
+        optimizer_observer: O,
+    ) -> Result<DataFusionLogicalPlan>
+    where
+        A: FnMut(&DataFusionLogicalPlan, &dyn AnalyzerRule),
+        O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
+    {
+        let optimizer_context =
+            crate::runtime::datafusion_context::optimizer_context(query_context)?;
+        self.optimize_with_context(
+            plan,
+            optimizer_context,
+            analyzer_observer,
+            optimizer_observer,
+        )
+    }
+
+    fn optimize_with_context<A, O>(
+        &self,
+        plan: DataFusionLogicalPlan,
+        optimizer_context: OptimizerContext,
+        analyzer_observer: A,
+        optimizer_observer: O,
+    ) -> Result<DataFusionLogicalPlan>
+    where
+        A: FnMut(&DataFusionLogicalPlan, &dyn AnalyzerRule),
+        O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
+    {
         let options = optimizer_context.options();
         let analyzed = self
             .analyzer

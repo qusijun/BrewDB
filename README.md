@@ -1,5 +1,9 @@
 # BrewDB
 
+<p align="center">
+  <img src="logo/brewdb.png" alt="BrewDB" width="520">
+</p>
+
 BrewDB is a lakehouse database engine built around a BrewDB-owned catalog,
 DataFusion-based SQL planning/execution, and format-aware storage engines.
 

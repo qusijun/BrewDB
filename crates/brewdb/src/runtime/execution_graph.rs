@@ -6,9 +6,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::catalog::TableCatalogEntry;
-use crate::common::runtime::QueryContext;
-use crate::planner::distributed::plan::{DistributedFragmentPlan, PlanFragment};
+use crate::common::context::QueryContext;
 use crate::planner::distributed::split::TableScanSplitGroup;
+use crate::planner::distributed::PlanFragment;
 use arrow::record_batch::RecordBatch;
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ impl ExecutionFragment {
         Self { fragment }
     }
 
-    pub fn fragment_id(&self) -> crate::planner::distributed::plan::PlanFragmentId {
+    pub fn fragment_id(&self) -> crate::planner::distributed::PlanFragmentId {
         self.fragment.fragment_id
     }
 }
@@ -73,9 +73,7 @@ impl FragmentInstance {
             worker_id,
             endpoint: endpoint.into(),
             table_scan_splits,
-            query_context: QueryContext {
-                query_id: Uuid::nil(),
-            },
+            query_context: QueryContext::for_test(Uuid::nil()),
             table_catalogs: vec![],
             exchange_inputs: vec![],
             exchange_outputs: vec![],
@@ -86,15 +84,9 @@ impl FragmentInstance {
         &self.execution_fragment.fragment
     }
 
-    pub fn fragment_id(&self) -> crate::planner::distributed::plan::PlanFragmentId {
+    pub fn fragment_id(&self) -> crate::planner::distributed::PlanFragmentId {
         self.execution_fragment.fragment_id()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueryExecutionRequest {
-    pub query_context: QueryContext,
-    pub distributed_plan: DistributedFragmentPlan,
 }
 
 #[derive(Clone)]
@@ -162,12 +154,13 @@ impl QueryOutput {
     }
 }
 
-impl crate::runtime::rpc::ResultBatchSink for QueryOutput {
-    fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::runtime::rpc::RpcError> {
-        self.push_result(batch)
-            .map_err(|error| crate::runtime::rpc::RpcError::ExecutionFailed {
+impl crate::runtime::exchange_service::ResultBatchSink for QueryOutput {
+    fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::runtime::transport::RpcError> {
+        self.push_result(batch).map_err(|error| {
+            crate::runtime::transport::RpcError::ExecutionFailed {
                 reason: error.to_string(),
-            })
+            }
+        })
     }
 }
 
@@ -205,17 +198,20 @@ mod tests {
         CatalogStoreBackendKind, CreateDatabaseRequest, CreateTableRequest, StorageKind,
         TableCatalogEntry, TablePath,
     };
-    use crate::common::runtime::QueryContext;
+    use crate::common::config::ConfigSet;
+    use crate::common::context::QueryContext;
+    use crate::common::context::SessionContext;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-    use crate::frontend::ingress::{SqlRequestContext, SqlSessionContext};
+    use crate::frontend::ingress::SqlRequestContext;
     use crate::planner::distributed::exchange::ExchangeNode;
     use crate::planner::distributed::exchange::RemoteSourceNode;
-    use crate::planner::distributed::plan::{
+    use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
+    use crate::planner::distributed::DistributedFragmentPlanner;
+    use crate::planner::distributed::{
         DistributedFragmentPlan, DistributedPlanRoot, FragmentScanSplits, PlanFragmentId,
         PlanFragmentKind,
     };
-    use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
-    use crate::planner::distributed::{DistributedPlanner, DistributedPlannerRequest};
+    use crate::planner::CommandTag;
     use crate::planner::{LocalFragmentPlan, LogicalPlanner, LogicalPlanningContext};
     use crate::runtime::driver::sql_to_statement;
     use crate::storage::MemoryStorageEngine;
@@ -227,12 +223,13 @@ mod tests {
     use datafusion_expr::{lit, LogicalPlanBuilder, TableSource, TableType};
     use std::collections::BTreeMap;
 
-    use super::{PlanFragment, QueryExecutionRequest};
+    use super::PlanFragment;
+    use crate::execution::executor::FragmentExecutionEnvelope;
     use crate::runtime::coordinator::QueryCoordinator;
-    use crate::runtime::rpc::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
     use crate::runtime::scheduler::{
         FragmentSchedulerError, StaticResourceManager, WorkerInfo, WorkerSelector,
     };
+    use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
 
     struct TestDir {
         path: PathBuf,
@@ -275,8 +272,8 @@ mod tests {
         fn execute_fragment(
             &self,
             worker_id: uuid::Uuid,
-            envelope: crate::runtime::rpc::FragmentExecutionEnvelope,
-        ) -> Result<crate::execution::FragmentExecutionStatus, crate::runtime::rpc::RpcError>
+            envelope: FragmentExecutionEnvelope,
+        ) -> Result<crate::execution::FragmentExecutionStatus, crate::runtime::transport::RpcError>
         {
             self.inner.execute_fragment(worker_id, envelope)
         }
@@ -284,7 +281,7 @@ mod tests {
         fn send_exchange_page(
             &self,
             page: crate::runtime::exchange::ExchangeDataPage,
-        ) -> Result<(), crate::runtime::rpc::RpcError> {
+        ) -> Result<(), crate::runtime::transport::RpcError> {
             self.sent_pages
                 .lock()
                 .expect("sent page log lock must not be poisoned")
@@ -295,8 +292,10 @@ mod tests {
         fn drain_exchange_pages(
             &self,
             exchange_id: crate::runtime::exchange::ExchangeId,
-        ) -> Result<Vec<crate::runtime::exchange::ExchangeDataPage>, crate::runtime::rpc::RpcError>
-        {
+        ) -> Result<
+            Vec<crate::runtime::exchange::ExchangeDataPage>,
+            crate::runtime::transport::RpcError,
+        > {
             self.inner.drain_exchange_pages(exchange_id)
         }
     }
@@ -449,9 +448,7 @@ mod tests {
     fn runtime_compiles_fragment_plan_into_datafusion_plan() {
         let fragment = build_fragment();
         let prepared = LocalFragmentPlan::prepare(
-            QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            QueryContext::for_test(uuid::Uuid::new_v4()),
             fragment,
             vec![],
             TableScanSplitGroup::default(),
@@ -465,9 +462,7 @@ mod tests {
     #[test]
     fn runtime_rejects_missing_fragment_plan() {
         let err = LocalFragmentPlan::prepare(
-            QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            QueryContext::for_test(uuid::Uuid::new_v4()),
             PlanFragment {
                 fragment_id: PlanFragmentId(1),
                 kind: PlanFragmentKind::Source,
@@ -487,12 +482,10 @@ mod tests {
         let table = build_table();
         let fragment = build_fragment();
         let distributed_plan = DistributedFragmentPlan {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,
             table_catalogs: vec![table.clone()],
-            command_tag: "SELECT".to_owned(),
+            command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![fragment],
             fragment_scan_splits: vec![],
@@ -500,10 +493,7 @@ mod tests {
         };
 
         let instances = QueryCoordinator::default()
-            .build_fragment_instances(QueryExecutionRequest {
-                query_context: distributed_plan.query_context.clone(),
-                distributed_plan,
-            })
+            .build_fragment_instances(distributed_plan)
             .unwrap();
 
         assert_eq!(instances.len(), 1);
@@ -517,12 +507,10 @@ mod tests {
     fn runtime_assigns_planned_scan_splits_to_fragment_instance() {
         let fragment_id = PlanFragmentId(0);
         let distributed_plan = DistributedFragmentPlan {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,
             table_catalogs: vec![],
-            command_tag: "SELECT".to_owned(),
+            command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![PlanFragment {
                 fragment_id,
@@ -541,10 +529,7 @@ mod tests {
         };
 
         let instances = QueryCoordinator::default()
-            .build_fragment_instances(QueryExecutionRequest {
-                query_context: distributed_plan.query_context.clone(),
-                distributed_plan,
-            })
+            .build_fragment_instances(distributed_plan)
             .unwrap();
 
         assert_eq!(instances.len(), 1);
@@ -573,12 +558,10 @@ mod tests {
             local_plan: Some(build_fragment().local_plan.unwrap()),
         };
         let distributed_plan = DistributedFragmentPlan {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,
             table_catalogs: vec![],
-            command_tag: "SELECT".to_owned(),
+            command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![root, source],
             fragment_scan_splits: vec![],
@@ -586,10 +569,7 @@ mod tests {
         };
 
         let instances = QueryCoordinator::default()
-            .build_fragment_instances(QueryExecutionRequest {
-                query_context: distributed_plan.query_context.clone(),
-                distributed_plan,
-            })
+            .build_fragment_instances(distributed_plan)
             .unwrap();
 
         let root_instance = instances
@@ -613,50 +593,42 @@ mod tests {
     #[test]
     fn runtime_executes_query_through_single_node_fast_path() {
         let fragment = build_fragment();
-        let request = QueryExecutionRequest {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
-            distributed_plan: DistributedFragmentPlan {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![fragment],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![fragment],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let query_context = request.query_context.clone();
-        let handle = QueryCoordinator::default().execute_query(request).unwrap();
+        let handle = QueryCoordinator::default()
+            .execute_query(query_context.clone(), distributed_plan)
+            .unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
     #[test]
     fn runtime_dispatches_fragment_instance_without_coordinator_prepare() {
         let fragment = build_fragment();
-        let query_context = QueryContext {
-            query_id: uuid::Uuid::new_v4(),
-        };
-        let request = QueryExecutionRequest {
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
             query_context: query_context.clone(),
-            distributed_plan: DistributedFragmentPlan {
-                query_context: query_context.clone(),
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![fragment],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![fragment],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let handle = QueryCoordinator::default().execute_query(request).unwrap();
+        let handle = QueryCoordinator::default()
+            .execute_query(query_context.clone(), distributed_plan)
+            .unwrap();
 
         assert_eq!(handle.query_context, query_context);
     }
@@ -664,24 +636,21 @@ mod tests {
     #[test]
     fn single_node_fast_path_uses_worker_side_prepare_path() {
         let fragment = build_fragment();
-        let query_context = QueryContext {
-            query_id: uuid::Uuid::new_v4(),
-        };
-        let request = QueryExecutionRequest {
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
             query_context: query_context.clone(),
-            distributed_plan: DistributedFragmentPlan {
-                query_context,
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![fragment],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![fragment],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let handle = QueryCoordinator::default().execute_query(request).unwrap();
+        let handle = QueryCoordinator::default()
+            .execute_query(query_context, distributed_plan)
+            .unwrap();
 
         assert_eq!(handle.command_tag, "SELECT");
         assert!(handle.returns_rows);
@@ -713,26 +682,21 @@ mod tests {
                 worker_2,
             ])))
             .with_transport_registry(transport_registry);
-        let request = QueryExecutionRequest {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
-            distributed_plan: DistributedFragmentPlan {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![build_fragment()],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![build_fragment()],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let query_context = request.query_context.clone();
-        let handle = runtime.execute_query(request).unwrap();
+        let handle = runtime
+            .execute_query(query_context.clone(), distributed_plan)
+            .unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
@@ -742,26 +706,21 @@ mod tests {
         let storage = Arc::new(MemoryStorageEngine::default());
         register_table(&storage, &table, &[1, 2, 3]);
         let runtime = QueryCoordinator::with_storage(storage);
-        let request = QueryExecutionRequest {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
-            distributed_plan: DistributedFragmentPlan {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![table.clone()],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![build_table_scan_fragment(&table)],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![table.clone()],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![build_table_scan_fragment(&table)],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let query_context = request.query_context.clone();
-        let handle = runtime.execute_query(request).unwrap();
+        let handle = runtime
+            .execute_query(query_context.clone(), distributed_plan)
+            .unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
@@ -771,25 +730,21 @@ mod tests {
         let storage = Arc::new(MemoryStorageEngine::default());
         register_table(&storage, &table, &[1, 2, 3]);
         let runtime = QueryCoordinator::with_storage(storage);
-        let request = QueryExecutionRequest {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
-            distributed_plan: DistributedFragmentPlan {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                root: DistributedPlanRoot::Fragments,
-                table_catalogs: vec![table.clone()],
-                command_tag: "SELECT".to_owned(),
-                returns_rows: true,
-                fragments: vec![build_table_scan_fragment(&table)],
-                fragment_scan_splits: vec![],
-                exchanges: vec![],
-            },
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let distributed_plan = DistributedFragmentPlan {
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![table.clone()],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![build_table_scan_fragment(&table)],
+            fragment_scan_splits: vec![],
+            exchanges: vec![],
         };
 
-        let handle = runtime.execute_query(request).unwrap();
+        let handle = runtime
+            .execute_query(query_context, distributed_plan)
+            .unwrap();
         let batches = drain_query_results(&handle);
 
         assert_eq!(batches.len(), 1);
@@ -854,17 +809,18 @@ mod tests {
             .unwrap();
         let storage = Arc::new(MemoryStorageEngine::default());
         register_table(&storage, &table, &[1, 2, 3]);
-        let planner = DistributedPlanner::default();
+        let planner = DistributedFragmentPlanner::default();
         let parsed = sql_to_statement("select count(id) from orders").unwrap();
         let logical_plan = LogicalPlanner::default()
             .plan(
                 parsed,
                 &LogicalPlanningContext {
-                    session: &SqlSessionContext {
+                    session: &SessionContext {
                         session_id: uuid::Uuid::new_v4(),
                         user_name: "brew".to_owned(),
                         catalog_name: Some("prod".to_owned()),
                         database_name: Some("sales".to_owned()),
+                        settings: ConfigSet::new(),
                     },
                     request: &SqlRequestContext {
                         request_id: uuid::Uuid::new_v4(),
@@ -873,24 +829,15 @@ mod tests {
                 },
             )
             .unwrap();
-        let query_context = QueryContext {
-            query_id: uuid::Uuid::new_v4(),
-        };
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
         let plan = planner
-            .build(DistributedPlannerRequest {
-                query_context: query_context.clone(),
-                logical_plan,
-                storage: storage.clone(),
-            })
+            .build(query_context.clone(), logical_plan, storage.clone())
             .unwrap();
         assert_eq!(plan.fragments.len(), 2);
         assert_eq!(plan.exchanges.len(), 1);
 
         let handle = QueryCoordinator::with_storage(storage)
-            .execute_query(QueryExecutionRequest {
-                query_context,
-                distributed_plan: plan,
-            })
+            .execute_query(query_context, plan)
             .unwrap();
         let batches = drain_query_results(&handle);
 
@@ -957,11 +904,12 @@ mod tests {
             .plan(
                 parsed,
                 &LogicalPlanningContext {
-                    session: &SqlSessionContext {
+                    session: &SessionContext {
                         session_id: uuid::Uuid::new_v4(),
                         user_name: "brew".to_owned(),
                         database_name: Some("sales".to_owned()),
                         catalog_name: Some("prod".to_owned()),
+                        settings: ConfigSet::new(),
                     },
                     request: &SqlRequestContext {
                         request_id: uuid::Uuid::new_v4(),
@@ -974,27 +922,18 @@ mod tests {
 
         let storage = Arc::new(MemoryStorageEngine::default());
         register_table(&storage, &table, &[7, 8, 9]);
-        let planner = DistributedPlanner::default();
+        let planner = DistributedFragmentPlanner::default();
         let plan = planner
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
                 logical_plan,
-                storage: storage.clone(),
-            })
+                storage.clone(),
+            )
             .unwrap();
 
         let runtime = QueryCoordinator::with_storage(storage);
-        let query_context = QueryContext {
-            query_id: uuid::Uuid::new_v4(),
-        };
-        let result = runtime
-            .execute_query(QueryExecutionRequest {
-                query_context: query_context.clone(),
-                distributed_plan: plan,
-            })
-            .unwrap();
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let result = runtime.execute_query(query_context.clone(), plan).unwrap();
 
         assert_eq!(result.query_context, query_context);
     }
@@ -1005,12 +944,10 @@ mod tests {
         let source_fragment_id = source_fragment.fragment_id;
         let target_fragment = build_target_fragment(source_fragment_id);
         let distributed_plan = DistributedFragmentPlan {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,
             table_catalogs: vec![],
-            command_tag: "SELECT".to_owned(),
+            command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![source_fragment, target_fragment],
             fragment_scan_splits: vec![],
@@ -1027,14 +964,14 @@ mod tests {
         };
 
         let source_service = Arc::new(
-            crate::runtime::rpc::LocalFragmentExecutor::with_exchange_buffer_manager(Arc::new(
-                crate::runtime::exchange::ExchangeBufferManager::default(),
-            )),
+            crate::execution::executor::LocalFragmentExecutor::with_exchange_buffer_manager(
+                Arc::new(crate::runtime::exchange::ExchangeBufferManager::default()),
+            ),
         );
         let target_service = Arc::new(
-            crate::runtime::rpc::LocalFragmentExecutor::with_exchange_buffer_manager(Arc::new(
-                crate::runtime::exchange::ExchangeBufferManager::default(),
-            )),
+            crate::execution::executor::LocalFragmentExecutor::with_exchange_buffer_manager(
+                Arc::new(crate::runtime::exchange::ExchangeBufferManager::default()),
+            ),
         );
         let target_transport = Arc::new(RecordingForwardingTransport::new(Arc::new(
             LocalFragmentTransport::new(target_service),
@@ -1061,12 +998,12 @@ mod tests {
             ])))
             .with_transport_registry(transport_registry);
 
-        let request = QueryExecutionRequest {
-            query_context: distributed_plan.query_context.clone(),
-            distributed_plan: distributed_plan.clone(),
-        };
-
-        let handle = runtime.execute_query(request).unwrap();
+        let handle = runtime
+            .execute_query(
+                distributed_plan.query_context.clone(),
+                distributed_plan.clone(),
+            )
+            .unwrap();
         assert_eq!(
             handle.query_context.query_id,
             distributed_plan.query_context.query_id

@@ -9,15 +9,15 @@ pub mod distributed;
 pub mod errors;
 pub mod local;
 pub mod logical;
-pub use crate::common::runtime::QueryContext;
+pub use crate::common::context::QueryContext;
 pub use distributed::exchange::{ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme};
-pub use distributed::plan::{
-    DistributedFragmentPlan, PlanFragment, PlanFragmentId, PlanFragmentKind,
-};
 pub use distributed::split::{TableScanSplit, TableScanSplitGroup};
-pub use distributed::{DistributedPlanner, DistributedPlannerRequest};
+pub use distributed::StandaloneFragmentPlanner;
+pub use distributed::{DistributedFragmentPlan, PlanFragment, PlanFragmentId, PlanFragmentKind};
+pub use distributed::{DistributedFragmentPlanner, FragmentPlanner};
 pub use errors::PlannerError;
 pub use local::LocalFragmentPlan;
+pub use logical::command::{CommandPlan, CommandTag};
 pub use logical::plan::{CreateDatabase, Ddl, DropDatabase, LogicalPlanNode, Show};
 pub use logical::{
     LogicalOptimizer, LogicalPlanner, LogicalPlanningContext, LogicalPlanningSession,
@@ -28,7 +28,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
-    use crate::common::runtime::QueryContext;
+    use crate::common::context::QueryContext;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::parser::dialect::PostgreSqlDialect;
     use crate::parser::parser::Parser;
@@ -44,13 +44,14 @@ mod tests {
     use datafusion_functions_aggregate as datafusion_aggregate_functions;
 
     use crate::planner::distributed::exchange::{ExchangeScope, ExchangeType, RemoteSourceNode};
-    use crate::planner::distributed::plan::{CommandPlan, DistributedPlanRoot, PlanFragmentKind};
     use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
-    use crate::planner::distributed::{DistributedPlanner, DistributedPlannerRequest};
+    use crate::planner::distributed::{DistributedFragmentPlanner, FragmentPlanner};
+    use crate::planner::distributed::{DistributedPlanRoot, PlanFragmentKind};
     use crate::planner::logical::mutation::plan_insert_statement;
     use crate::planner::logical::plan::{Ddl, LogicalPlanNode, Show};
     use crate::planner::logical::query::plan_query_statement;
     use crate::planner::logical::table_source::DefaultTableSource;
+    use crate::planner::{CommandPlan, CommandTag};
 
     fn find_table_scan<'a>(
         plan: &'a DataFusionLogicalPlan,
@@ -110,20 +111,18 @@ mod tests {
     fn build_query_plan(
         sql: &str,
         tables: Vec<TableCatalogEntry>,
-    ) -> crate::planner::distributed::plan::DistributedFragmentPlan {
-        let planner = DistributedPlanner::default();
+    ) -> crate::planner::distributed::DistributedFragmentPlan {
+        let planner = DistributedFragmentPlanner::default();
         let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql)
             .unwrap()
             .remove(0);
         let logical_plan = plan_query_statement(ast, tables, &function_registry()).unwrap();
         planner
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
                 logical_plan,
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap()
     }
 
@@ -131,8 +130,8 @@ mod tests {
         sql: &str,
         target_table: TableCatalogEntry,
         source_tables: Vec<TableCatalogEntry>,
-    ) -> crate::planner::distributed::plan::DistributedFragmentPlan {
-        let planner = DistributedPlanner::default();
+    ) -> crate::planner::distributed::DistributedFragmentPlan {
+        let planner = DistributedFragmentPlanner::default();
         let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql)
             .unwrap()
             .remove(0);
@@ -140,22 +139,20 @@ mod tests {
             plan_insert_statement(ast, target_table.clone(), &function_registry()).unwrap();
         let _ = source_tables;
         planner
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
                 logical_plan,
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap()
     }
 
     #[test]
-    fn distributed_planner_wraps_scan_into_single_source_fragment() {
+    fn distributed_fragment_planner_wraps_scan_into_single_source_fragment() {
         let plan = build_query_plan("select * from orders", vec![make_table("orders")]);
 
         assert_eq!(plan.fragments.len(), 1);
-        assert_eq!(plan.command_tag, "SELECT");
+        assert_eq!(plan.command_tag, CommandTag::Select);
         assert!(plan.returns_rows);
         assert_eq!(plan.table_catalogs.len(), 1);
         assert!(matches!(
@@ -179,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_collects_file_table_engine_split_candidates() {
+    fn distributed_fragment_planner_collects_file_table_engine_split_candidates() {
         let path =
             std::env::temp_dir().join(format!("brewdb-file-split-{}.csv", uuid::Uuid::new_v4()));
         std::fs::write(&path, "id\n1\n").unwrap();
@@ -209,14 +206,12 @@ mod tests {
             Arc::new(input),
         ));
 
-        let plan = DistributedPlanner::default()
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
+        let plan = DistributedFragmentPlanner::default()
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
                 logical_plan,
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -235,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_supports_constant_query_without_from_clause() {
+    fn distributed_fragment_planner_supports_constant_query_without_from_clause() {
         let plan = build_query_plan("select 1", vec![]);
         let local_plan = plan.fragments[0]
             .local_plan
@@ -247,14 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_models_insert_values_as_append_write_with_input_plan() {
+    fn distributed_fragment_planner_models_insert_values_as_append_write_with_input_plan() {
         let plan = build_insert_plan(
             "insert into orders values (1, 'a')",
             make_table("orders"),
             vec![],
         );
 
-        assert_eq!(plan.command_tag, "INSERT");
+        assert_eq!(plan.command_tag, CommandTag::Insert);
         assert!(!plan.returns_rows);
         assert_eq!(plan.table_catalogs.len(), 1);
         assert_eq!(plan.table_catalogs[0].path.table(), "orders");
@@ -272,23 +267,21 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_models_non_compute_logical_plans_as_commands() {
-        let planner = DistributedPlanner::default();
-        let query_context = QueryContext {
-            query_id: uuid::Uuid::new_v4(),
-        };
+    fn distributed_fragment_planner_models_non_compute_logical_plans_as_commands() {
+        let planner = DistributedFragmentPlanner::default();
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
         let plan = planner
-            .build(DistributedPlannerRequest {
-                query_context: query_context.clone(),
-                logical_plan: datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
+            .build(
+                query_context.clone(),
+                datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
                     node: std::sync::Arc::new(LogicalPlanNode::Show(Show::Catalogs)),
                 }),
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap();
 
         assert_eq!(plan.query_context, query_context);
-        assert_eq!(plan.command_tag, "SHOW CATALOGS");
+        assert_eq!(plan.command_tag, CommandTag::ShowCatalogs);
         assert!(plan.returns_rows);
         assert!(plan.fragments.is_empty());
         assert!(plan.exchanges.is_empty());
@@ -300,11 +293,9 @@ mod tests {
         ));
 
         let plan = planner
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                logical_plan: datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
+                datafusion_expr::LogicalPlan::Extension(datafusion_expr::Extension {
                     node: std::sync::Arc::new(LogicalPlanNode::Ddl(Ddl::CreateDatabase(
                         crate::planner::logical::plan::CreateDatabase {
                             catalog_name: "prod".to_owned(),
@@ -312,11 +303,11 @@ mod tests {
                         },
                     ))),
                 }),
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap();
 
-        assert_eq!(plan.command_tag, "CREATE DATABASE");
+        assert_eq!(plan.command_tag, CommandTag::CreateDatabase);
         assert!(!plan.returns_rows);
         assert!(plan.fragments.is_empty());
         assert!(matches!(
@@ -327,22 +318,20 @@ mod tests {
         ));
 
         let plan = planner
-            .build(DistributedPlannerRequest {
-                query_context: QueryContext {
-                    query_id: uuid::Uuid::new_v4(),
-                },
-                logical_plan: datafusion_expr::LogicalPlan::Ddl(
-                    datafusion_expr::DdlStatement::DropTable(datafusion_expr::DropTable {
+            .build(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
+                datafusion_expr::LogicalPlan::Ddl(datafusion_expr::DdlStatement::DropTable(
+                    datafusion_expr::DropTable {
                         name: datafusion_common::TableReference::full("prod", "sales", "orders"),
                         if_exists: false,
                         schema: std::sync::Arc::new(datafusion_common::DFSchema::empty()),
-                    }),
-                ),
-                storage: crate::storage::open_storage_engine().unwrap(),
-            })
+                    },
+                )),
+                crate::storage::open_storage_engine().unwrap(),
+            )
             .unwrap();
 
-        assert_eq!(plan.command_tag, "DROP TABLE");
+        assert_eq!(plan.command_tag, CommandTag::DropTable);
         assert!(!plan.returns_rows);
         assert!(plan.fragments.is_empty());
         assert!(matches!(
@@ -354,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_resolves_datafusion_function_expr() {
+    fn distributed_fragment_planner_resolves_datafusion_function_expr() {
         let plan = build_query_plan("select lower(name) from orders", vec![make_table("orders")]);
         let local_plan = plan.fragments[0]
             .local_plan
@@ -371,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_builds_filter_projection_tree() {
+    fn distributed_fragment_planner_builds_filter_projection_tree() {
         let plan = build_query_plan(
             "select id from orders where id > 10",
             vec![make_table("orders")],
@@ -386,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_builds_aggregate_tree() {
+    fn distributed_fragment_planner_builds_aggregate_tree() {
         let plan = build_query_plan("select count(id) from orders", vec![make_table("orders")]);
         assert_eq!(plan.fragments.len(), 2);
         assert_eq!(plan.exchanges.len(), 1);
@@ -421,6 +410,31 @@ mod tests {
             panic!("expected scan local plan in child fragment");
         };
         assert_eq!(scan.table_name.table(), "orders");
+    }
+
+    #[test]
+    fn standalone_fragment_planner_keeps_aggregate_in_single_fragment() {
+        let ast = Parser::parse_sql(&PostgreSqlDialect {}, "select count(id) from orders")
+            .unwrap()
+            .remove(0);
+        let logical_plan =
+            plan_query_statement(ast, vec![make_table("orders")], &function_registry()).unwrap();
+
+        let plan = crate::planner::StandaloneFragmentPlanner::default()
+            .plan_fragments(
+                QueryContext::for_test(uuid::Uuid::new_v4()),
+                logical_plan,
+                crate::storage::open_storage_engine().unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(plan.fragments.len(), 1);
+        assert!(plan.exchanges.is_empty());
+        assert_eq!(plan.fragment_scan_splits.len(), 1);
+        assert!(matches!(
+            plan.fragments[0].root,
+            Some(DataFusionLogicalPlan::Aggregate(_)) | Some(DataFusionLogicalPlan::Projection(_))
+        ));
     }
 
     #[test]
@@ -579,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_builds_join_tree() {
+    fn distributed_fragment_planner_builds_join_tree() {
         let plan = build_query_plan(
             "select * from orders o join customers c on o.id = c.id and o.id > 10",
             vec![make_table("orders"), make_table("customers")],
@@ -666,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_keeps_non_column_equality_in_join_filter() {
+    fn distributed_fragment_planner_keeps_non_column_equality_in_join_filter() {
         let plan = build_query_plan(
             "select * from orders o join customers c on lower(o.name) = lower(c.name)",
             vec![make_table("orders"), make_table("customers")],
