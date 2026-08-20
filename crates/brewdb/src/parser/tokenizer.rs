@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "visitor")]
 use sqlparser_derive::{Visit, VisitMut};
 
+use crate::common::diagnostics::{DiagnosticError, ErrorCode};
 use crate::dialect::Dialect;
 use crate::dialect::{
     BigQueryDialect, DuckDbDialect, GenericDialect, MySqlDialect, PostgreSqlDialect,
@@ -50,6 +51,8 @@ use crate::{
     ast::{DollarQuotedString, QuoteDelimitedString},
     dialect::HiveDialect,
 };
+
+const TOKENIZER_ERROR: ErrorCode = ErrorCode::new("BREWDB_PARSER_TOKENIZER_ERROR");
 
 /// SQL Token enumeration
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -801,6 +804,33 @@ impl fmt::Display for TokenizerError {
 }
 
 impl core::error::Error for TokenizerError {}
+
+impl DiagnosticError for TokenizerError {
+    fn error_code(&self) -> ErrorCode {
+        TOKENIZER_ERROR
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.parser"
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use crate::common::diagnostics::DiagnosticError;
+    use crate::tokenizer::{Location, TokenizerError};
+
+    #[test]
+    fn tokenizer_error_uses_parser_diagnostic_code() {
+        let error = TokenizerError {
+            message: "unterminated string".to_owned(),
+            location: Location { line: 1, column: 7 },
+        };
+
+        assert_eq!(error.error_code().as_str(), "BREWDB_PARSER_TOKENIZER_ERROR");
+        assert_eq!(error.log_target(), "brewdb.parser");
+    }
+}
 
 struct State<'a> {
     peekable: Peekable<Chars<'a>>,

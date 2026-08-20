@@ -4,7 +4,8 @@ use std::process::Command as ProcessCommand;
 
 use brewdb_benchmark::benchmark::{BenchmarkReport, QueryRunResult, render_report};
 use brewdb_benchmark::benchmark::{
-    BenchmarkRunConfig, PaimonFileFormat, Workload, load_queries_from_dir, split_sql_statements,
+    BenchmarkRunConfig, PaimonFileFormat, Workload, load_queries, load_queries_from_dir,
+    split_sql_statements,
 };
 use brewdb_benchmark::cli::{Command, parse_args};
 use brewdb_benchmark::clickbench::{
@@ -229,6 +230,36 @@ fn tpch_schema_and_load_sql_are_file_backed() {
         );
     }
     assert!(benchmark_dir.join("clickbench/queries/q01.sql").exists());
+}
+
+#[test]
+fn tpch_queries_are_loaded_with_deterministic_parameters() {
+    let config = BenchmarkRunConfig {
+        workload: Workload::Tpch,
+        host: "127.0.0.1".to_owned(),
+        port: 5432,
+        database: "brewdb".to_owned(),
+        data_dir: None,
+        queries_dir: None,
+        query_file: None,
+        iterations: 1,
+        setup: false,
+        brewdb_bin: default_brewdb_bin(),
+        config_path: None,
+        paimon_file_format: PaimonFileFormat::Parquet,
+    };
+
+    let queries = load_queries(&config).unwrap();
+
+    assert_eq!(queries.len(), 22);
+    for query in queries {
+        assert!(
+            !query.sql.contains(":1"),
+            "{} should not contain template parameters: {}",
+            query.name,
+            query.sql
+        );
+    }
 }
 
 #[test]

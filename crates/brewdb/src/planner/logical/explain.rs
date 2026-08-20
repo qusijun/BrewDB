@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::parser::ast::{AnalyzeFormatKind, Statement as AstStatement};
-use crate::SqlError;
+use crate::planner::PlannerError;
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
 use datafusion_common::DFSchema;
 use datafusion_expr::{Explain, LogicalPlan as DataFusionLogicalPlan};
@@ -13,7 +13,7 @@ pub(crate) fn bind_explain_statement(
     statement: &AstStatement,
     format: Option<AnalyzeFormatKind>,
     ctx: &LogicalPlanningContext<'_>,
-) -> Result<DataFusionLogicalPlan, SqlError> {
+) -> Result<DataFusionLogicalPlan, PlannerError> {
     let input = planner.plan(statement.clone(), ctx)?;
     let _ = format;
     let stringified_plans = vec![input.to_stringified(PlanType::InitialLogicalPlan)];
@@ -24,7 +24,7 @@ pub(crate) fn bind_explain_statement(
         stringified_plans,
         schema: Arc::new(
             DFSchema::try_from(DataFusionLogicalPlan::explain_schema()).map_err(|error| {
-                SqlError::InvalidRequest {
+                PlannerError::InvalidPlan {
                     reason: error.to_string(),
                 }
             })?,

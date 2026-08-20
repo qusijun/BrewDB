@@ -1,8 +1,6 @@
 //! Runtime exchange channel planning.
 
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
-use std::fmt;
 use std::io::Cursor;
 use std::sync::Mutex;
 
@@ -21,6 +19,7 @@ use datafusion_physical_expr::PhysicalExpr;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 
+use crate::runtime::errors::ExchangeRuntimeError;
 use crate::runtime::execution_graph::ExecutionGraph;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -39,59 +38,6 @@ pub struct ExchangeChannelDescriptor {
     pub exchange_type: ExchangeType,
     pub partitioning_scheme: PartitioningScheme,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExchangeRuntimeError {
-    SourceFragmentNotScheduled { fragment_id: PlanFragmentId },
-    TargetFragmentNotScheduled { fragment_id: PlanFragmentId },
-    ExchangeReceiverAlreadyTaken { exchange_id: ExchangeId },
-    ExchangeReceiverClosed { exchange_id: ExchangeId },
-    EmptyExchangeOutputs,
-    InvalidExchangeRouting { reason: String },
-    IpcSerializationFailed { reason: String },
-    UnsupportedDataEncoding { encoding: ExchangeDataEncoding },
-    BufferLockPoisoned,
-}
-
-impl fmt::Display for ExchangeRuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SourceFragmentNotScheduled { fragment_id } => {
-                write!(
-                    f,
-                    "exchange source fragment {:?} is not scheduled",
-                    fragment_id
-                )
-            }
-            Self::TargetFragmentNotScheduled { fragment_id } => {
-                write!(
-                    f,
-                    "exchange target fragment {:?} is not scheduled",
-                    fragment_id
-                )
-            }
-            Self::ExchangeReceiverAlreadyTaken { exchange_id } => {
-                write!(f, "exchange receiver already taken for {:?}", exchange_id)
-            }
-            Self::ExchangeReceiverClosed { exchange_id } => {
-                write!(f, "exchange receiver is closed for {:?}", exchange_id)
-            }
-            Self::EmptyExchangeOutputs => write!(f, "exchange output channels are empty"),
-            Self::InvalidExchangeRouting { reason } => {
-                write!(f, "invalid exchange routing: {reason}")
-            }
-            Self::IpcSerializationFailed { reason } => {
-                write!(f, "exchange Arrow IPC serialization failed: {reason}")
-            }
-            Self::UnsupportedDataEncoding { encoding } => {
-                write!(f, "unsupported exchange data encoding: {encoding:?}")
-            }
-            Self::BufferLockPoisoned => write!(f, "exchange buffer lock is poisoned"),
-        }
-    }
-}
-
-impl Error for ExchangeRuntimeError {}
 
 pub fn build_exchange_channels(
     exchanges: &[ExchangeNode],

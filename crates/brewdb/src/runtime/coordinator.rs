@@ -20,13 +20,14 @@ use datafusion_expr::{CreateExternalTable, DdlStatement, DropTable};
 use crate::execution::executor::FragmentExecutionEnvelope;
 use crate::runtime::exchange_service::TransportExchangePageSink;
 use crate::runtime::execution_graph::{
-    ExecutionGraph, ExecutionRuntimeError, FragmentInstance, QueryExecutionHandle, QueryOutput,
+    ExecutionGraph, FragmentInstance, QueryExecutionHandle, QueryOutput,
 };
 use crate::runtime::scheduler::{
-    AllAtOnceFragmentScheduler, FragmentScheduler, FragmentSchedulerError, ResourceManager,
-    StaticResourceManager, WorkerInfo,
+    AllAtOnceFragmentScheduler, FragmentScheduler, ResourceManager, StaticResourceManager,
+    WorkerInfo,
 };
 use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
+use crate::runtime::{ExecutionRuntimeError, FragmentSchedulerError};
 
 pub struct QueryCoordinator {
     pub(crate) scheduler: AllAtOnceFragmentScheduler,

@@ -8,7 +8,8 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::runtime::exchange::{ExchangeDataPage, ExchangeId, ExchangeRuntimeError};
+use crate::runtime::exchange::{ExchangeDataPage, ExchangeId};
+use crate::runtime::ExchangeRuntimeError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerExchangeError {
