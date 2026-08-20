@@ -10160,13 +10160,32 @@ impl<'a> Parser<'a> {
                 self.parse_option_clustered()
             }
             _ => {
-                let name = self.parse_identifier()?;
+                let name = self.parse_sql_option_key()?;
                 self.expect_token(&Token::Eq)?;
                 let value = self.parse_expr()?;
 
                 Ok(SqlOption::KeyValue { key: name, value })
             }
         }
+    }
+
+    fn parse_sql_option_key(&mut self) -> Result<Ident, ParserError> {
+        let mut parts = vec![self.parse_identifier()?];
+        while self.consume_token(&Token::Period) {
+            parts.push(self.parse_identifier()?);
+        }
+        if parts.len() == 1 {
+            return Ok(parts.remove(0));
+        }
+        Ok(Ident {
+            value: parts
+                .iter()
+                .map(|ident| ident.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            quote_style: None,
+            span: parts[0].span,
+        })
     }
 
     /// Parse a `CLUSTERED` table option (MSSQL-specific syntaxes supported).

@@ -30,6 +30,24 @@ impl Workload {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaimonFileFormat {
+    Parquet,
+    Vortex,
+}
+
+impl PaimonFileFormat {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "parquet" => Ok(Self::Parquet),
+            "vortex" => Ok(Self::Vortex),
+            _ => Err(format!(
+                "unsupported file format `{value}`, expected `parquet` or `vortex`"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkRunConfig {
     pub workload: Workload,
@@ -43,6 +61,7 @@ pub struct BenchmarkRunConfig {
     pub setup: bool,
     pub brewdb_bin: PathBuf,
     pub config_path: Option<PathBuf>,
+    pub paimon_file_format: PaimonFileFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +90,8 @@ pub fn run_benchmark(config: &BenchmarkRunConfig) -> io::Result<BenchmarkReport>
     if config.setup {
         if let Some(data_dir) = &config.data_dir {
             let setup_sql = match config.workload {
-                Workload::Tpch => tpch_load_sql(data_dir),
-                Workload::ClickBench => clickbench_load_sql(data_dir),
+                Workload::Tpch => tpch_load_sql(data_dir, config.paimon_file_format),
+                Workload::ClickBench => clickbench_load_sql(data_dir, config.paimon_file_format),
             };
             execute_setup_sql(config, &setup_sql)?;
         }

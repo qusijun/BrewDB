@@ -1,0 +1,15 @@
+statement ok
+create table paimon_vortex_orders (id int) with (file.format = vortex);
+
+statement ok
+insert into paimon_vortex_orders values (1), (2), (3);
+
+query I
+select count(*) from paimon_vortex_orders;
+----
+3
+
+query I
+select id from paimon_vortex_orders order by id desc limit 1;
+----
+3

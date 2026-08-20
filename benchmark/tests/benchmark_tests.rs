@@ -1,11 +1,11 @@
 use std::fs;
-use std::process::Command as ProcessCommand;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
-use brewdb_benchmark::benchmark::{
-    BenchmarkRunConfig, Workload, load_queries_from_dir, split_sql_statements,
-};
 use brewdb_benchmark::benchmark::{BenchmarkReport, QueryRunResult, render_report};
+use brewdb_benchmark::benchmark::{
+    BenchmarkRunConfig, PaimonFileFormat, Workload, load_queries_from_dir, split_sql_statements,
+};
 use brewdb_benchmark::cli::{Command, parse_args};
 use brewdb_benchmark::clickbench::{
     ClickBenchGenConfig, clickbench_load_sql, write_clickbench_csv_from_gzip,
@@ -83,8 +83,49 @@ fn parse_run_tpch_command() {
             setup: true,
             brewdb_bin: default_brewdb_bin(),
             config_path: None,
+            paimon_file_format: PaimonFileFormat::Parquet,
         })
     );
+}
+
+#[test]
+fn parse_run_accepts_paimon_file_format() {
+    let command = parse_args([
+        "benchmark",
+        "run",
+        "tpch",
+        "--data-dir",
+        "/tmp/tpch",
+        "--paimon-file-format",
+        "vortex",
+    ])
+    .unwrap();
+
+    assert_eq!(
+        command,
+        Command::Run(BenchmarkRunConfig {
+            workload: Workload::Tpch,
+            host: "127.0.0.1".to_owned(),
+            port: 5432,
+            database: "brewdb".to_owned(),
+            data_dir: Some(PathBuf::from("/tmp/tpch")),
+            queries_dir: None,
+            query_file: None,
+            iterations: 1,
+            setup: true,
+            brewdb_bin: default_brewdb_bin(),
+            config_path: None,
+            paimon_file_format: PaimonFileFormat::Vortex,
+        })
+    );
+}
+
+#[test]
+fn parse_run_rejects_unknown_paimon_file_format() {
+    let error =
+        parse_args(["benchmark", "run", "tpch", "--paimon-file-format", "orc"]).unwrap_err();
+
+    assert!(error.contains("unsupported file format `orc`"));
 }
 
 #[test]
@@ -113,20 +154,15 @@ fn parse_run_tpch_query_file_command() {
             setup: false,
             brewdb_bin: default_brewdb_bin(),
             config_path: None,
+            paimon_file_format: PaimonFileFormat::Parquet,
         })
     );
 }
 
 #[test]
 fn parse_run_rejects_brewdbd_bin_command() {
-    let error = parse_args([
-        "benchmark",
-        "run",
-        "tpch",
-        "--brewdbd-bin",
-        "/tmp/brewdbd",
-    ])
-    .unwrap_err();
+    let error =
+        parse_args(["benchmark", "run", "tpch", "--brewdbd-bin", "/tmp/brewdbd"]).unwrap_err();
 
     assert!(error.contains("unknown run flag `--brewdbd-bin`"));
 }
@@ -161,19 +197,29 @@ fn generate_tpch_csv_writes_all_tables_with_headers() {
 
 #[test]
 fn tpch_load_sql_points_copy_from_to_generated_csvs() {
-    let sql = tpch_load_sql(Path::new("/tmp/tpch"));
+    let sql = tpch_load_sql(Path::new("/tmp/tpch"), PaimonFileFormat::Parquet);
 
     assert!(sql.contains("create table if not exists lineitem"));
+    assert!(sql.contains(") with (file.format = parquet);"));
     assert!(sql.contains("copy from '/tmp/tpch/lineitem.csv' to lineitem"));
     assert!(sql.contains("with (format csv, header true)"));
     assert!(!sql.contains("${DATA_DIR}"));
 }
 
 #[test]
+fn tpch_load_sql_can_select_vortex_paimon_file_format() {
+    let sql = tpch_load_sql(Path::new("/tmp/tpch"), PaimonFileFormat::Vortex);
+
+    assert!(sql.contains(") with (file.format = vortex);"));
+    assert!(!sql.contains("file.format = parquet"));
+}
+
+#[test]
 fn tpch_schema_and_load_sql_are_file_backed() {
     let benchmark_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    assert!(benchmark_dir.join("tpch/schema.sql").exists());
+    assert!(benchmark_dir.join("tpch/parquet/schema.sql").exists());
+    assert!(benchmark_dir.join("tpch/vortex/schema.sql").exists());
     assert!(benchmark_dir.join("tpch/load.sql").exists());
     for query in 1..=22 {
         assert!(
@@ -188,14 +234,24 @@ fn tpch_schema_and_load_sql_are_file_backed() {
 #[test]
 fn clickbench_schema_and_load_sql_are_file_backed() {
     let benchmark_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sql = clickbench_load_sql(Path::new("/tmp/clickbench"));
+    let sql = clickbench_load_sql(Path::new("/tmp/clickbench"), PaimonFileFormat::Parquet);
 
-    assert!(benchmark_dir.join("clickbench/schema.sql").exists());
+    assert!(benchmark_dir.join("clickbench/parquet/schema.sql").exists());
+    assert!(benchmark_dir.join("clickbench/vortex/schema.sql").exists());
     assert!(benchmark_dir.join("clickbench/load.sql").exists());
     assert!(sql.contains("create table if not exists hits"));
+    assert!(sql.contains(") with (file.format = parquet);"));
     assert!(sql.contains("copy from '/tmp/clickbench/hits.csv' to hits"));
     assert!(sql.contains("with (format csv, header false)"));
     assert!(!sql.contains("${DATA_DIR}"));
+}
+
+#[test]
+fn clickbench_load_sql_can_select_vortex_paimon_file_format() {
+    let sql = clickbench_load_sql(Path::new("/tmp/clickbench"), PaimonFileFormat::Vortex);
+
+    assert!(sql.contains(") with (file.format = vortex);"));
+    assert!(!sql.contains("file.format = parquet"));
 }
 
 #[test]
@@ -280,6 +336,7 @@ fn run_benchmark_fails_when_setup_statement_fails() {
         setup: true,
         brewdb_bin,
         config_path: None,
+        paimon_file_format: PaimonFileFormat::Parquet,
     })
     .unwrap_err();
 
