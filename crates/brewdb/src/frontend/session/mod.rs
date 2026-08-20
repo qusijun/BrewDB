@@ -1,8 +1,8 @@
 //! Protocol-neutral session and request handling.
 
-use crate::frontend::ingress::{
-    SqlClientCapabilities, SqlIngressRequest, SqlRequestContext, SqlSessionContext,
-};
+use crate::common::config::ConfigSet;
+use crate::common::context::SessionContext;
+use crate::frontend::ingress::{IngressSql, SqlClientCapabilities, SqlRequestContext};
 use uuid::Uuid;
 
 use crate::frontend::auth::{AuthContext, Authenticator};
@@ -97,6 +97,7 @@ pub struct ClientContext {
     pub defaults: ClientDefaults,
     pub identity: ClientIdentity,
     pub capabilities: ClientCapabilities,
+    pub settings: ConfigSet,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,9 +141,19 @@ pub struct SqlRequest {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct FrontendService;
+pub struct FrontendService {
+    system_settings: ConfigSet,
+}
 
 impl FrontendService {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_system_settings(system_settings: ConfigSet) -> Self {
+        Self { system_settings }
+    }
+
     pub fn open_session<A: Authenticator>(
         &self,
         authenticator: &A,
@@ -160,6 +171,7 @@ impl FrontendService {
                 defaults: request.defaults.with_database_opt(decision.database_name),
                 identity,
                 capabilities: request.capabilities,
+                settings: self.system_settings.clone(),
             },
         })
     }
@@ -184,22 +196,20 @@ impl FrontendService {
         })
     }
 
-    pub fn build_sql_ingress_request(
-        &self,
-        request: &SqlRequest,
-    ) -> Result<SqlIngressRequest, FrontendError> {
+    pub fn build_ingress_sql(&self, request: &SqlRequest) -> Result<IngressSql, FrontendError> {
         if request.sql.trim().is_empty() {
             return Err(FrontendError::InvalidRequest {
                 reason: "SQL text must not be empty".to_string(),
             });
         }
 
-        Ok(SqlIngressRequest {
-            session: SqlSessionContext {
+        Ok(IngressSql {
+            session: SessionContext {
                 session_id: request.client_context.session.session_id,
                 user_name: request.client_context.identity.user_name.clone(),
                 database_name: request.client_context.identity.database_name.clone(),
                 catalog_name: request.client_context.defaults.catalog_name.clone(),
+                settings: request.client_context.settings.clone(),
             },
             request: SqlRequestContext {
                 request_id: request.request_context.request_id,
@@ -251,6 +261,7 @@ impl Default for ClientDefaults {
 mod tests {
     use uuid::Uuid;
 
+    use crate::common::config::ConfigSet;
     use crate::frontend::auth::{AuthContext, AuthMethod, StaticAuthenticator};
     use crate::frontend::MANAGED_PAIMON_CATALOG_NAME;
 
@@ -261,7 +272,7 @@ mod tests {
 
     #[test]
     fn service_builds_request_for_opened_session() {
-        let service = FrontendService;
+        let service = FrontendService::new();
         let opened = service
             .open_session(
                 &StaticAuthenticator,
@@ -285,14 +296,47 @@ mod tests {
         );
         assert_eq!(request.sql, "select 1");
     }
+
+    #[test]
+    fn service_builds_session_settings_from_system_settings() {
+        let service = FrontendService::with_system_settings(
+            ConfigSet::new().with_entry("datafusion.execution.batch_size", 128_u64),
+        );
+        let opened = service
+            .open_session(
+                &StaticAuthenticator,
+                OpenClientSession {
+                    auth: AuthContext::new("brew", AuthMethod::Trust).with_database("brewdb"),
+                    defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
+                    connection: None,
+                    capabilities: ClientCapabilities::default(),
+                },
+            )
+            .unwrap();
+        let request = service
+            .build_request(&opened, RequestContext::new(Uuid::nil()), "select 1")
+            .unwrap();
+
+        let ingress = service.build_ingress_sql(&request).unwrap();
+
+        assert_eq!(
+            ingress
+                .session
+                .settings
+                .get_u64("datafusion.execution.batch_size")
+                .unwrap(),
+            Some(128)
+        );
+    }
 }
 
 #[cfg(test)]
 mod sql_handoff_tests {
     use uuid::Uuid;
 
-    use crate::{SqlClientCapabilities, SqlIngressRequest};
+    use crate::{IngressSql, SqlClientCapabilities};
 
+    use crate::common::config::ConfigSet;
     use crate::frontend::session::{
         ClientCapabilities, ClientContext, ClientDefaults, ClientIdentity, ClientSessionContext,
         FrontendService, RequestContext, SqlRequest,
@@ -314,6 +358,7 @@ mod sql_handoff_tests {
                     supports_portals: false,
                     supports_streaming_results: true,
                 },
+                settings: ConfigSet::new(),
             },
             request_context: RequestContext::new(Uuid::nil()),
             sql: sql.to_string(),
@@ -323,7 +368,7 @@ mod sql_handoff_tests {
     #[test]
     fn sql_request_maps_to_sql_ingress_request() {
         let request = make_sql_request("select 1");
-        let sql_request = FrontendService.build_sql_ingress_request(&request).unwrap();
+        let sql_request = FrontendService::new().build_ingress_sql(&request).unwrap();
 
         assert_eq!(sql_request.session.session_id, Uuid::nil());
         assert_eq!(sql_request.session.user_name, "brew");
@@ -347,8 +392,7 @@ mod sql_handoff_tests {
     #[test]
     fn sql_ingress_request_does_not_include_connection_transport_data() {
         let request = make_sql_request("set search_path = brew");
-        let sql_request: SqlIngressRequest =
-            FrontendService.build_sql_ingress_request(&request).unwrap();
+        let sql_request: IngressSql = FrontendService::new().build_ingress_sql(&request).unwrap();
 
         assert_eq!(std::mem::size_of_val(&sql_request.session.session_id), 16);
     }

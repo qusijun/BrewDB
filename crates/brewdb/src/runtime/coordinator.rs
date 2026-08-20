@@ -5,12 +5,11 @@ use std::sync::Arc;
 use crate::catalog::{
     CatalogService, CreateDatabaseRequest, CreateTableRequest, TableCatalogEntry,
 };
-use crate::common::runtime::QueryContext;
+use crate::common::context::QueryContext;
 use crate::common::table::TableSchema;
 use crate::common::table::{primary_key_names, table_reference_parts};
-use crate::planner::distributed::plan::{
-    CommandPlan, DistributedFragmentPlan, DistributedPlanRoot,
-};
+use crate::planner::distributed::{DistributedFragmentPlan, DistributedPlanRoot};
+use crate::planner::CommandPlan;
 use crate::planner::{Ddl, DropDatabase, LogicalPlanNode, Show};
 use crate::storage::StorageEngine;
 use arrow::array::{ArrayRef, StringArray};
@@ -18,35 +17,16 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_expr::{CreateExternalTable, DdlStatement, DropTable};
 
-use crate::runtime::exchange::ExchangeChannelDescriptor;
+use crate::execution::executor::FragmentExecutionEnvelope;
+use crate::runtime::exchange_service::TransportExchangePageSink;
 use crate::runtime::execution_graph::{
-    ExecutionGraph, ExecutionRuntimeError, FragmentInstance, QueryExecutionHandle,
-    QueryExecutionRequest, QueryOutput,
-};
-use crate::runtime::rpc::{
-    ExchangePageSink, FragmentExecutionEnvelope, LocalFragmentTransport, TransportRegistry,
+    ExecutionGraph, ExecutionRuntimeError, FragmentInstance, QueryExecutionHandle, QueryOutput,
 };
 use crate::runtime::scheduler::{
     AllAtOnceFragmentScheduler, FragmentScheduler, FragmentSchedulerError, ResourceManager,
     StaticResourceManager, WorkerInfo,
 };
-
-struct TransportExchangePageSink {
-    transport_registry: Arc<dyn TransportRegistry>,
-}
-
-impl ExchangePageSink for TransportExchangePageSink {
-    fn send_page(
-        &self,
-        channel: &ExchangeChannelDescriptor,
-        page: crate::runtime::exchange::ExchangeDataPage,
-    ) -> Result<(), crate::runtime::rpc::RpcError> {
-        let transport = self
-            .transport_registry
-            .transport(&channel.target_endpoint)?;
-        transport.send_exchange_page(page)
-    }
-}
+use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
 
 pub struct QueryCoordinator {
     pub(crate) scheduler: AllAtOnceFragmentScheduler,
@@ -68,7 +48,7 @@ impl Default for QueryCoordinator {
             transport_registry: Arc::new(std::collections::BTreeMap::from([(
                 "rpc://worker-0".to_owned(),
                 Arc::new(LocalFragmentTransport::with_storage(Arc::clone(&storage)))
-                    as Arc<dyn crate::runtime::rpc::FragmentTransport>,
+                    as Arc<dyn FragmentTransport>,
             )])),
             storage,
             catalog_service: None,
@@ -87,7 +67,7 @@ impl QueryCoordinator {
             transport_registry: Arc::new(std::collections::BTreeMap::from([(
                 "rpc://worker-0".to_owned(),
                 Arc::new(LocalFragmentTransport::with_storage(Arc::clone(&storage)))
-                    as Arc<dyn crate::runtime::rpc::FragmentTransport>,
+                    as Arc<dyn FragmentTransport>,
             )])),
             storage,
             catalog_service: None,
@@ -144,7 +124,15 @@ impl QueryCoordinator {
 
     fn execute_command(
         &self,
-        request: QueryExecutionRequest,
+        query_context: QueryContext,
+        command: CommandPlan,
+    ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
+        self.execute_command_plan(query_context, command)
+    }
+
+    pub fn execute_command_plan(
+        &self,
+        query_context: QueryContext,
         command: CommandPlan,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         let catalog_service = self.catalog_service.as_ref().ok_or_else(|| {
@@ -153,11 +141,9 @@ impl QueryCoordinator {
             }
         })?;
         match command {
-            CommandPlan::Ddl(statement) => {
-                execute_ddl(catalog_service, request.query_context, statement)
-            }
+            CommandPlan::Ddl(statement) => execute_ddl(catalog_service, query_context, statement),
             CommandPlan::Extension(node) => {
-                execute_brewdb_extension(catalog_service, request.query_context, node)
+                execute_brewdb_extension(catalog_service, query_context, node)
             }
             CommandPlan::Statement(statement) => Err(ExecutionRuntimeError::InvalidPlan {
                 reason: format!("unsupported statement command: {statement:?}"),
@@ -173,27 +159,32 @@ impl QueryCoordinator {
         }
     }
 
+    pub fn is_single_node(&self) -> bool {
+        self.single_node_worker_id().is_some()
+    }
+
     fn execute_single_node_query(
         &self,
-        request: QueryExecutionRequest,
+        query_context: QueryContext,
+        distributed_plan: DistributedFragmentPlan,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         if self.single_node_worker_id().is_none() {
             return Err(ExecutionRuntimeError::InvalidPlan {
                 reason: "single-node fast path requires exactly one worker".to_owned(),
             });
         }
-        let instances = self.build_fragment_instances(request.clone())?;
-        self.execute_fragment_instances(request, instances)
+        let instances = self.build_fragment_instances(distributed_plan.clone())?;
+        self.execute_fragment_instances(query_context, distributed_plan, instances)
     }
 
     pub fn build_fragment_instances(
         &self,
-        request: QueryExecutionRequest,
+        distributed_plan: DistributedFragmentPlan,
     ) -> Result<Vec<FragmentInstance>, ExecutionRuntimeError> {
-        let table_catalogs = Self::local_fragment_tables(&request.distributed_plan);
-        let exchanges = request.distributed_plan.exchanges.clone();
+        let table_catalogs = Self::local_fragment_tables(&distributed_plan);
+        let exchanges = distributed_plan.exchanges.clone();
         let execution_graph = self
-            .build_execution_graph(request.distributed_plan)
+            .build_execution_graph(distributed_plan)
             .map_err(|err| ExecutionRuntimeError::InvalidPlan {
                 reason: err.to_string(),
             })?;
@@ -239,25 +230,26 @@ impl QueryCoordinator {
 
     fn execute_fragment_instances(
         &self,
-        request: QueryExecutionRequest,
+        query_context: QueryContext,
+        distributed_plan: DistributedFragmentPlan,
         instances: Vec<FragmentInstance>,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         let output = Arc::new(QueryOutput::default());
-        let (command_tag, returns_rows) = Self::execution_result_shape(&request.distributed_plan);
+        let (command_tag, returns_rows) = Self::execution_result_shape(&distributed_plan);
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for instance in instances {
                 let transport_registry = Arc::clone(&self.transport_registry);
-                let result_batch_sink =
-                    Arc::clone(&output) as Arc<dyn crate::runtime::rpc::ResultBatchSink>;
+                let result_batch_sink = Arc::clone(&output)
+                    as Arc<dyn crate::runtime::exchange_service::ResultBatchSink>;
                 joins.push(scope.spawn(move || {
                     let is_root_fragment = instance.fragment().kind
-                        == crate::planner::distributed::plan::PlanFragmentKind::Root;
+                        == crate::planner::distributed::PlanFragmentKind::Root;
                     let worker_id = instance.worker_id;
                     let endpoint = instance.endpoint.clone();
-                    let page_sink = Arc::new(TransportExchangePageSink {
-                        transport_registry: Arc::clone(&transport_registry),
-                    });
+                    let page_sink = Arc::new(TransportExchangePageSink::new(Arc::clone(
+                        &transport_registry,
+                    )));
                     let client = transport_registry.transport(&endpoint).map_err(|err| {
                         ExecutionRuntimeError::InvalidPlan {
                             reason: err.to_string(),
@@ -287,7 +279,7 @@ impl QueryCoordinator {
         })?;
 
         Ok(QueryExecutionHandle {
-            query_context: request.query_context,
+            query_context,
             command_tag: command_tag.to_owned(),
             returns_rows,
             output,
@@ -296,16 +288,17 @@ impl QueryCoordinator {
 
     pub fn execute_query(
         &self,
-        request: QueryExecutionRequest,
+        query_context: QueryContext,
+        distributed_plan: DistributedFragmentPlan,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
-        if let DistributedPlanRoot::Command(command) = request.distributed_plan.root.clone() {
-            return self.execute_command(request, command);
+        if let DistributedPlanRoot::Command(command) = distributed_plan.root.clone() {
+            return self.execute_command(query_context, command);
         }
         if self.single_node_worker_id().is_some() {
-            return self.execute_single_node_query(request);
+            return self.execute_single_node_query(query_context, distributed_plan);
         }
-        let instances = self.build_fragment_instances(request.clone())?;
-        self.execute_fragment_instances(request, instances)
+        let instances = self.build_fragment_instances(distributed_plan.clone())?;
+        self.execute_fragment_instances(query_context, distributed_plan, instances)
     }
 }
 
@@ -472,11 +465,12 @@ fn map_common_error(error: crate::common::errors::CommonError) -> ExecutionRunti
 
 #[cfg(test)]
 mod tests {
-    use crate::common::runtime::QueryContext;
-    use crate::planner::distributed::plan::{
+    use crate::common::context::QueryContext;
+    use crate::planner::distributed::{
         DistributedFragmentPlan, DistributedPlanRoot, FragmentScanSplits, PlanFragment,
         PlanFragmentId, PlanFragmentKind,
     };
+    use crate::planner::CommandTag;
 
     use super::QueryCoordinator;
     use crate::planner::distributed::split::TableScanSplitGroup;
@@ -492,12 +486,10 @@ mod tests {
         )
         .with_locations(vec!["file:///tmp/t/part-1.csv".to_owned()]);
         let plan = DistributedFragmentPlan {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,
             table_catalogs: vec![],
-            command_tag: "SELECT".to_owned(),
+            command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![PlanFragment {
                 fragment_id,

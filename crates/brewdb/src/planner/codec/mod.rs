@@ -1,6 +1,6 @@
 //! Planner wire-codec conversions.
 
-use crate::planner::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
+use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::errors::PlannerError;
 use crate::prost::planner::v1 as prost;
 

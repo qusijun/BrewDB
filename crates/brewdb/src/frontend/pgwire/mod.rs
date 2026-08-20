@@ -488,7 +488,7 @@ mod tests {
             PgWireCodec
                 .serve_connection_io(
                     server_stream,
-                    FrontendService,
+                    FrontendService::new(),
                     ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                     Arc::new(TestHandler),
                 )

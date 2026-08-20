@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::planner::distributed::plan::{FragmentScanSplits, PlanFragment, PlanFragmentKind};
+use crate::planner::distributed::{FragmentScanSplits, PlanFragment, PlanFragmentKind};
 use uuid::Uuid;
 
 use crate::runtime::execution_graph::{ExecutionGraph, FragmentInstance};
@@ -151,9 +151,9 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
 mod tests {
     use std::sync::Arc;
 
-    use crate::planner::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
+    use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 
-    use crate::common::runtime::QueryContext;
+    use crate::common::context::QueryContext;
 
     use crate::runtime::execution_graph::ExecutionGraph;
 
@@ -168,9 +168,7 @@ mod tests {
         let err = scheduler
             .schedule(
                 ExecutionGraph {
-                    query_context: QueryContext {
-                        query_id: uuid::Uuid::new_v4(),
-                    },
+                    query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
                     fragments: vec![],
                     instances: vec![],
                 },
@@ -191,9 +189,7 @@ mod tests {
             worker_selector: Arc::new(FirstWorkerSelector),
         };
         let execution_graph = ExecutionGraph::from_plan_fragments(
-            QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            QueryContext::for_test(uuid::Uuid::new_v4()),
             vec![PlanFragment {
                 fragment_id: PlanFragmentId(0),
                 kind: PlanFragmentKind::Root,

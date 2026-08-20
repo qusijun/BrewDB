@@ -1,5 +1,6 @@
 //! Frontend-facing SQL ingress boundary.
 
+use crate::common::context::SessionContext;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,21 +11,13 @@ pub struct SqlClientCapabilities {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SqlSessionContext {
-    pub session_id: Uuid,
-    pub user_name: String,
-    pub database_name: Option<String>,
-    pub catalog_name: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqlRequestContext {
     pub request_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SqlIngressRequest {
-    pub session: SqlSessionContext,
+pub struct IngressSql {
+    pub session: SessionContext,
     pub request: SqlRequestContext,
     pub sql: String,
     pub client_capabilities: Option<SqlClientCapabilities>,
