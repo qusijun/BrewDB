@@ -8,7 +8,7 @@ use datafusion_common::DFSchemaRef;
 use datafusion_expr::UserDefinedLogicalNodeCore;
 use datafusion_expr::{Expr as DataFusionExpr, Extension, LogicalPlan as DataFusionLogicalPlan};
 
-use super::plan::PlanFragmentId;
+use super::fragment::PlanFragmentId;
 use datafusion_common::Column;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

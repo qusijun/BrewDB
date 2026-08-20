@@ -1,15 +1,15 @@
 //! SQL-to-runtime driver.
 
 use crate::catalog::{CatalogError, CatalogService};
+use crate::common::context::QueryContext;
 use crate::common::diagnostics::{DiagnosticError, ErrorCode};
-use crate::common::runtime::QueryContext;
-use crate::frontend::ingress::SqlIngressRequest;
+use crate::frontend::ingress::IngressSql;
 use crate::parser::ast::Statement;
 use crate::parser::dialect::PostgreSqlDialect;
 use crate::parser::parser::Parser;
 use crate::planner::{
-    DistributedPlanner, DistributedPlannerRequest, LogicalPlanner, LogicalPlanningContext,
-    PlannerError,
+    DistributedFragmentPlanner, FragmentPlanner, LogicalOptimizer, LogicalPlanner,
+    LogicalPlanningContext, PlannerError, StandaloneFragmentPlanner,
 };
 use crate::SqlError;
 use std::error::Error;
@@ -17,9 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::runtime::coordinator::QueryCoordinator;
-use crate::runtime::execution_graph::{
-    ExecutionRuntimeError, QueryExecutionHandle, QueryExecutionRequest,
-};
+use crate::runtime::execution_graph::{ExecutionRuntimeError, QueryExecutionHandle};
 
 pub(crate) fn sql_to_statement(sql: &str) -> Result<Statement, SqlError> {
     let dialect = PostgreSqlDialect {};
@@ -105,25 +103,29 @@ impl From<ExecutionRuntimeError> for SqlDriverError {
 pub struct SqlDriver {
     catalog_service: CatalogService,
     logical_planner: LogicalPlanner,
-    planner: DistributedPlanner,
+    logical_optimizer: LogicalOptimizer,
+    fragment_planner: Box<dyn FragmentPlanner>,
     coordinator: QueryCoordinator,
 }
 
 impl SqlDriver {
     pub fn new(catalog_service: CatalogService, coordinator: QueryCoordinator) -> Self {
         let coordinator = coordinator.with_catalog_service(catalog_service.clone());
+        let fragment_planner: Box<dyn FragmentPlanner> = if coordinator.is_single_node() {
+            Box::new(StandaloneFragmentPlanner)
+        } else {
+            Box::new(DistributedFragmentPlanner)
+        };
         Self {
             catalog_service,
             logical_planner: LogicalPlanner::default(),
-            planner: DistributedPlanner::default(),
+            logical_optimizer: LogicalOptimizer::default(),
+            fragment_planner,
             coordinator,
         }
     }
 
-    pub fn execute(
-        &self,
-        request: SqlIngressRequest,
-    ) -> Result<QueryExecutionHandle, SqlDriverError> {
+    pub fn execute(&self, request: IngressSql) -> Result<QueryExecutionHandle, SqlDriverError> {
         let parsed = sql_to_statement(&request.sql)?;
         let planned = self.logical_planner.plan(
             parsed,
@@ -134,19 +136,27 @@ impl SqlDriver {
             },
         )?;
 
-        let query_context = QueryContext {
-            query_id: request.request.request_id,
-        };
-        let distributed_plan = self.planner.build(DistributedPlannerRequest {
-            query_context: query_context.clone(),
-            logical_plan: planned,
-            storage: Arc::clone(&self.coordinator.storage),
-        })?;
+        let query_context = QueryContext::new(request.request.request_id, request.session.clone())
+            .with_settings(request.session.settings.clone());
+        if let Some(command) = crate::planner::logical::command::command_plan(&planned) {
+            return self
+                .coordinator
+                .execute_command_plan(query_context, command)
+                .map_err(SqlDriverError::Runtime);
+        }
+
+        let optimized = self
+            .logical_optimizer
+            .optimize_with_query_context(planned, &query_context)
+            .map_err(|err| PlannerError::InvalidPlan {
+                reason: err.to_string(),
+            })?;
+        let storage = Arc::clone(&self.coordinator.storage);
+        let distributed_plan =
+            self.fragment_planner
+                .plan_fragments(query_context.clone(), optimized, storage)?;
         self.coordinator
-            .execute_query(QueryExecutionRequest {
-                query_context,
-                distributed_plan,
-            })
+            .execute_query(query_context, distributed_plan)
             .map_err(SqlDriverError::Runtime)
     }
 }
@@ -161,9 +171,11 @@ mod tests {
         open_catalog_store, CatalogConfig, CatalogEntry, CatalogMode, CatalogPath, CatalogService,
         CatalogStoreBackendKind, CreateDatabaseRequest, CreateTableRequest, StorageKind,
     };
+    use crate::common::config::ConfigSet;
     use crate::common::config::{global_config_registry, ConfigPatch, ConfigScope};
+    use crate::common::context::SessionContext;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-    use crate::frontend::ingress::{SqlIngressRequest, SqlRequestContext, SqlSessionContext};
+    use crate::frontend::ingress::{IngressSql, SqlRequestContext};
     use crate::storage::MemoryStorageEngine;
     use arrow::array::{ArrayRef, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
@@ -273,12 +285,13 @@ mod tests {
         let query_id = Uuid::new_v4();
         let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: query_id,
@@ -300,6 +313,68 @@ mod tests {
     }
 
     #[test]
+    fn sql_driver_runs_single_node_queries_without_fragment_exchange() {
+        let warehouse = TestDir::new();
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+
+        let storage = Arc::new(MemoryStorageEngine::default());
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            true,
+        )]));
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        storage
+            .register_batches(
+                &table,
+                vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+            )
+            .unwrap();
+        let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
+
+        for sql in [
+            "select count(id) from orders",
+            "select count(id) from orders",
+        ] {
+            let handle = driver
+                .execute(IngressSql {
+                    session: SessionContext {
+                        session_id: Uuid::new_v4(),
+                        user_name: "brew".to_owned(),
+                        database_name: Some("sales".to_owned()),
+                        catalog_name: Some("prod".to_owned()),
+                        settings: ConfigSet::new(),
+                    },
+                    request: SqlRequestContext {
+                        request_id: Uuid::new_v4(),
+                    },
+                    sql: sql.to_owned(),
+                    client_capabilities: None,
+                })
+                .unwrap();
+            let batch = handle.output.next_result().unwrap().unwrap();
+            let count = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(count.value(0), 3);
+            assert!(handle.output.next_result().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn sql_driver_executes_create_table_statement() {
         let warehouse = TestDir::new();
         let catalog_service = catalog_service(warehouse.path());
@@ -310,12 +385,13 @@ mod tests {
 
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -360,12 +436,13 @@ mod tests {
             QueryCoordinator::with_storage(storage),
         );
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -380,12 +457,13 @@ mod tests {
         assert!(handle.output.next_result().unwrap().is_none());
 
         let select = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -429,12 +507,13 @@ mod tests {
             QueryCoordinator::with_storage(storage),
         );
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -452,12 +531,13 @@ mod tests {
         assert!(handle.output.next_result().unwrap().is_none());
 
         let select = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -484,12 +564,13 @@ mod tests {
 
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -519,12 +600,13 @@ mod tests {
 
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -558,12 +640,13 @@ mod tests {
 
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
         let handle = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -597,12 +680,13 @@ mod tests {
 
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
         let error = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -634,12 +718,13 @@ mod tests {
         let driver = SqlDriver::new(catalog_service.clone(), QueryCoordinator::default());
 
         let catalogs = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -657,12 +742,13 @@ mod tests {
         assert!(catalog_values.iter().flatten().any(|value| value == "prod"));
 
         let databases = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),
@@ -683,12 +769,13 @@ mod tests {
             .any(|value| value == "sales"));
 
         let tables = driver
-            .execute(SqlIngressRequest {
-                session: SqlSessionContext {
+            .execute(IngressSql {
+                session: SessionContext {
                     session_id: Uuid::new_v4(),
                     user_name: "brew".to_owned(),
                     database_name: Some("sales".to_owned()),
                     catalog_name: Some("prod".to_owned()),
+                    settings: ConfigSet::new(),
                 },
                 request: SqlRequestContext {
                     request_id: Uuid::new_v4(),

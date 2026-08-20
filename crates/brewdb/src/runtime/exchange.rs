@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use crate::planner::distributed::exchange::{
     ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme,
 };
-use crate::planner::distributed::plan::PlanFragmentId;
+use crate::planner::distributed::PlanFragmentId;
 use arrow::array::{ArrayRef, BooleanArray};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -401,10 +401,10 @@ impl ExchangeBufferManager {
 mod tests {
     use std::sync::Arc;
 
-    use crate::common::runtime::QueryContext;
+    use crate::common::context::QueryContext;
     use crate::planner::distributed::exchange::{ExchangeNode, PartitioningScheme};
-    use crate::planner::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
     use crate::planner::distributed::split::TableScanSplitGroup;
+    use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
     use arrow::array::{ArrayRef, Int32Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -443,9 +443,7 @@ mod tests {
             .map(|instance| instance.execution_fragment.as_ref().clone())
             .collect();
         ExecutionGraph {
-            query_context: QueryContext {
-                query_id: uuid::Uuid::new_v4(),
-            },
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             fragments,
             instances,
         }

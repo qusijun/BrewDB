@@ -3,15 +3,15 @@
 use std::sync::Arc;
 
 use crate::catalog::TableCatalogEntry;
-use crate::common::runtime::QueryContext;
+use crate::common::context::QueryContext;
 use crate::storage::StorageEngine;
 use datafusion::datasource::provider_as_source;
 use datafusion_common::tree_node::Transformed;
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
-use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerContext, OptimizerRule};
+use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerRule};
 
-use crate::planner::distributed::plan::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::distributed::split::TableScanSplitGroup;
+use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::errors::PlannerError;
 use crate::planner::logical::table_source::DefaultTableSource;
 
@@ -51,8 +51,14 @@ impl LocalFragmentPlan {
                 tables: table_catalogs,
             }),
         ]);
+        let optimizer_context = crate::runtime::datafusion_context::optimizer_context(
+            &query_context,
+        )
+        .map_err(|err| PlannerError::InvalidPlan {
+            reason: err.to_string(),
+        })?;
         let optimized = optimizer
-            .optimize(logical_plan, &OptimizerContext::new(), |_, _| {})
+            .optimize(logical_plan, &optimizer_context, |_, _| {})
             .map_err(|err| PlannerError::InvalidPlan {
                 reason: err.to_string(),
             })?;
