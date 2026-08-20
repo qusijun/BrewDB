@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::benchmark::{BenchmarkRunConfig, Workload};
+use crate::benchmark::{BenchmarkRunConfig, PaimonFileFormat, Workload};
 use crate::clickbench::ClickBenchGenConfig;
 use crate::tpch::TpchGenConfig;
 
@@ -102,6 +102,7 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
         setup: true,
         brewdb_bin: default_brewdb_bin(),
         config_path: None,
+        paimon_file_format: PaimonFileFormat::Parquet,
     };
 
     let mut iter = args.iter();
@@ -129,6 +130,9 @@ fn parse_run(workload: &str, args: &[String]) -> Result<Command, String> {
             "--no-setup" => config.setup = false,
             "--brewdb-bin" => config.brewdb_bin = PathBuf::from(take_value(arg, &mut iter)?),
             "--config" => config.config_path = Some(PathBuf::from(take_value(arg, &mut iter)?)),
+            "--paimon-file-format" => {
+                config.paimon_file_format = PaimonFileFormat::parse(take_value(arg, &mut iter)?)?
+            }
             other => return Err(format!("unknown run flag `{other}`")),
         }
     }
@@ -153,7 +157,7 @@ fn take_value<'a>(
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  benchmark gen tpch --scale-factor <sf> --output <dir> [--overwrite]\n  benchmark gen clickbench --output <dir> [--overwrite]\n  benchmark run <tpch|clickbench> [--data-dir <dir>] [--queries-dir <dir>] [--query-file <file>] [--iterations <n>] [--host <host>] [--port <port>] [--database <db>] [--no-setup]\n"
+    "Usage:\n  benchmark gen tpch --scale-factor <sf> --output <dir> [--overwrite]\n  benchmark gen clickbench --output <dir> [--overwrite]\n  benchmark run <tpch|clickbench> [--data-dir <dir>] [--queries-dir <dir>] [--query-file <file>] [--iterations <n>] [--host <host>] [--port <port>] [--database <db>] [--paimon-file-format <parquet|vortex>] [--no-setup]\n"
 }
 
 fn default_brewdb_bin() -> PathBuf {
