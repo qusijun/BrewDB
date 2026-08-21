@@ -1,1 +1,1 @@
-select 1;
+SELECT COUNT(*) FROM hits;

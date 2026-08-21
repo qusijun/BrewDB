@@ -99,8 +99,8 @@ cargo run --manifest-path benchmark/Cargo.toml -- \
 Results are emitted as CSV:
 
 ```text
-workload,query,iteration,success,elapsed_ms
-tpch,q01,1,true,12.34
+workload,query,iteration,success,elapsed_ms,error
+tpch,q01,1,true,12.34,
 ```
 
 ## Workloads

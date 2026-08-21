@@ -229,7 +229,13 @@ fn tpch_schema_and_load_sql_are_file_backed() {
                 .exists()
         );
     }
-    assert!(benchmark_dir.join("clickbench/queries/q01.sql").exists());
+    for query in 1..=43 {
+        assert!(
+            benchmark_dir
+                .join(format!("clickbench/queries/q{query:02}.sql"))
+                .exists()
+        );
+    }
 }
 
 #[test]
@@ -271,10 +277,37 @@ fn clickbench_schema_and_load_sql_are_file_backed() {
     assert!(benchmark_dir.join("clickbench/vortex/schema.sql").exists());
     assert!(benchmark_dir.join("clickbench/load.sql").exists());
     assert!(sql.contains("create table if not exists hits"));
+    assert!(sql.contains("IsRefresh smallint"));
     assert!(sql.contains(") with (file.format = parquet);"));
     assert!(sql.contains("copy from '/tmp/clickbench/hits.csv' to hits"));
     assert!(sql.contains("with (format csv, header false)"));
     assert!(!sql.contains("${DATA_DIR}"));
+}
+
+#[test]
+fn clickbench_queries_are_loaded_from_builtin_directory() {
+    let config = BenchmarkRunConfig {
+        workload: Workload::ClickBench,
+        host: "127.0.0.1".to_owned(),
+        port: 5432,
+        database: "brewdb".to_owned(),
+        data_dir: None,
+        queries_dir: None,
+        query_file: None,
+        iterations: 1,
+        setup: false,
+        brewdb_bin: default_brewdb_bin(),
+        config_path: None,
+        paimon_file_format: PaimonFileFormat::Parquet,
+    };
+
+    let queries = load_queries(&config).unwrap();
+
+    assert_eq!(queries.len(), 43);
+    assert_eq!(queries[0].name, "q01");
+    assert!(queries[0].sql.contains("COUNT(*) FROM hits"));
+    assert_eq!(queries[42].name, "q43");
+    assert!(queries[42].sql.contains("DATE_TRUNC('minute', EventTime)"));
 }
 
 #[test]
