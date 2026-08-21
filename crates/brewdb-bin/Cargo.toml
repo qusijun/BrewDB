@@ -15,7 +15,11 @@ name = "brewdbd"
 path = "src/bin/brewdbd.rs"
 
 [dependencies]
-brewdb = { path = "../brewdb" }
+brewdb-catalog = { path = "../brewdb-catalog" }
+brewdb-common = { path = "../brewdb-common" }
+brewdb-execution = { path = "../brewdb-execution" }
+brewdb-frontend = { path = "../brewdb-frontend" }
+brewdb-storage = { path = "../brewdb-storage" }
 rustyline = "18.0.1"
 uuid.workspace = true
 

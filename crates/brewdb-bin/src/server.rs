@@ -7,16 +7,18 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use brewdb::catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
-use brewdb::common::config::{ConfigSet, ConfigView, SystemConfigLoader, global_config_registry};
-use brewdb::common::diagnostics::DiagnosticError;
-use brewdb::common::errors::CommonError;
-use brewdb::frontend::{
+use brewdb_catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
+use brewdb_common::config::{ConfigSet, ConfigView, SystemConfigLoader, global_config_registry};
+use brewdb_common::diagnostics::DiagnosticError;
+use brewdb_common::errors::CommonError;
+use brewdb_execution::runtime::{
+    QueryCoordinator, QueryExecutionHandle, SqlDriver, SqlDriverError,
+};
+use brewdb_frontend::{
     ClientDefaults, FrontendConfig, FrontendError, FrontendResponse, FrontendService,
     MANAGED_PAIMON_CATALOG_NAME, ProtocolRegistry, QueryResultOutput, ResultField,
     SqlExecutionResult, SqlRequest, SqlRequestHandler,
 };
-use brewdb::runtime::{QueryCoordinator, QueryExecutionHandle, SqlDriver, SqlDriverError};
 
 #[derive(Debug)]
 pub enum BrewDbServerError {
@@ -40,7 +42,7 @@ impl fmt::Display for BrewDbServerError {
 impl Error for BrewDbServerError {}
 
 impl DiagnosticError for BrewDbServerError {
-    fn error_code(&self) -> brewdb::common::diagnostics::ErrorCode {
+    fn error_code(&self) -> brewdb_common::diagnostics::ErrorCode {
         match self {
             Self::Common(error) => error.error_code(),
             Self::Catalog(error) => error.error_code(),
@@ -126,8 +128,9 @@ impl BrewDbServer {
         &self,
         request: &SqlRequest,
     ) -> Result<QueryExecutionHandle, BrewDbServerError> {
-        let ingress = self.frontend.build_ingress_sql(request)?;
-        self.sql_driver.execute(ingress).map_err(Into::into)
+        self.sql_driver
+            .execute(&request.sql, request.query_context.clone())
+            .map_err(Into::into)
     }
 
     pub fn frontend(&self) -> &FrontendService {
@@ -204,7 +207,7 @@ pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
     let mut config = registry.materialize_defaults();
     config.apply_patch_with_registry(
         &registry,
-        &brewdb::common::config::ConfigPatch::new(brewdb::common::config::ConfigScope::System)
+        &brewdb_common::config::ConfigPatch::new(brewdb_common::config::ConfigScope::System)
             .with_entry(
                 "brewdb.catalog.paimon.warehouse",
                 warehouse.to_string_lossy().as_ref(),
@@ -214,7 +217,7 @@ pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
 }
 
 pub fn init_logging() -> Result<(), BrewDbServerError> {
-    brewdb::common::logging::init_logging(&brewdb::common::logging::LoggingConfig::default())?;
+    brewdb_common::logging::init_logging(&brewdb_common::logging::LoggingConfig::default())?;
     Ok(())
 }
 
@@ -275,20 +278,20 @@ mod tests {
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use brewdb::catalog::{
+    use brewdb_catalog::{
         CatalogConfig, CatalogEntry, CatalogMode, CatalogPath, CatalogService,
         CatalogStoreBackendKind, CreateDatabaseRequest, CreateTableRequest, StorageKind,
         open_catalog_store,
     };
-    use brewdb::common::config::{ConfigPatch, ConfigScope, global_config_registry};
-    use brewdb::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-    use brewdb::frontend::{
+    use brewdb_common::config::{ConfigPatch, ConfigScope, ConfigSet, global_config_registry};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
+    use brewdb_execution::runtime::QueryCoordinator;
+    use brewdb_frontend::{
         ClientCapabilities, ClientDefaults, ClientIdentity, ClientSessionContext,
         DEFAULT_DATABASE_NAME, MANAGED_PAIMON_CATALOG_NAME, OpenedClientSession, PgWireCodec,
-        QueryResultKind, RequestContext, SqlRequestHandler,
+        QueryResultKind, SqlRequestHandler,
     };
-    use brewdb::runtime::QueryCoordinator;
-    use brewdb::storage::MemoryStorageEngine;
+    use brewdb_storage::{memory::MemoryTableEngine, open_storage_engine};
     use uuid::Uuid;
 
     use super::BrewDbServer;
@@ -353,19 +356,23 @@ mod tests {
             ))
             .unwrap();
 
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
             ArrowDataType::Int32,
             true,
         )]));
         let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        storage
-            .register_batches(
-                &table,
-                vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
-            )
-            .unwrap();
+        storage.register_table_engine(
+            &table,
+            Arc::new(
+                MemoryTableEngine::try_new(
+                    &table,
+                    vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+                )
+                .unwrap(),
+            ),
+        );
 
         BrewDbServer::with_catalog_service(catalog_service, QueryCoordinator::with_storage(storage))
     }
@@ -374,7 +381,7 @@ mod tests {
     fn server_wires_frontend_sql_driver_runtime_and_storage() {
         let server = build_test_server();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database("sales"),
@@ -385,15 +392,12 @@ mod tests {
                     .with_database("sales"),
                 identity: ClientIdentity::new("brew").with_database("sales"),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "select count(id) from orders",
-            )
+            .build_request(&session, Uuid::new_v4(), "select count(id) from orders")
             .unwrap();
         let handle = server.execute_client_request(&request).unwrap();
         let batch = handle.output.next_result().unwrap().unwrap();
@@ -409,7 +413,7 @@ mod tests {
     fn server_returns_command_result_for_ddl() {
         let server = build_test_server();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database("sales"),
@@ -420,15 +424,12 @@ mod tests {
                     .with_database("sales"),
                 identity: ClientIdentity::new("brew").with_database("sales"),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "create database analytics",
-            )
+            .build_request(&session, Uuid::new_v4(), "create database analytics")
             .unwrap();
 
         let result = server.execute(&request).unwrap();
@@ -458,7 +459,7 @@ mod tests {
             .unwrap();
         let server = super::BrewDbServer::from_system_config(config).unwrap();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
@@ -469,13 +470,14 @@ mod tests {
                     .with_database(DEFAULT_DATABASE_NAME),
                 identity: ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
             .build_request(
                 &session,
-                RequestContext::new(Uuid::new_v4()),
+                Uuid::new_v4(),
                 "create table t1 (id int not null)",
             )
             .unwrap();
@@ -505,7 +507,7 @@ mod tests {
             .unwrap();
         let server = super::BrewDbServer::from_system_config(config).unwrap();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
@@ -516,6 +518,7 @@ mod tests {
                     .with_database(DEFAULT_DATABASE_NAME),
                 identity: ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
 
@@ -525,7 +528,7 @@ mod tests {
         ] {
             let request = server
                 .frontend()
-                .build_request(&session, RequestContext::new(Uuid::new_v4()), sql)
+                .build_request(&session, Uuid::new_v4(), sql)
                 .unwrap();
             let result = server.execute(&request).unwrap();
             assert_eq!(result.response.result.kind, QueryResultKind::Command);
@@ -533,11 +536,7 @@ mod tests {
 
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "select count(id) from t_insert",
-            )
+            .build_request(&session, Uuid::new_v4(), "select count(id) from t_insert")
             .unwrap();
         let result = server.execute(&request).unwrap();
         let count = result.batches[0]
@@ -568,7 +567,7 @@ mod tests {
             .unwrap();
         let server = super::BrewDbServer::from_system_config(config).unwrap();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
@@ -579,15 +578,12 @@ mod tests {
                     .with_database(DEFAULT_DATABASE_NAME),
                 identity: ClientIdentity::new("brew").with_database(DEFAULT_DATABASE_NAME),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "create table t1",
-            )
+            .build_request(&session, Uuid::new_v4(), "create table t1")
             .unwrap();
 
         let error = match server.execute(&request) {
@@ -597,7 +593,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "query execution failed: invalid sql request: CREATE TABLE must define at least one column"
+            "query execution failed: invalid planner input: CREATE TABLE must define at least one column"
         );
 
         let _ = std::fs::remove_dir_all(&warehouse);
@@ -695,7 +691,7 @@ mod tests {
 
         let server = super::BrewDbServer::from_system_config(config).unwrap();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database("sales"),
@@ -704,15 +700,12 @@ mod tests {
                 defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                 identity: ClientIdentity::new("brew").with_database("sales"),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "create database analytics",
-            )
+            .build_request(&session, Uuid::new_v4(), "create database analytics")
             .unwrap();
         let result = server.execute(&request).unwrap();
         assert_eq!(result.response.result.kind, QueryResultKind::Command);
@@ -734,7 +727,7 @@ mod tests {
 
         let server = super::BrewDbServer::from_config_file(&path).unwrap();
         let session = OpenedClientSession {
-            context: brewdb::frontend::ClientContext {
+            context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
                     Uuid::new_v4(),
                     ClientIdentity::new("brew").with_database("sales"),
@@ -743,15 +736,12 @@ mod tests {
                 defaults: ClientDefaults::default().with_catalog(MANAGED_PAIMON_CATALOG_NAME),
                 identity: ClientIdentity::new("brew").with_database("sales"),
                 capabilities: ClientCapabilities::default(),
+                settings: ConfigSet::new(),
             },
         };
         let request = server
             .frontend()
-            .build_request(
-                &session,
-                RequestContext::new(Uuid::new_v4()),
-                "create database analytics",
-            )
+            .build_request(&session, Uuid::new_v4(), "create database analytics")
             .unwrap();
         let result = server.execute(&request).unwrap();
         assert_eq!(result.response.result.kind, QueryResultKind::Command);

@@ -1,0 +1,27 @@
+[package]
+name = "brewdb-planner"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arrow.workspace = true
+arrow-select.workspace = true
+brewdb-catalog = { path = "../brewdb-catalog" }
+brewdb-common = { path = "../brewdb-common" }
+brewdb-parser = { path = "../brewdb-parser" }
+brewdb-prost = { path = "../brewdb-prost" }
+brewdb-storage = { path = "../brewdb-storage" }
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-functions.workspace = true
+datafusion-functions-aggregate.workspace = true
+datafusion-optimizer.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+pretty_assertions = "1.4.1"

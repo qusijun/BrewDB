@@ -693,33 +693,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "brewdb"
+name = "brewdb-bin"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "arrow-select",
+ "brewdb-catalog",
+ "brewdb-common",
+ "brewdb-execution",
+ "brewdb-frontend",
+ "brewdb-storage",
+ "rustyline",
+ "uuid",
+]
+
+[[package]]
+name = "brewdb-catalog"
+version = "0.1.0"
+dependencies = [
  "async-trait",
- "bigdecimal",
- "datafusion",
+ "brewdb-common",
  "datafusion-common",
- "datafusion-expr",
- "datafusion-functions",
- "datafusion-functions-aggregate",
- "datafusion-optimizer",
- "datafusion-physical-expr",
- "futures",
- "inventory",
- "log",
  "paimon",
- "pretty_assertions",
- "prost 0.14.4",
- "prost-build",
- "protoc-bin-vendored",
- "recursive",
- "serde",
- "serde_json",
- "sqlparser_derive",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "brewdb-common"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "datafusion-common",
+ "inventory",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -727,13 +732,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "brewdb-bin"
+name = "brewdb-execution"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "brewdb",
- "rustyline",
+ "arrow-select",
+ "async-trait",
+ "brewdb-catalog",
+ "brewdb-common",
+ "brewdb-parser",
+ "brewdb-planner",
+ "brewdb-storage",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datafusion-physical-expr",
+ "futures",
+ "tokio",
  "uuid",
+]
+
+[[package]]
+name = "brewdb-frontend"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "brewdb-common",
+ "uuid",
+]
+
+[[package]]
+name = "brewdb-parser"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "brewdb-common",
+ "log",
+ "pretty_assertions",
+ "recursive",
+ "serde",
+ "serde_json",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "brewdb-planner"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "arrow-select",
+ "brewdb-catalog",
+ "brewdb-common",
+ "brewdb-parser",
+ "brewdb-prost",
+ "brewdb-storage",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datafusion-functions",
+ "datafusion-functions-aggregate",
+ "datafusion-optimizer",
+ "pretty_assertions",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "brewdb-prost"
+version = "0.1.0"
+dependencies = [
+ "prost 0.14.4",
+ "prost-build",
+ "protoc-bin-vendored",
 ]
 
 [[package]]
@@ -741,6 +811,24 @@ name = "brewdb-sqllogictests"
 version = "0.1.0"
 dependencies = [
  "sqllogictest",
+ "uuid",
+]
+
+[[package]]
+name = "brewdb-storage"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "brewdb-catalog",
+ "brewdb-common",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "futures",
+ "inventory",
+ "paimon",
+ "tokio",
  "uuid",
 ]
 
