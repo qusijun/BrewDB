@@ -4,130 +4,87 @@
   <img src="logo/brewdb.png" alt="BrewDB" width="520">
 </p>
 
-BrewDB is a lakehouse database engine built around a BrewDB-owned catalog,
-DataFusion-based SQL planning/execution, and format-aware storage engines.
+BrewDB is an experimental lakehouse database engine. It owns the SQL ingress,
+catalog model, query planning boundary, runtime orchestration, and storage engine
+integration while using DataFusion for logical and physical execution inside
+fragments.
 
-The current implementation focuses on the core query path and process boundary:
+The first storage target is Apache Paimon. BrewDB exposes Paimon tables as native
+DataFusion table providers and supports Parquet and Vortex data files through the
+Paimon storage adapter.
 
-```text
-brewdb client -> brewdbd -> frontend -> sql -> planner -> runtime -> execution
-                                                     |
-                                                     v
-                                                  storage
-```
+## What Is Here
 
-## Positioning
+- SQL parser, binder, analyzer, and logical optimizer integration
+- pgwire-compatible server and CLI client
+- BrewDB-owned catalog and table metadata model
+- fragment planning with standalone and distributed execution paths
+- runtime scheduling, exchange, and fragment execution orchestration
+- Paimon-backed table reads and append writes
+- sqllogictest-style end-to-end tests
+- benchmark tooling for TPC-H and ClickBench
 
-BrewDB is intended to be a database engine for open lakehouse tables, not just a
-thin SQL wrapper around a single file format.
-
-Its core responsibilities are:
-
-- own catalog metadata and table identity
-- parse and bind SQL requests from client protocols
-- build distributed query plans from DataFusion logical plans
-- run fragment-local execution through DataFusion
-- access lakehouse storage through BrewDB storage engines
-
-Paimon is the first storage format being wired through this stack. The storage
-adapter exposes Paimon tables as native DataFusion table providers inside
-BrewDB, rather than depending on an external DataFusion fork.
-
-## Core Architecture
-
-The main crates are capability-oriented:
-
-- `brewdb-common`: shared config, logging, diagnostics, and schema primitives
-- `brewdb-catalog`: catalog model, catalog service, and table metadata
-- `brewdb-frontend`: client sessions and protocol ingress such as pgwire
-- `brewdb-sql`: SQL parsing and binding
-- `brewdb-planner`: logical and distributed planning
-- `brewdb-runtime`: scheduling, SQL driver, exchange, and execution orchestration
-- `brewdb-execution`: execution-facing fragment contracts
-- `brewdb-storage`: storage engine abstraction
-- `brewdb-storage-paimon`: Paimon storage engine integration
-
-Product entrypoints live under `bin/`:
-
-- `brewdbd`: server process
-- `brewdb`: SQL client
-
-## Architecture Diagram
+## Architecture
 
 ```text
-                +-------------------+
-                |       brewdb      |
-                |   SQL client CLI   |
-                +---------+---------+
-                          |
-                          | pgwire
-                          v
-                +-------------------+
-                |      brewdbd      |
-                |   server host     |
-                +---------+---------+
-                          |
-                          v
-                +-------------------+
-                |   brewdb-frontend |
-                | sessions/protocol |
-                +---------+---------+
-                          |
-                          v
-                +-------------------+
-                |     brewdb-sql    |
-                | parse + bind SQL  |
-                +---------+---------+
-                          |
-                          v
-                +-------------------+
-                |   brewdb-planner  |
-                | logical + distro  |
-                +---------+---------+
-                          |
-                          v
-              +----------------------+
-              |    brewdb-runtime    |
-              |  schedule + exchange |
-              +----------+-----------+
-                         / \
-                        /   \
-                       v     v
-          +----------------+  +----------------+
-          | worker / node 1 |  | worker / node N|
-          | brewdb-execution|  | brewdb-execution|
-          +--------+-------+  +--------+-------+
-                   |                   |
-                   v                   v
-          +----------------+  +----------------+
-          | brewdb-storage |  | brewdb-storage |
-          | table engines   |  | table engines  |
-          +--------+-------+  +--------+-------+
-                   |                   |
-                   v                   v
-          +----------------+  +----------------+
-          | Paimon / files |  | Paimon / files |
-          +----------------+  +----------------+
+brewdb client
+    |
+    v
+brewdbd
+    |
+    v
+frontend/session -> SQL parser/binder -> logical optimizer
+                         |                 |
+                         v                 v
+                   catalog service -> fragment planner
+                         |                 |
+                         v                 v
+                catalog store backend  runtime coordinator
+                   memory / fdb          /              \
+                                        v                v
+                                fragment executor   fragment executor
+                                  worker/node 1       worker/node N
+                                        |                |
+                                        +---- exchange --+
+                                        |                |
+                                        v                v
+                              storage table engine storage table engine
+                                        |                |
+                                        v                v
+                                  Paimon / files    Paimon / files
 ```
+
+The important boundary is that BrewDB owns planning, scheduling, catalog
+identity, and storage-engine selection. DataFusion is used as the execution
+engine for fragment-local plans. In distributed mode, exchange connects
+fragment executors across workers instead of being a separate coordinator-side
+plan branch.
+
+## Repository Layout
+
+- `crates/brewdb`: core library, including parser, catalog, planner, runtime,
+  execution contracts, and storage engines
+- `crates/brewdb-bin`: `brewdbd` server and `brewdb` SQL client binaries
+- `crates/brewdb-sqllogictests`: end-to-end SQL logic test harness and test
+  files
+- `benchmark`: standalone benchmark crate for TPC-H and ClickBench
+- `logo`: project assets
+
+The benchmark crate is intentionally outside the root workspace so benchmark-only
+dependencies do not affect normal builds.
 
 ## Build
 
-Debug build:
+Build the server and client:
 
 ```bash
-cargo build -p brewdbd -p brewdb
+cargo build -p brewdb-bin --bin brewdbd --bin brewdb
 ```
 
-Release build:
+Build the core library:
 
 ```bash
-cargo build --release -p brewdbd -p brewdb
-```
-
-Run tests for the main binary boundary:
-
-```bash
-cargo test -p brewdb -p brewdbd
+cargo build -p brewdb
 ```
 
 ## Quick Start
@@ -135,37 +92,75 @@ cargo test -p brewdb -p brewdbd
 Start the server:
 
 ```bash
-./target/debug/brewdbd
+cargo run -p brewdb-bin --bin brewdbd
 ```
 
-In another terminal, run one query:
+Run a single query from another terminal:
 
 ```bash
-./target/debug/brewdb -c "select 1"
+cargo run -p brewdb-bin --bin brewdb -- -c "select 1"
 ```
 
-Or open the interactive client:
+Or start the interactive client:
 
 ```bash
-./target/debug/brewdb
+cargo run -p brewdb-bin --bin brewdb
 ```
 
-Example interactive session:
+By default, `brewdbd` listens on `127.0.0.1:5432`.
+
+## Tests
+
+Run the core unit tests:
+
+```bash
+cargo test -p brewdb
+```
+
+Run the sqllogictest harness:
+
+```bash
+cargo test -p brewdb-sqllogictests --test integration_tests
+```
+
+The sqllogictest crate starts a shared `brewdbd` process and executes `.slt`
+files from:
 
 ```text
-brewdb> select 1;
+crates/brewdb-sqllogictests/test_files
 ```
 
-By default, `brewdbd` listens on `127.0.0.1:5432`, and `brewdb` connects to that
-address. Override it with:
+## Benchmarks
+
+Generate small TPC-H data:
 
 ```bash
-./target/debug/brewdb --host 127.0.0.1 --port 5432
+cargo run --manifest-path benchmark/Cargo.toml -- \
+  gen tpch \
+  --scale-factor 0.01 \
+  --output /tmp/brewdb-bench/tpch \
+  --overwrite
 ```
 
-## Status
+Run TPC-H against an already running `brewdbd`:
 
-BrewDB is still early-stage. The catalog, SQL path, runtime, pgwire shell,
-client process, and Paimon read integration are being built up incrementally.
-Expect some SQL shapes and storage operations to remain intentionally narrow
-while the architecture settles.
+```bash
+cargo run --manifest-path benchmark/Cargo.toml -- \
+  run tpch \
+  --data-dir /tmp/brewdb-bench/tpch \
+  --paimon-file-format parquet \
+  --iterations 1 \
+  --host 127.0.0.1 \
+  --port 5432
+```
+
+Use `--paimon-file-format vortex` to create benchmark tables backed by Vortex
+data files. See [benchmark/README.md](benchmark/README.md) for the full TPC-H
+and ClickBench workflow.
+
+## Current Status
+
+BrewDB is still early-stage. The core SQL path, catalog boundary, standalone
+fast path, distributed fragment abstractions, Paimon integration, and benchmark
+tooling are under active development. Expect unsupported SQL shapes and storage
+operations while the architecture settles.
