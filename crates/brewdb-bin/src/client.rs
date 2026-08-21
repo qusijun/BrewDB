@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 
-use brewdb::common::defaults::DEFAULT_DATABASE_NAME;
+use brewdb_common::defaults::DEFAULT_DATABASE_NAME;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 

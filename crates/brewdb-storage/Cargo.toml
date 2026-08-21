@@ -1,0 +1,21 @@
+[package]
+name = "brewdb-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arrow.workspace = true
+async-trait.workspace = true
+brewdb-catalog = { path = "../brewdb-catalog" }
+brewdb-common = { path = "../brewdb-common" }
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+futures.workspace = true
+inventory.workspace = true
+paimon = { workspace = true, features = ["vortex"] }
+tokio.workspace = true
+uuid.workspace = true

@@ -12,8 +12,9 @@ agents working on BrewDB.
 - Do not revert or overwrite user changes unless explicitly asked.
 - Keep changes scoped to the requested task.
 - After Rust code changes, run `cargo fmt`, `cargo check -p brewdb`, and focused
-  tests for the touched area. Run broader tests when changing shared runtime,
-  planner, storage, or catalog behavior.
+  tests for the touched area. When `brewdb` is no longer present, run `cargo fmt`,
+  `cargo check`, and focused tests for the touched area. Run broader tests when
+  changing shared runtime, planner, storage, catalog, or frontend behavior.
 
 ## Rust Structure
 
@@ -24,6 +25,10 @@ agents working on BrewDB.
 - Avoid request/response-style wrapper types for local planner/runtime
   boundaries unless they model a real RPC boundary.
 - Prefer strongly typed domain enums over stringly typed control-plane state.
+- Do not depend on a `brewdb` facade crate for new code. Import the owning
+  crate directly: `brewdb-common`, `brewdb-catalog`, `brewdb-parser`,
+  `brewdb-planner`, `brewdb-storage`, `brewdb-execution`, `brewdb-frontend`,
+  or `brewdb-prost`.
 
 ## Errors
 
@@ -50,6 +55,14 @@ agents working on BrewDB.
   distributed modes should consume the same storage registry shape.
 - Execution-side exchange services belong to runtime/execution boundaries, not
   logical fragment definitions.
+
+## Frontend
+
+- `ClientContext` and session cache state live in `brewdb-frontend`.
+- `QueryContext` is a flattened per-query snapshot in `brewdb-common`; it should
+  not hold frontend session objects.
+- Generate `query_id` at the frontend boundary and project client/session state
+  into `QueryContext` there.
 
 ## Documentation
 
