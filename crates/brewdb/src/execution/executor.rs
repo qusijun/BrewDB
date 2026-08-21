@@ -302,7 +302,7 @@ fn remote_source_single_qualifier(
 /// and exchange buffering live here.
 pub struct LocalFragmentExecutor {
     exchange_buffers: Arc<ExchangeBufferManager>,
-    storage: Arc<dyn StorageEngine>,
+    storage: Arc<StorageEngine>,
     tokio_runtime: OnceLock<Runtime>,
 }
 
@@ -321,7 +321,7 @@ impl LocalFragmentExecutor {
         Self::default()
     }
 
-    pub fn with_storage(storage: Arc<dyn StorageEngine>) -> Self {
+    pub fn with_storage(storage: Arc<StorageEngine>) -> Self {
         Self {
             exchange_buffers: Arc::new(ExchangeBufferManager::default()),
             storage,

@@ -33,7 +33,7 @@ pub struct QueryCoordinator {
     pub(crate) scheduler: AllAtOnceFragmentScheduler,
     pub(crate) resource_manager: Arc<dyn ResourceManager>,
     pub(crate) transport_registry: Arc<dyn TransportRegistry>,
-    pub(crate) storage: Arc<dyn StorageEngine>,
+    pub(crate) storage: Arc<StorageEngine>,
     pub(crate) catalog_service: Option<CatalogService>,
 }
 
@@ -58,7 +58,7 @@ impl Default for QueryCoordinator {
 }
 
 impl QueryCoordinator {
-    pub fn with_storage(storage: Arc<dyn StorageEngine>) -> Self {
+    pub fn with_storage(storage: Arc<StorageEngine>) -> Self {
         Self {
             scheduler: AllAtOnceFragmentScheduler::default(),
             resource_manager: Arc::new(StaticResourceManager::new(vec![WorkerInfo {
