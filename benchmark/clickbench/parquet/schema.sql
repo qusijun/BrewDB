@@ -15,7 +15,7 @@ create table if not exists hits (
   UserAgent smallint,
   URL text,
   Referer text,
-  Refresh smallint,
+  IsRefresh smallint,
   RefererCategoryID smallint,
   RefererRegionID int,
   URLCategoryID smallint,
