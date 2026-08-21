@@ -1,5 +1,6 @@
 //! BrewDB execution contracts.
 
+pub mod context;
 pub mod exchange;
 pub mod executor;
 pub mod physical_plan;
@@ -9,3 +10,28 @@ pub use executor::{
     DataFusionFragmentExecutor, FragmentExecutionEnvelope, FragmentExecutionStatus,
     FragmentExecutor, FragmentExecutorError, FragmentService, LocalFragmentExecutor,
 };
+
+#[cfg(test)]
+mod tests {
+    use crate::common::config::ConfigSet;
+    use crate::common::context::{QueryContext, SessionContext};
+    use uuid::Uuid;
+
+    #[test]
+    fn execution_context_builds_datafusion_session_from_query_context() {
+        let query_context = QueryContext::new(Uuid::new_v4(), SessionContext::system())
+            .with_settings(ConfigSet::new().with_entry("datafusion.execution.batch_size", 256_u64));
+
+        let session = crate::execution::context::session_context(&query_context).unwrap();
+
+        assert_eq!(
+            session
+                .copied_config()
+                .options()
+                .as_ref()
+                .execution
+                .batch_size,
+            256
+        );
+    }
+}

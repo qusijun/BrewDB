@@ -10,8 +10,8 @@ pub mod errors;
 pub mod local;
 pub mod logical;
 pub use crate::common::context::QueryContext;
+pub use crate::storage::{TableScanSplit, TableScanSplitGroup};
 pub use distributed::exchange::{ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme};
-pub use distributed::split::{TableScanSplit, TableScanSplitGroup};
 pub use distributed::StandaloneFragmentPlanner;
 pub use distributed::{DistributedFragmentPlan, PlanFragment, PlanFragmentId, PlanFragmentKind};
 pub use distributed::{DistributedFragmentPlanner, FragmentPlanner};
@@ -44,7 +44,6 @@ mod tests {
     use datafusion_functions_aggregate as datafusion_aggregate_functions;
 
     use crate::planner::distributed::exchange::{ExchangeScope, ExchangeType, RemoteSourceNode};
-    use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
     use crate::planner::distributed::{DistributedFragmentPlanner, FragmentPlanner};
     use crate::planner::distributed::{DistributedPlanRoot, PlanFragmentKind};
     use crate::planner::logical::mutation::plan_insert_statement;
@@ -52,6 +51,7 @@ mod tests {
     use crate::planner::logical::query::plan_query_statement;
     use crate::planner::logical::table_source::DefaultTableSource;
     use crate::planner::{CommandPlan, CommandTag};
+    use crate::storage::{TableScanSplit, TableScanSplitGroup};
 
     fn find_table_scan<'a>(
         plan: &'a DataFusionLogicalPlan,

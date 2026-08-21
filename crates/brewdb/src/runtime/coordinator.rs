@@ -474,18 +474,15 @@ mod tests {
     use crate::planner::CommandTag;
 
     use super::QueryCoordinator;
-    use crate::planner::distributed::split::TableScanSplitGroup;
     use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo};
+    use crate::storage::{TableScanSplit, TableScanSplitGroup};
 
     #[test]
     fn coordinator_builds_execution_graph_with_worker_and_scan_splits() {
         let worker_id = uuid::Uuid::new_v4();
         let fragment_id = PlanFragmentId(0);
-        let split = crate::planner::distributed::split::TableScanSplit::new(
-            "managed_paimon_catalog.brewdb.t",
-            0,
-        )
-        .with_locations(vec!["file:///tmp/t/part-1.csv".to_owned()]);
+        let split = TableScanSplit::new("managed_paimon_catalog.brewdb.t", 0)
+            .with_locations(vec!["file:///tmp/t/part-1.csv".to_owned()]);
         let plan = DistributedFragmentPlan {
             query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
             root: DistributedPlanRoot::Fragments,

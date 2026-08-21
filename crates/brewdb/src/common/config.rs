@@ -1,12 +1,13 @@
 //! Shared configuration primitives.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
 use crate::common::errors::CommonError;
 
 const CONFIG_KEY_PREFIX: &str = "brewdb.";
+const DATAFUSION_CONFIG_PREFIX: &str = "datafusion.";
 
 pub use inventory;
 
@@ -195,6 +196,24 @@ impl From<String> for ConfigValue {
 impl From<&str> for ConfigValue {
     fn from(value: &str) -> Self {
         Self::String(value.to_owned())
+    }
+}
+
+pub fn datafusion_settings(settings: &ConfigSet) -> HashMap<String, String> {
+    settings
+        .entries()
+        .filter_map(|(key, value)| {
+            key.starts_with(DATAFUSION_CONFIG_PREFIX)
+                .then(|| (key.to_owned(), config_value_to_string(value)))
+        })
+        .collect()
+}
+
+fn config_value_to_string(value: &ConfigValue) -> String {
+    match value {
+        ConfigValue::Bool(value) => value.to_string(),
+        ConfigValue::U64(value) => value.to_string(),
+        ConfigValue::String(value) => value.clone(),
     }
 }
 
@@ -722,8 +741,8 @@ mod tests {
     use crate::common::diagnostics::{DiagnosticError, ErrorCode};
 
     use super::{
-        ConfigDefinition, ConfigPatch, ConfigRegistry, ConfigScope, ConfigSet, ConfigValue,
-        ConfigValueKind, SystemConfigLoader,
+        datafusion_settings, ConfigDefinition, ConfigPatch, ConfigRegistry, ConfigScope, ConfigSet,
+        ConfigValue, ConfigValueKind, SystemConfigLoader,
     };
 
     crate::define_config_view! {
@@ -972,6 +991,32 @@ mod tests {
         let keys = config.entries().map(|(key, _)| key).collect::<Vec<_>>();
 
         assert_eq!(keys, vec!["a.key", "b.key"]);
+    }
+
+    #[test]
+    fn datafusion_settings_extracts_only_datafusion_prefixed_entries() {
+        let config = ConfigSet::new()
+            .with_entry("datafusion.execution.batch_size", 512_u64)
+            .with_entry("datafusion.optimizer.skip_failed_rules", true)
+            .with_entry("datafusion.catalog.default_catalog", "brewdb")
+            .with_entry("brewdb.execution.max_threads", 8_u64);
+
+        let settings = datafusion_settings(&config);
+
+        assert_eq!(settings.len(), 3);
+        assert_eq!(
+            settings.get("datafusion.execution.batch_size"),
+            Some(&"512".to_owned())
+        );
+        assert_eq!(
+            settings.get("datafusion.optimizer.skip_failed_rules"),
+            Some(&"true".to_owned())
+        );
+        assert_eq!(
+            settings.get("datafusion.catalog.default_catalog"),
+            Some(&"brewdb".to_owned())
+        );
+        assert!(!settings.contains_key("brewdb.execution.max_threads"));
     }
 
     #[test]
