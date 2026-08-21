@@ -108,7 +108,8 @@ mod tests {
     use crate::common::context::SessionContext;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::frontend::ingress::{IngressSql, SqlRequestContext};
-    use crate::storage::MemoryStorageEngine;
+    use crate::storage::memory::MemoryTableEngine;
+    use crate::storage::{open_storage_engine, StorageEngine};
     use arrow::array::{ArrayRef, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -184,6 +185,17 @@ mod tests {
         service
     }
 
+    fn register_batches(
+        storage: &StorageEngine,
+        table: &crate::catalog::TableCatalogEntry,
+        batches: Vec<Vec<RecordBatch>>,
+    ) {
+        storage.register_table_engine(
+            table,
+            Arc::new(MemoryTableEngine::try_new(table, batches).unwrap()),
+        );
+    }
+
     #[test]
     fn sql_driver_executes_ingress_request_through_planner_and_runtime() {
         let warehouse = TestDir::new();
@@ -200,19 +212,18 @@ mod tests {
             ))
             .unwrap();
 
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
             ArrowDataType::Int32,
             true,
         )]));
         let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        storage
-            .register_batches(
-                &table,
-                vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
-            )
-            .unwrap();
+        register_batches(
+            &storage,
+            &table,
+            vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+        );
 
         let query_id = Uuid::new_v4();
         let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
@@ -260,19 +271,18 @@ mod tests {
             ))
             .unwrap();
 
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
             ArrowDataType::Int32,
             true,
         )]));
         let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        storage
-            .register_batches(
-                &table,
-                vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
-            )
-            .unwrap();
+        register_batches(
+            &storage,
+            &table,
+            vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+        );
         let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
 
         for sql in [
@@ -360,8 +370,8 @@ mod tests {
                 TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             ))
             .unwrap();
-        let storage = Arc::new(MemoryStorageEngine::default());
-        storage.register_batches(&table, vec![vec![]]).unwrap();
+        let storage = open_storage_engine().unwrap();
+        register_batches(&storage, &table, vec![vec![]]);
 
         let driver = SqlDriver::new(
             catalog_service.clone(),
@@ -429,8 +439,8 @@ mod tests {
                 TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
             ))
             .unwrap();
-        let storage = Arc::new(MemoryStorageEngine::default());
-        storage.register_batches(&table, vec![vec![]]).unwrap();
+        let storage = open_storage_engine().unwrap();
+        register_batches(&storage, &table, vec![vec![]]);
         let csv_path = warehouse.path().join("orders.csv");
         fs::write(&csv_path, "id\n1\n2\n3\n").unwrap();
 

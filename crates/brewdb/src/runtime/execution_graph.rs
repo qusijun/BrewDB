@@ -191,7 +191,8 @@ mod tests {
     use crate::planner::CommandTag;
     use crate::planner::{LocalFragmentPlan, LogicalPlanner, LogicalPlanningContext};
     use crate::runtime::driver::sql_to_statement;
-    use crate::storage::MemoryStorageEngine;
+    use crate::storage::memory::MemoryTableEngine;
+    use crate::storage::open_storage_engine;
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -384,7 +385,11 @@ mod tests {
         )
     }
 
-    fn register_table(storage: &MemoryStorageEngine, table: &TableCatalogEntry, values: &[i32]) {
+    fn register_table(
+        storage: &crate::storage::StorageEngine,
+        table: &TableCatalogEntry,
+        values: &[i32],
+    ) {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
             ArrowDataType::Int32,
@@ -392,7 +397,10 @@ mod tests {
         )]));
         let array: ArrayRef = Arc::new(Int32Array::from(values.to_vec()));
         let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
-        storage.register_batches(table, vec![vec![batch]]).unwrap();
+        storage.register_table_engine(
+            table,
+            Arc::new(MemoryTableEngine::try_new(table, vec![vec![batch]]).unwrap()),
+        );
     }
 
     fn drain_query_results(handle: &super::QueryExecutionHandle) -> Vec<RecordBatch> {
@@ -679,7 +687,7 @@ mod tests {
     #[test]
     fn runtime_executes_query_against_registered_storage() {
         let table = build_table();
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         register_table(&storage, &table, &[1, 2, 3]);
         let runtime = QueryCoordinator::with_storage(storage);
         let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
@@ -703,7 +711,7 @@ mod tests {
     #[test]
     fn runtime_reads_single_node_query_results_through_fragment_instance() {
         let table = build_table();
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         register_table(&storage, &table, &[1, 2, 3]);
         let runtime = QueryCoordinator::with_storage(storage);
         let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
@@ -783,7 +791,7 @@ mod tests {
                 .with_options([("bucket", "1")]),
             )
             .unwrap();
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         register_table(&storage, &table, &[1, 2, 3]);
         let planner = DistributedFragmentPlanner::default();
         let parsed = sql_to_statement("select count(id) from orders").unwrap();
@@ -896,7 +904,7 @@ mod tests {
             .unwrap();
         let logical_plan = planned;
 
-        let storage = Arc::new(MemoryStorageEngine::default());
+        let storage = open_storage_engine().unwrap();
         register_table(&storage, &table, &[7, 8, 9]);
         let planner = DistributedFragmentPlanner::default();
         let plan = planner

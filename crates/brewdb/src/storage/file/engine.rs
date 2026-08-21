@@ -9,7 +9,7 @@ use std::thread;
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
 use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
-use crate::storage::{StorageEngine, StorageError, TableEngine};
+use crate::storage::{StorageError, TableEngine, TableEngineFactory};
 use arrow::datatypes::SchemaRef;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
@@ -31,10 +31,10 @@ pub struct FileTableEngine {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct FileStorageEngine;
+pub struct FileTableEngineFactory;
 
-impl StorageEngine for FileStorageEngine {
-    fn table_engine(
+impl TableEngineFactory for FileTableEngineFactory {
+    fn create_table_engine(
         &self,
         table: &TableCatalogEntry,
     ) -> Result<Arc<dyn TableEngine>, StorageError> {
@@ -50,11 +50,11 @@ impl StorageEngine for FileStorageEngine {
     }
 }
 
-fn open_file_storage_engine() -> Arc<dyn StorageEngine> {
-    Arc::new(FileStorageEngine)
+fn open_file_table_engine_factory() -> Arc<dyn TableEngineFactory> {
+    Arc::new(FileTableEngineFactory)
 }
 
-crate::register_storage_engine!("file", open_file_storage_engine);
+crate::register_table_engine_factory!(StorageKind::File, open_file_table_engine_factory);
 
 impl FileTableEngine {
     pub fn try_new(
@@ -305,9 +305,9 @@ mod tests {
 
     use crate::catalog::TableCatalogEntry;
     use crate::planner::distributed::split::TableScanSplitGroup;
-    use crate::storage::{StorageEngine, TableEngine};
+    use crate::storage::{TableEngine, TableEngineFactory};
 
-    use super::{FileStorageEngine, FileTableEngine};
+    use super::{FileTableEngine, FileTableEngineFactory};
 
     #[test]
     fn file_table_engine_initializes_listing_components_from_path_and_options() {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn file_storage_engine_infers_csv_format_from_file_location() {
+    fn file_table_engine_factory_infers_csv_format_from_file_location() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let path = std::env::temp_dir()
@@ -368,8 +368,8 @@ mod tests {
             )
             .unwrap();
 
-            let provider = FileStorageEngine::default()
-                .table_engine(&table)
+            let provider = FileTableEngineFactory
+                .create_table_engine(&table)
                 .unwrap()
                 .table_provider()
                 .unwrap();
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn file_storage_engine_opens_directory_table_sources() {
+    fn file_table_engine_factory_opens_directory_table_sources() {
         let dir =
             std::env::temp_dir().join(format!("brewdb-file-dir-source-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -399,7 +399,7 @@ mod tests {
         )
         .unwrap();
 
-        let engine = FileStorageEngine::default().table_engine(&table).unwrap();
+        let engine = FileTableEngineFactory.create_table_engine(&table).unwrap();
         assert_eq!(engine.schema_ref().unwrap().field(0).name(), "id");
     }
 

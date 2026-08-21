@@ -71,7 +71,7 @@ pub trait FragmentPlanner: Send + Sync {
         &self,
         query_context: QueryContext,
         logical_plan: DataFusionLogicalPlan,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
     ) -> Result<DistributedFragmentPlan, PlannerError>;
 }
 
@@ -80,7 +80,7 @@ impl DistributedFragmentPlanner {
         &self,
         query_context: QueryContext,
         logical_plan: DataFusionLogicalPlan,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
     ) -> Result<DistributedFragmentPlan, PlannerError> {
         let optimized = optimize_logical_plan(logical_plan.clone())?;
         if let Some(command) = command_plan(&optimized) {
@@ -112,7 +112,7 @@ impl FragmentPlanner for DistributedFragmentPlanner {
         &self,
         query_context: QueryContext,
         logical_plan: DataFusionLogicalPlan,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
     ) -> Result<DistributedFragmentPlan, PlannerError> {
         build_distributed_plan_with_context(
             logical_plan.clone(),
@@ -133,7 +133,7 @@ impl FragmentPlanner for StandaloneFragmentPlanner {
         &self,
         query_context: QueryContext,
         logical_plan: DataFusionLogicalPlan,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
     ) -> Result<DistributedFragmentPlan, PlannerError> {
         let root_fragment_id = PlanFragmentId(0);
         let table_catalogs = collect_table_catalogs(&logical_plan);
@@ -170,7 +170,7 @@ impl FragmentPlanner for StandaloneFragmentPlanner {
 fn build_distributed_plan_with_context(
     root: DataFusionLogicalPlan,
     query_context: QueryContext,
-    storage: Arc<dyn StorageEngine>,
+    storage: Arc<StorageEngine>,
     table_catalogs: Vec<TableCatalogEntry>,
     command_tag: CommandTag,
     returns_rows: bool,
@@ -243,7 +243,7 @@ fn push_table_catalog(tables: &mut Vec<TableCatalogEntry>, table: Option<&TableC
 struct DistributedPlanBuilder {
     root_fragment_id: PlanFragmentId,
     query_context: QueryContext,
-    storage: Arc<dyn StorageEngine>,
+    storage: Arc<StorageEngine>,
     table_catalogs: Vec<TableCatalogEntry>,
     command_tag: CommandTag,
     returns_rows: bool,
@@ -257,7 +257,7 @@ impl DistributedPlanBuilder {
     fn new(
         root_fragment_id: PlanFragmentId,
         query_context: QueryContext,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
         table_catalogs: Vec<TableCatalogEntry>,
         command_tag: CommandTag,
         returns_rows: bool,
@@ -532,7 +532,7 @@ fn output_layout_for_plan(plan: &DataFusionLogicalPlan) -> Vec<Column> {
 
 fn collect_table_scan_splits(
     plan: &DataFusionLogicalPlan,
-    storage: &dyn StorageEngine,
+    storage: &StorageEngine,
 ) -> Result<TableScanSplitGroup, PlannerError> {
     let mut splits = Vec::new();
     collect_table_scan_splits_into(plan, storage, &mut splits)?;
@@ -541,7 +541,7 @@ fn collect_table_scan_splits(
 
 fn collect_table_scan_splits_into(
     plan: &DataFusionLogicalPlan,
-    storage: &dyn StorageEngine,
+    storage: &StorageEngine,
     splits: &mut Vec<TableScanSplit>,
 ) -> Result<(), PlannerError> {
     match plan {

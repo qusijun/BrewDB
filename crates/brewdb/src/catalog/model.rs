@@ -22,11 +22,12 @@ pub enum CatalogMode {
     Temporary,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageKind {
     Paimon,
     Iceberg,
     File,
+    Memory,
 }
 
 impl StorageKind {
@@ -35,6 +36,7 @@ impl StorageKind {
             Self::Paimon => "paimon",
             Self::Iceberg => "iceberg",
             Self::File => "file",
+            Self::Memory => "memory",
         }
     }
 }
