@@ -1,5 +1,5 @@
-//! In-memory storage engine for tests and local execution.
+//! In-memory table provider wrapper for tests and local execution.
 
 mod engine;
 
-pub use engine::{MemoryStorageEngine, MemoryTableEngine};
+pub use engine::MemoryTableEngine;

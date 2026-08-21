@@ -1,22 +1,12 @@
 //! Apache Paimon storage adapter for BrewDB.
 
-use std::sync::Arc;
-
-use crate::storage::StorageEngine;
-
 mod engine;
 mod reader;
 mod table_provider;
 mod table_sink;
 mod writer;
 
-pub use engine::{PaimonStorageEngine, PaimonTableEngine};
-
-fn open_paimon_storage_engine() -> Arc<dyn StorageEngine> {
-    Arc::new(PaimonStorageEngine)
-}
-
-crate::register_storage_engine!("paimon", open_paimon_storage_engine);
+pub use engine::{PaimonTableEngine, PaimonTableEngineFactory};
 
 #[cfg(test)]
 mod tests {
@@ -28,12 +18,12 @@ mod tests {
         StorageKind, TableCatalogEntry, TablePath,
     };
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-    use crate::storage::{StorageEngine, StorageError};
+    use crate::storage::{StorageError, TableEngineFactory};
     use arrow::array::Int64Array;
     use datafusion::prelude::SessionContext;
     use paimon::io::FileIO;
 
-    use super::PaimonStorageEngine;
+    use super::PaimonTableEngineFactory;
 
     fn make_table(storage_kind: StorageKind) -> TableCatalogEntry {
         TableCatalogEntry::new(
@@ -63,27 +53,27 @@ mod tests {
     }
 
     #[test]
-    fn paimon_storage_rejects_non_paimon_tables() {
-        let storage = PaimonStorageEngine;
+    fn paimon_table_engine_factory_rejects_non_paimon_tables() {
+        let factory = PaimonTableEngineFactory;
 
         assert!(matches!(
-            storage.table_engine(&make_table(StorageKind::Iceberg)),
+            factory.create_table_engine(&make_table(StorageKind::Iceberg)),
             Err(StorageError::UnsupportedStorageKind { .. })
         ));
     }
 
     #[test]
     fn paimon_table_provider_exposes_brewdb_schema() {
-        let storage = PaimonStorageEngine;
+        let factory = PaimonTableEngineFactory;
         let table = make_table(StorageKind::Paimon);
-        let engine = storage.table_engine(&table).unwrap();
+        let engine = factory.create_table_engine(&table).unwrap();
         let provider = engine.table_provider().unwrap();
 
         assert_eq!(provider.schema().field(0).name(), "id");
     }
 
     #[test]
-    fn paimon_storage_reuses_catalog_paimon_schema_adapter() {
+    fn paimon_adapter_reuses_catalog_paimon_schema_adapter() {
         let request = CreateTableRequest::new(
             "sales",
             "orders",
@@ -117,7 +107,7 @@ mod tests {
     fn paimon_table_provider_writes_inserted_batches() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let storage = PaimonStorageEngine;
+            let factory = PaimonTableEngineFactory;
             let table = make_table(StorageKind::Paimon);
             let file_io = FileIO::from_path(&table.table_location)
                 .unwrap()
@@ -131,7 +121,7 @@ mod tests {
                 .mkdirs(&format!("{}/manifest/", table.table_location))
                 .await
                 .unwrap();
-            let engine = storage.table_engine(&table).unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
             let provider = engine.table_provider().unwrap();
             let ctx = SessionContext::new();
             ctx.register_table("orders", provider).unwrap();
@@ -163,7 +153,7 @@ mod tests {
     fn paimon_table_provider_writes_vortex_data_files_when_table_option_is_set() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let storage = PaimonStorageEngine;
+            let factory = PaimonTableEngineFactory;
             let table =
                 make_file_table(StorageKind::Paimon).with_options([("file.format", "vortex")]);
             let _ = fs::remove_dir_all(&table.table_location);
@@ -179,7 +169,7 @@ mod tests {
                 .mkdirs(&format!("{}/manifest/", table.table_location))
                 .await
                 .unwrap();
-            let engine = storage.table_engine(&table).unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
             let provider = engine.table_provider().unwrap();
             let ctx = SessionContext::new();
             ctx.register_table("orders", provider).unwrap();

@@ -89,7 +89,7 @@ impl LocalFragmentTransport {
         Self { service }
     }
 
-    pub fn with_storage(storage: Arc<dyn StorageEngine>) -> Self {
+    pub fn with_storage(storage: Arc<StorageEngine>) -> Self {
         Self::new(Arc::new(
             crate::execution::executor::LocalFragmentExecutor::with_storage(storage),
         ))

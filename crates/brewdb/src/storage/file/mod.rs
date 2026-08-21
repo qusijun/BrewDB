@@ -2,4 +2,4 @@
 
 mod engine;
 
-pub use engine::{FileStorageEngine, FileTableEngine};
+pub use engine::{FileTableEngine, FileTableEngineFactory};

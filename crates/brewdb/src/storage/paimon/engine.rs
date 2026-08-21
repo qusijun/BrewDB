@@ -4,7 +4,7 @@ use crate::catalog::{
     CreateTableRequest, PaimonSchemaAdapter, StorageFormatSchemaAdapter, StorageKind,
     TableCatalogEntry,
 };
-use crate::storage::{StorageEngine, StorageError, TableEngine};
+use crate::storage::{StorageError, TableEngine, TableEngineFactory};
 use datafusion::datasource::TableProvider;
 use paimon::catalog::Identifier as PaimonIdentifier;
 use paimon::io::FileIO;
@@ -18,10 +18,10 @@ pub struct PaimonTableEngine {
 }
 
 #[derive(Default)]
-pub struct PaimonStorageEngine;
+pub struct PaimonTableEngineFactory;
 
-impl StorageEngine for PaimonStorageEngine {
-    fn table_engine(
+impl TableEngineFactory for PaimonTableEngineFactory {
+    fn create_table_engine(
         &self,
         table: &TableCatalogEntry,
     ) -> Result<Arc<dyn TableEngine>, StorageError> {
@@ -33,6 +33,12 @@ impl StorageEngine for PaimonStorageEngine {
         Ok(Arc::new(PaimonTableEngine::new(table.clone())))
     }
 }
+
+fn open_paimon_table_engine_factory() -> Arc<dyn TableEngineFactory> {
+    Arc::new(PaimonTableEngineFactory)
+}
+
+crate::register_table_engine_factory!(StorageKind::Paimon, open_paimon_table_engine_factory);
 
 impl PaimonTableEngine {
     pub fn new(table: TableCatalogEntry) -> Self {

@@ -30,7 +30,7 @@ impl LocalFragmentPlan {
         fragment: PlanFragment,
         table_catalogs: Vec<TableCatalogEntry>,
         table_scan_splits: TableScanSplitGroup,
-        storage: Arc<dyn StorageEngine>,
+        storage: Arc<StorageEngine>,
     ) -> Result<Self, PlannerError> {
         let logical_plan = fragment
             .local_plan
@@ -74,7 +74,7 @@ impl LocalFragmentPlan {
 
 #[derive(Clone)]
 struct LocalTableScanRewriteRule {
-    storage: Arc<dyn StorageEngine>,
+    storage: Arc<StorageEngine>,
     tables: Vec<TableCatalogEntry>,
     table_scan_splits: TableScanSplitGroup,
 }
@@ -139,7 +139,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
 
 #[derive(Clone)]
 struct LocalDmlTargetRewriteRule {
-    storage: Arc<dyn StorageEngine>,
+    storage: Arc<StorageEngine>,
     tables: Vec<TableCatalogEntry>,
 }
 
