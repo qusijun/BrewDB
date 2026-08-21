@@ -1,7 +1,6 @@
 //! BrewDB runtime contracts.
 
 pub mod coordinator;
-pub mod datafusion_context;
 pub mod driver;
 pub mod errors;
 pub mod exchange;

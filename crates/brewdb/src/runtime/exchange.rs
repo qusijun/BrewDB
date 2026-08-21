@@ -349,8 +349,8 @@ mod tests {
 
     use crate::common::context::QueryContext;
     use crate::planner::distributed::exchange::{ExchangeNode, PartitioningScheme};
-    use crate::planner::distributed::split::TableScanSplitGroup;
     use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
+    use crate::storage::TableScanSplitGroup;
     use arrow::array::{ArrayRef, Int32Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;

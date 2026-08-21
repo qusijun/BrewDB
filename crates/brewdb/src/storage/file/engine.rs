@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
-use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
-use crate::storage::{StorageError, TableEngine, TableEngineFactory};
+use crate::storage::{
+    StorageError, TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup,
+};
 use arrow::datatypes::SchemaRef;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
@@ -298,14 +299,13 @@ fn normalize_split_location(root_location: &str, is_directory: bool, path: Strin
 
 #[cfg(test)]
 mod tests {
-    use datafusion::datasource::TableProvider;
+    use datafusion::datasource::{provider_as_source, TableProvider};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
     use std::fs;
 
     use crate::catalog::TableCatalogEntry;
-    use crate::planner::distributed::split::TableScanSplitGroup;
-    use crate::storage::{TableEngine, TableEngineFactory};
+    use crate::storage::{TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup};
 
     use super::{FileTableEngine, FileTableEngineFactory};
 
@@ -415,16 +415,7 @@ mod tests {
                 .unwrap();
         let scan = datafusion_expr::TableScan::try_new(
             datafusion_common::TableReference::bare("source"),
-            std::sync::Arc::new(
-                crate::planner::logical::table_source::DefaultTableSource::new(
-                    TableCatalogEntry::temporary_file(
-                        "source",
-                        dir.to_string_lossy().to_string(),
-                        [("has_header", "true")],
-                    )
-                    .unwrap(),
-                ),
-            ),
+            provider_as_source(engine.table_provider().unwrap()),
             None,
             vec![],
             None,
@@ -453,10 +444,10 @@ mod tests {
             )
             .unwrap();
             let provider = engine
-                .get_table_provider(&TableScanSplitGroup::new(vec![
-                    crate::planner::distributed::split::TableScanSplit::new("source", 0)
-                        .with_locations([dir.join("part-2.csv").display().to_string()]),
-                ]))
+                .get_table_provider(&TableScanSplitGroup::new(vec![TableScanSplit::new(
+                    "source", 0,
+                )
+                .with_locations([dir.join("part-2.csv").display().to_string()])]))
                 .unwrap();
             let exec = provider
                 .scan(&SessionContext::new().state(), None, &[], None)
@@ -485,16 +476,7 @@ mod tests {
             .unwrap();
             let scan = datafusion_expr::TableScan::try_new(
                 datafusion_common::TableReference::bare("source"),
-                std::sync::Arc::new(
-                    crate::planner::logical::table_source::DefaultTableSource::new(
-                        TableCatalogEntry::temporary_file(
-                            "source",
-                            path.to_string_lossy().to_string(),
-                            [("has_header", "true")],
-                        )
-                        .unwrap(),
-                    ),
-                ),
+                provider_as_source(engine.table_provider().unwrap()),
                 None,
                 vec![],
                 None,

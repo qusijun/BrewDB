@@ -1,4 +1,4 @@
-//! Distributed table scan split candidates.
+//! Storage table scan split descriptors.
 
 use std::collections::BTreeMap;
 

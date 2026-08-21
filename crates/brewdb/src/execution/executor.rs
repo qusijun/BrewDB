@@ -97,7 +97,7 @@ impl FragmentExecutor for DataFusionFragmentExecutor {
     ) -> Result<FragmentExecutionStatus, FragmentExecutorError> {
         let runtime = self.tokio_runtime()?;
         let session =
-            crate::runtime::datafusion_context::session_context(&query_context).map_err(|err| {
+            crate::execution::context::session_context(&query_context).map_err(|err| {
                 FragmentExecutorError::InvalidPlan {
                     reason: err.to_string(),
                 }
@@ -355,7 +355,7 @@ impl LocalFragmentExecutor {
     ) -> Result<(), crate::runtime::transport::RpcError> {
         let runtime = self.tokio_runtime()?;
         let session =
-            crate::runtime::datafusion_context::session_context(&query_context).map_err(|err| {
+            crate::execution::context::session_context(&query_context).map_err(|err| {
                 crate::runtime::transport::RpcError::ExecutionFailed {
                     reason: err.to_string(),
                 }
