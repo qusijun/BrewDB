@@ -8,8 +8,7 @@ use datafusion::datasource::TableProvider;
 use datafusion_expr::TableScan;
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
-use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
-use crate::storage::StorageError;
+use crate::storage::{StorageError, TableScanSplit, TableScanSplitGroup};
 
 pub trait TableEngine: Send + Sync {
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError>;

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::catalog::TableCatalogEntry;
 use crate::common::context::QueryContext;
-use crate::planner::distributed::split::TableScanSplitGroup;
 use crate::planner::distributed::PlanFragment;
+use crate::storage::TableScanSplitGroup;
 use arrow::record_batch::RecordBatch;
 use uuid::Uuid;
 
@@ -182,7 +182,6 @@ mod tests {
     use crate::frontend::ingress::SqlRequestContext;
     use crate::planner::distributed::exchange::ExchangeNode;
     use crate::planner::distributed::exchange::RemoteSourceNode;
-    use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
     use crate::planner::distributed::DistributedFragmentPlanner;
     use crate::planner::distributed::{
         DistributedFragmentPlan, DistributedPlanRoot, FragmentScanSplits, PlanFragmentId,
@@ -192,7 +191,7 @@ mod tests {
     use crate::planner::{LocalFragmentPlan, LogicalPlanner, LogicalPlanningContext};
     use crate::runtime::driver::sql_to_statement;
     use crate::storage::memory::MemoryTableEngine;
-    use crate::storage::open_storage_engine;
+    use crate::storage::{open_storage_engine, TableScanSplit, TableScanSplitGroup};
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;

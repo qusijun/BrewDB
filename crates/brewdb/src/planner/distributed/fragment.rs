@@ -6,14 +6,13 @@ use datafusion_expr::{Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPl
 use crate::catalog::TableCatalogEntry;
 use crate::common::context::QueryContext;
 use crate::planner::distributed::exchange::{ExchangeNode, PartitioningScheme, RemoteSourceNode};
-use crate::planner::distributed::split::{TableScanSplit, TableScanSplitGroup};
 use crate::planner::errors::{map_df_plan_error, PlannerError};
 use crate::planner::logical::command::{
     command_plan, command_tag, returns_rows, CommandPlan, CommandTag,
 };
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::LogicalOptimizer;
-use crate::storage::StorageEngine;
+use crate::storage::{StorageEngine, TableScanSplit, TableScanSplitGroup};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PlanFragmentId(pub u32);

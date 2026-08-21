@@ -10,10 +10,10 @@ use datafusion_common::tree_node::Transformed;
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
 use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerRule};
 
-use crate::planner::distributed::split::TableScanSplitGroup;
 use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::errors::PlannerError;
 use crate::planner::logical::table_source::DefaultTableSource;
+use crate::storage::TableScanSplitGroup;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFragmentPlan {
@@ -51,7 +51,7 @@ impl LocalFragmentPlan {
                 tables: table_catalogs,
             }),
         ]);
-        let optimizer_context = crate::runtime::datafusion_context::optimizer_context(
+        let optimizer_context = crate::planner::logical::optimizer::optimizer_context(
             &query_context,
         )
         .map_err(|err| PlannerError::InvalidPlan {

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::common::config::datafusion_settings;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
@@ -11,6 +12,15 @@ use datafusion_optimizer::{
 
 use crate::common::context::QueryContext;
 use crate::planner::logical::plan::LogicalPlanNode;
+
+pub(crate) fn optimizer_context(query_context: &QueryContext) -> Result<OptimizerContext> {
+    let config = datafusion::prelude::SessionConfig::from_string_hash_map(&datafusion_settings(
+        &query_context.settings,
+    ))?;
+    Ok(OptimizerContext::new_with_config_options(Arc::new(
+        config.options().as_ref().clone(),
+    )))
+}
 
 #[derive(Debug)]
 pub struct LogicalOptimizer {
@@ -83,8 +93,7 @@ impl LogicalOptimizer {
         A: FnMut(&DataFusionLogicalPlan, &dyn AnalyzerRule),
         O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
     {
-        let optimizer_context =
-            crate::runtime::datafusion_context::optimizer_context(query_context)?;
+        let optimizer_context = optimizer_context(query_context)?;
         self.optimize_with_context(
             plan,
             optimizer_context,
@@ -139,5 +148,26 @@ impl OptimizerRule for LogicalPlanExtensionRule {
         }
 
         Ok(Transformed::no(DataFusionLogicalPlan::Extension(extension)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::config::ConfigSet;
+    use crate::common::context::{QueryContext, SessionContext};
+    use datafusion_optimizer::OptimizerConfig;
+    use uuid::Uuid;
+
+    #[test]
+    fn optimizer_context_uses_datafusion_settings_from_query_context() {
+        let query_context = QueryContext::new(Uuid::new_v4(), SessionContext::system())
+            .with_settings(ConfigSet::new().with_entry("datafusion.execution.batch_size", 512_u64));
+
+        let optimizer_context = super::optimizer_context(&query_context).unwrap();
+
+        assert_eq!(
+            optimizer_context.options().as_ref().execution.batch_size,
+            512
+        );
     }
 }
