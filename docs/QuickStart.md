@@ -4,10 +4,25 @@ This guide starts a local BrewDB server and runs a simple SQL query.
 
 ## Build
 
+Build requirements:
+
+- Rust `1.88` or newer. The workspace uses Rust 2024 edition and records this
+  requirement in `Cargo.toml`.
+- Cargo from the matching Rust toolchain. With `rustup`, run
+  `rustup update stable` if your local compiler is older.
+- No system `protoc` installation is required for normal builds; the protobuf
+  crate uses a vendored `protoc`.
+
 Build the server and client binaries:
 
 ```bash
 cargo build -p brewdb-bin --bin brewdbd --bin brewdb
+```
+
+Build the full workspace:
+
+```bash
+cargo build --workspace
 ```
 
 ## Start The Server
@@ -39,7 +54,7 @@ cargo run -p brewdb-bin --bin brewdb
 Run core unit tests:
 
 ```bash
-cargo test -p brewdb
+cargo test --workspace
 ```
 
 Run SQL logic tests:

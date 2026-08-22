@@ -89,16 +89,25 @@ dependencies do not affect normal builds.
 
 ## Build
 
+Build requirements:
+
+- Rust `1.88` or newer. The workspace uses Rust 2024 edition and records this
+  requirement in `Cargo.toml`.
+- Cargo from the matching Rust toolchain. With `rustup`, run
+  `rustup update stable` if your local compiler is older.
+- No system `protoc` installation is required for normal builds; the protobuf
+  crate uses a vendored `protoc`.
+
 Build the server and client:
 
 ```bash
 cargo build -p brewdb-bin --bin brewdbd --bin brewdb
 ```
 
-Build the core library:
+Build the full workspace:
 
 ```bash
-cargo build -p brewdb
+cargo build --workspace
 ```
 
 ## Quick Start
