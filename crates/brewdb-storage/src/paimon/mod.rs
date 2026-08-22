@@ -73,6 +73,42 @@ mod tests {
     }
 
     #[test]
+    fn paimon_table_engine_plans_empty_table_as_empty_scan_splits() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+
+            let splits = engine.plan_scan(&scan).unwrap();
+
+            assert!(splits.is_empty(), "expected empty table to plan no splits");
+        });
+    }
+
+    #[test]
     fn paimon_adapter_reuses_catalog_paimon_schema_adapter() {
         let request = CreateTableRequest::new(
             "sales",

@@ -11,6 +11,7 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp}
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
+use paimon::DataSplit;
 use paimon::spec::TableSchema as PaimonTableSchema;
 use paimon::table::Table as PaimonTable;
 
@@ -22,12 +23,20 @@ use super::table_sink::PaimonWriteSink;
 pub struct PaimonTableProvider {
     table: PaimonTable,
     schema: SchemaRef,
+    planned_splits: Option<Vec<DataSplit>>,
 }
 
 impl PaimonTableProvider {
-    pub fn try_new(table: PaimonTable) -> Result<Self, StorageError> {
+    pub fn try_new(
+        table: PaimonTable,
+        planned_splits: Option<Vec<DataSplit>>,
+    ) -> Result<Self, StorageError> {
         let schema = paimon_arrow_schema(table.schema()).map_err(storage_scan_error)?;
-        Ok(Self { table, schema })
+        Ok(Self {
+            table,
+            schema,
+            planned_splits,
+        })
     }
 }
 
@@ -48,13 +57,18 @@ impl TableProvider for PaimonTableProvider {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let read_builder = self.table.new_read_builder();
-        let plan = read_builder
-            .new_scan()
-            .plan()
-            .await
-            .map_err(datafusion_scan_error)?;
-        let splits = plan.splits().to_vec();
+        let splits = match &self.planned_splits {
+            Some(splits) => splits.clone(),
+            None => {
+                let read_builder = self.table.new_read_builder();
+                let plan = read_builder
+                    .new_scan()
+                    .plan()
+                    .await
+                    .map_err(datafusion_scan_error)?;
+                plan.splits().to_vec()
+            }
+        };
         if splits.is_empty() {
             let schema = project_schema(&self.schema, projection)?;
             return Ok(Arc::new(EmptyExec::new(schema)));
