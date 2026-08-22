@@ -62,9 +62,23 @@ plan branch.
 
 ## Repository Layout
 
-- `crates/brewdb`: core library, including parser, catalog, planner, runtime,
-  execution contracts, and storage engines
 - `crates/brewdb-bin`: `brewdbd` server and `brewdb` SQL client binaries
+- `crates/brewdb-common`: shared config, diagnostics, data types, schemas, and
+  query context contracts
+- `crates/brewdb-catalog`: catalog model, catalog service, table metadata, and
+  catalog store backends
+- `crates/brewdb-parser`: BrewDB SQL parser, AST, dialects, tokenizer, and
+  parser utilities
+- `crates/brewdb-planner`: statement binding, logical optimization, fragment
+  planning, and fragment codecs
+- `crates/brewdb-prost`: generated protobuf contracts and source `.proto`
+  definitions
+- `crates/brewdb-storage`: process-level storage registry, table engine
+  factories, file tables, memory tables, and Paimon integration
+- `crates/brewdb-execution`: runtime coordination, scheduling, exchange,
+  fragment execution, and SQL driver orchestration
+- `crates/brewdb-frontend`: protocol-neutral frontend/session boundary,
+  pgwire plugin, client request handling, and result formatting
 - `crates/brewdb-sqllogictests`: end-to-end SQL logic test harness and test
   files
 - `benchmark`: standalone benchmark crate for TPC-H and ClickBench
