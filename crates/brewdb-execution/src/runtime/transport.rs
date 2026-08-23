@@ -1,32 +1,14 @@
 //! Fragment transport contracts.
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::execution::FragmentExecutionStatus;
 use crate::execution::executor::{FragmentExecutionEnvelope, FragmentService};
+use crate::runtime::errors::RpcError;
 use crate::runtime::exchange::ExchangeDataPage;
 use crate::storage::StorageEngine;
 use uuid::Uuid;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RpcError {
-    EndpointNotFound { endpoint: String },
-    ExecutionFailed { reason: String },
-}
-
-impl fmt::Display for RpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndpointNotFound { endpoint } => write!(f, "rpc endpoint not found: {endpoint}"),
-            Self::ExecutionFailed { reason } => write!(f, "rpc execution failed: {reason}"),
-        }
-    }
-}
-
-impl Error for RpcError {}
 
 pub trait RpcClient: Send + Sync {
     fn execute_fragment(

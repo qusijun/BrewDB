@@ -7,8 +7,8 @@ pub mod physical_plan;
 
 pub use exchange::{WorkerExchangeError, WorkerExchangeService};
 pub use executor::{
-    DataFusionFragmentExecutor, FragmentExecutionEnvelope, FragmentExecutionStatus,
-    FragmentExecutor, FragmentExecutorError, FragmentService, LocalFragmentExecutor,
+    FragmentExecutionEnvelope, FragmentExecutionStatus, FragmentExecutorError, FragmentService,
+    LocalFragmentExecutor,
 };
 
 #[cfg(test)]

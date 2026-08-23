@@ -39,7 +39,8 @@ pub mod runtime {
     pub use coordinator::QueryCoordinator;
     pub use driver::SqlDriver;
     pub use errors::{
-        ExchangeRuntimeError, ExecutionRuntimeError, FragmentSchedulerError, SqlDriverError,
+        ExchangeRuntimeError, ExecutionRuntimeError, FragmentSchedulerError, RpcError,
+        SqlDriverError,
     };
     pub use exchange::{
         ExchangeBufferManager, ExchangeChannelDescriptor, ExchangeDataEncoding, ExchangeDataPage,
@@ -54,8 +55,7 @@ pub mod runtime {
     };
     pub use storage::build_storage_engine;
     pub use transport::{
-        FragmentTransport, LocalFragmentTransport, RpcClient, RpcError, TransportRegistry,
-        TransportRpcClient,
+        FragmentTransport, LocalFragmentTransport, RpcClient, TransportRegistry, TransportRpcClient,
     };
 }
 

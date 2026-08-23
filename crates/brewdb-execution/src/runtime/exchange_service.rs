@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::runtime::errors::RpcError;
 use crate::runtime::exchange::{ExchangeChannelDescriptor, ExchangeDataPage};
-use crate::runtime::transport::{RpcError, TransportRegistry};
+use crate::runtime::transport::TransportRegistry;
 use arrow::record_batch::RecordBatch;
 
 pub trait ExchangePageSink: Send + Sync {

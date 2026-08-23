@@ -38,6 +38,10 @@ const EXECUTION_RUNTIME_INIT_FAILED: ErrorCode =
     ErrorCode::new("BREWDB_RUNTIME_EXECUTION_RUNTIME_INIT_FAILED");
 const EXECUTION_STORAGE_ERROR: ErrorCode = ErrorCode::new("BREWDB_RUNTIME_EXECUTION_STORAGE_ERROR");
 const EXECUTION_CATALOG_ERROR: ErrorCode = ErrorCode::new("BREWDB_RUNTIME_EXECUTION_CATALOG_ERROR");
+const TRANSPORT_ENDPOINT_NOT_FOUND: ErrorCode =
+    ErrorCode::new("BREWDB_RUNTIME_TRANSPORT_ENDPOINT_NOT_FOUND");
+const TRANSPORT_EXECUTION_FAILED: ErrorCode =
+    ErrorCode::new("BREWDB_RUNTIME_TRANSPORT_EXECUTION_FAILED");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExchangeRuntimeError {
@@ -180,6 +184,36 @@ impl DiagnosticError for ExecutionRuntimeError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RpcError {
+    EndpointNotFound { endpoint: String },
+    ExecutionFailed { reason: String },
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndpointNotFound { endpoint } => write!(f, "rpc endpoint not found: {endpoint}"),
+            Self::ExecutionFailed { reason } => write!(f, "rpc execution failed: {reason}"),
+        }
+    }
+}
+
+impl Error for RpcError {}
+
+impl DiagnosticError for RpcError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::EndpointNotFound { .. } => TRANSPORT_ENDPOINT_NOT_FOUND,
+            Self::ExecutionFailed { .. } => TRANSPORT_EXECUTION_FAILED,
+        }
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.runtime"
+    }
+}
+
 #[derive(Debug)]
 pub enum SqlDriverError {
     Catalog(CatalogError),
@@ -259,7 +293,7 @@ mod tests {
 
     use crate::parser::parser::ParserError;
 
-    use super::{ExchangeRuntimeError, ExecutionRuntimeError, FragmentSchedulerError};
+    use super::{ExchangeRuntimeError, ExecutionRuntimeError, FragmentSchedulerError, RpcError};
 
     #[test]
     fn scheduler_error_uses_runtime_diagnostic_code() {
@@ -308,6 +342,27 @@ mod tests {
             "BREWDB_RUNTIME_EXECUTION_STORAGE_ERROR"
         );
         assert_eq!(error.log_target(), "brewdb.runtime");
+    }
+
+    #[test]
+    fn rpc_error_uses_runtime_transport_diagnostic_code() {
+        let missing_endpoint = RpcError::EndpointNotFound {
+            endpoint: "rpc://worker-404".to_owned(),
+        };
+        let execution_failed = RpcError::ExecutionFailed {
+            reason: "worker rejected fragment".to_owned(),
+        };
+
+        assert_eq!(
+            missing_endpoint.error_code().as_str(),
+            "BREWDB_RUNTIME_TRANSPORT_ENDPOINT_NOT_FOUND"
+        );
+        assert_eq!(
+            execution_failed.error_code().as_str(),
+            "BREWDB_RUNTIME_TRANSPORT_EXECUTION_FAILED"
+        );
+        assert_eq!(missing_endpoint.log_target(), "brewdb.runtime");
+        assert_eq!(execution_failed.log_target(), "brewdb.runtime");
     }
 
     #[test]

@@ -94,12 +94,11 @@ impl QueryOutput {
 }
 
 impl crate::runtime::exchange_service::ResultBatchSink for QueryOutput {
-    fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::runtime::transport::RpcError> {
-        self.push_result(batch).map_err(|error| {
-            crate::runtime::transport::RpcError::ExecutionFailed {
+    fn send_batch(&self, batch: RecordBatch) -> Result<(), crate::runtime::RpcError> {
+        self.push_result(batch)
+            .map_err(|error| crate::runtime::RpcError::ExecutionFailed {
                 reason: error.to_string(),
-            }
-        })
+            })
     }
 }
 
@@ -186,15 +185,14 @@ mod tests {
             &self,
             worker_id: uuid::Uuid,
             envelope: FragmentExecutionEnvelope,
-        ) -> Result<crate::execution::FragmentExecutionStatus, crate::runtime::transport::RpcError>
-        {
+        ) -> Result<crate::execution::FragmentExecutionStatus, crate::runtime::RpcError> {
             self.inner.execute_fragment(worker_id, envelope)
         }
 
         fn send_exchange_page(
             &self,
             page: crate::runtime::exchange::ExchangeDataPage,
-        ) -> Result<(), crate::runtime::transport::RpcError> {
+        ) -> Result<(), crate::runtime::RpcError> {
             self.sent_pages
                 .lock()
                 .expect("sent page log lock must not be poisoned")
@@ -205,10 +203,8 @@ mod tests {
         fn drain_exchange_pages(
             &self,
             exchange_id: crate::runtime::exchange::ExchangeId,
-        ) -> Result<
-            Vec<crate::runtime::exchange::ExchangeDataPage>,
-            crate::runtime::transport::RpcError,
-        > {
+        ) -> Result<Vec<crate::runtime::exchange::ExchangeDataPage>, crate::runtime::RpcError>
+        {
             self.inner.drain_exchange_pages(exchange_id)
         }
     }
