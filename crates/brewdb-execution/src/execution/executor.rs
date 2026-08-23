@@ -5,13 +5,14 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use crate::common::context::QueryContext;
+use crate::common::diagnostics::{DiagnosticContext, DiagnosticError, ErrorCode};
 use crate::execution::exchange::WorkerExchangeService;
-use crate::execution::fragment::FragmentInstance;
 use crate::planner::LocalFragmentPlan;
 use crate::runtime::exchange::{
     ExchangeBufferManager, ExchangeDataPage, ExchangeId, route_exchange_batch,
 };
 use crate::runtime::exchange_service::{ExchangePageSink, ResultBatchSink};
+use crate::runtime::fragment::FragmentInstance;
 use crate::storage::StorageEngine;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -44,6 +45,11 @@ pub enum FragmentExecutorError {
     RuntimeInitFailed { reason: String },
 }
 
+const FRAGMENT_EXECUTOR_INVALID_PLAN: ErrorCode =
+    ErrorCode::new("BREWDB_EXECUTION_FRAGMENT_EXECUTOR_INVALID_PLAN");
+const FRAGMENT_EXECUTOR_RUNTIME_INIT_FAILED: ErrorCode =
+    ErrorCode::new("BREWDB_EXECUTION_FRAGMENT_EXECUTOR_RUNTIME_INIT_FAILED");
+
 impl fmt::Display for FragmentExecutorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -56,6 +62,34 @@ impl fmt::Display for FragmentExecutorError {
 }
 
 impl Error for FragmentExecutorError {}
+
+impl DiagnosticError for FragmentExecutorError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::InvalidPlan { .. } => FRAGMENT_EXECUTOR_INVALID_PLAN,
+            Self::RuntimeInitFailed { .. } => FRAGMENT_EXECUTOR_RUNTIME_INIT_FAILED,
+        }
+    }
+
+    fn log_target(&self) -> &'static str {
+        "brewdb.execution"
+    }
+
+    fn diagnostic_context(&self, event_name: &'static str) -> DiagnosticContext {
+        DiagnosticContext::new(self.log_target(), event_name)
+            .with_error_code(self.error_code())
+            .with_error_variant(self.variant_name())
+    }
+}
+
+impl FragmentExecutorError {
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            Self::InvalidPlan { .. } => "InvalidPlan",
+            Self::RuntimeInitFailed { .. } => "RuntimeInitFailed",
+        }
+    }
+}
 
 pub trait FragmentExecutor: Send + Sync {
     fn execute_fragment(
@@ -575,5 +609,28 @@ impl WorkerExchangeService for LocalFragmentExecutor {
     ) -> Result<Vec<ExchangeDataPage>, crate::execution::exchange::WorkerExchangeError> {
         self.drain_exchange_pages_inner(exchange_id)
             .map_err(crate::execution::exchange::WorkerExchangeError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::diagnostics::DiagnosticError;
+
+    use super::FragmentExecutorError;
+
+    #[test]
+    fn fragment_executor_error_uses_execution_diagnostic_code() {
+        let error = FragmentExecutorError::InvalidPlan {
+            reason: "missing local plan".to_owned(),
+        };
+
+        let context = error.diagnostic_context("fragment.execute");
+
+        assert_eq!(context.target, "brewdb.execution");
+        assert_eq!(
+            context.error_code_str(),
+            Some("BREWDB_EXECUTION_FRAGMENT_EXECUTOR_INVALID_PLAN")
+        );
+        assert_eq!(context.error_variant, Some("InvalidPlan"));
     }
 }

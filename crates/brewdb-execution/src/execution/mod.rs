@@ -3,7 +3,6 @@
 pub mod context;
 pub mod exchange;
 pub mod executor;
-pub mod fragment;
 pub mod physical_plan;
 
 pub use exchange::{WorkerExchangeError, WorkerExchangeService};
@@ -11,7 +10,6 @@ pub use executor::{
     DataFusionFragmentExecutor, FragmentExecutionEnvelope, FragmentExecutionStatus,
     FragmentExecutor, FragmentExecutorError, FragmentService, LocalFragmentExecutor,
 };
-pub use fragment::{ExecutionFragment, FragmentInstance};
 
 #[cfg(test)]
 mod tests {

@@ -28,12 +28,12 @@ pub mod runtime {
     pub mod exchange;
     pub mod exchange_service;
     pub mod execution_graph;
+    pub mod fragment;
     pub mod function;
     pub mod scheduler;
     pub mod storage;
     pub mod transport;
 
-    pub use crate::execution::{ExecutionFragment, FragmentInstance};
     pub use crate::execution::{FragmentExecutionEnvelope, FragmentService};
     pub use crate::planner::LocalFragmentPlan;
     pub use coordinator::QueryCoordinator;
@@ -47,6 +47,7 @@ pub mod runtime {
     };
     pub use exchange_service::{ExchangePageSink, ResultBatchSink, TransportExchangePageSink};
     pub use execution_graph::{ExecutionGraph, QueryExecutionHandle, QueryOutput};
+    pub use fragment::{ExecutionFragment, FragmentInstance};
     pub use scheduler::{
         AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, ResourceManager,
         StaticResourceManager, WorkerInfo, WorkerSelector,

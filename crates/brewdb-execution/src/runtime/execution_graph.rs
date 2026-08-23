@@ -5,8 +5,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::common::context::QueryContext;
-use crate::execution::{ExecutionFragment, FragmentInstance};
 use crate::planner::distributed::PlanFragment;
+use crate::runtime::{ExecutionFragment, FragmentInstance};
 use arrow::record_batch::RecordBatch;
 
 use crate::runtime::errors::ExecutionRuntimeError;
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_executes_query_through_single_node_fast_path() {
+    fn runtime_executes_single_node_query_through_unified_fragment_scheduling() {
         let fragment = build_fragment();
         let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
         let distributed_plan = DistributedFragmentPlan {
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn single_node_fast_path_uses_worker_side_prepare_path() {
+    fn single_node_fragment_uses_worker_side_prepare_path() {
         let fragment = build_fragment();
         let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
         let distributed_plan = DistributedFragmentPlan {

@@ -163,20 +163,6 @@ impl QueryCoordinator {
         self.single_node_worker_id().is_some()
     }
 
-    fn execute_single_node_query(
-        &self,
-        query_context: QueryContext,
-        distributed_plan: DistributedFragmentPlan,
-    ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
-        if self.single_node_worker_id().is_none() {
-            return Err(ExecutionRuntimeError::InvalidPlan {
-                reason: "single-node fast path requires exactly one worker".to_owned(),
-            });
-        }
-        let instances = self.build_fragment_instances(distributed_plan.clone())?;
-        self.execute_fragment_instances(query_context, distributed_plan, instances)
-    }
-
     pub fn build_fragment_instances(
         &self,
         distributed_plan: DistributedFragmentPlan,
@@ -293,9 +279,6 @@ impl QueryCoordinator {
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         if let DistributedPlanRoot::Command(command) = distributed_plan.root.clone() {
             return self.execute_command(query_context, command);
-        }
-        if self.single_node_worker_id().is_some() {
-            return self.execute_single_node_query(query_context, distributed_plan);
         }
         let instances = self.build_fragment_instances(distributed_plan.clone())?;
         self.execute_fragment_instances(query_context, distributed_plan, instances)
