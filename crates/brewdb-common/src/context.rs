@@ -1,6 +1,7 @@
 //! Runtime-facing shared contracts.
 
 use crate::common::config::ConfigSet;
+use tracing::Span;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +49,17 @@ impl QueryContext {
         self
     }
 
+    pub fn span(&self) -> Span {
+        tracing::info_span!(
+            "query",
+            query_id = %self.query_id,
+            session_id = %self.session_id,
+            user = self.user_name.as_str(),
+            database = self.database_name.as_deref().unwrap_or(""),
+            catalog = self.catalog_name.as_deref().unwrap_or("")
+        )
+    }
+
     pub fn for_test(query_id: Uuid) -> Self {
         Self::system(query_id)
     }
@@ -57,7 +69,24 @@ impl QueryContext {
 mod tests {
     use super::QueryContext;
     use crate::common::config::ConfigSet;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing::info;
     use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn query_context_for_test_uses_system_session_values() {
@@ -105,5 +134,37 @@ mod tests {
                 .unwrap(),
             Some(4)
         );
+    }
+
+    #[test]
+    fn query_context_span_exposes_query_identity_in_logs() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = {
+            let buffer = buffer.clone();
+            move || BufferWriter(buffer.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_writer(writer)
+            .finish();
+
+        let query_id = Uuid::new_v4();
+        let context = QueryContext::new(
+            query_id,
+            Uuid::new_v4(),
+            "brew",
+            None,
+            None,
+            ConfigSet::new(),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = context.span();
+            let _guard = span.enter();
+            info!("query span test");
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains(&query_id.to_string()));
     }
 }

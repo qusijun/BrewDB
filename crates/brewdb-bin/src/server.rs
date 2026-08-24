@@ -5,6 +5,7 @@ use std::fmt;
 use std::net::{TcpListener, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use brewdb_catalog::{CatalogConfig, CatalogError, CatalogService, open_catalog_store};
@@ -19,6 +20,7 @@ use brewdb_frontend::{
     MANAGED_PAIMON_CATALOG_NAME, ProtocolRegistry, QueryResultOutput, ResultField,
     SqlExecutionResult, SqlRequest, SqlRequestHandler,
 };
+use tracing::{error, info};
 
 #[derive(Debug)]
 pub enum BrewDbServerError {
@@ -107,8 +109,7 @@ impl BrewDbServer {
     }
 
     pub fn from_config_file(path: impl AsRef<Path>) -> Result<Self, BrewDbServerError> {
-        let loader = SystemConfigLoader::for_global_registry()?;
-        Self::from_system_config(loader.load_toml_file(path)?)
+        Self::from_system_config(load_system_config_file(path)?)
     }
 
     pub fn with_catalog_service(
@@ -174,6 +175,12 @@ impl BrewDbServer {
             let handler = Arc::clone(&handler);
             std::thread::spawn(move || {
                 if let Err(error) = plugin.serve_connection(stream, frontend, defaults, handler) {
+                    error!(
+                        target: "brewdb.server",
+                        protocol = plugin.protocol_name(),
+                        error = %error,
+                        "frontend connection failed"
+                    );
                     eprintln!("frontend connection failed: {error}");
                 }
             });
@@ -191,11 +198,28 @@ impl BrewDbServer {
                 message: format!("failed to bind frontend listener: {error}"),
             })
         })?;
+        let local_addr = listener.local_addr().map(|addr| addr.to_string()).ok();
+        info!(
+            target: "brewdb.server",
+            protocol = protocol_name,
+            listen_addr = local_addr.as_deref().unwrap_or("<unknown>"),
+            pid = std::process::id(),
+            "brewdbd started"
+        );
         self.serve_protocol(protocol_name, listener)
     }
 }
 
 pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
+    BrewDbServer::from_system_config(bootstrap_system_config()?)
+}
+
+pub fn load_system_config_file(path: impl AsRef<Path>) -> Result<ConfigSet, BrewDbServerError> {
+    let loader = SystemConfigLoader::for_global_registry()?;
+    Ok(loader.load_toml_file(path)?)
+}
+
+pub fn bootstrap_system_config() -> Result<ConfigSet, BrewDbServerError> {
     let registry = global_config_registry()?;
     let warehouse = std::env::temp_dir().join(format!("brewdb-warehouse-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&warehouse).map_err(|error| {
@@ -213,7 +237,7 @@ pub fn bootstrap() -> Result<BrewDbServer, BrewDbServerError> {
                 warehouse.to_string_lossy().as_ref(),
             ),
     )?;
-    BrewDbServer::from_system_config(config)
+    Ok(config)
 }
 
 pub fn init_logging() -> Result<(), BrewDbServerError> {
@@ -221,24 +245,45 @@ pub fn init_logging() -> Result<(), BrewDbServerError> {
     Ok(())
 }
 
+pub fn init_logging_from_config(
+    config: &ConfigSet,
+) -> Result<brewdb_common::logging::LoggingConfig, BrewDbServerError> {
+    let logging_config = brewdb_common::logging::LoggingConfig::from_config_set(config)?;
+    brewdb_common::logging::init_logging(&logging_config)?;
+    Ok(logging_config)
+}
+
 impl SqlRequestHandler for BrewDbServer {
     fn execute(&self, request: &SqlRequest) -> Result<SqlExecutionResult, FrontendError> {
+        let started_at = Instant::now();
+        let query_context = &request.query_context;
+        let _guard = query_context.span().entered();
         let handle = self.execute_client_request(request).map_err(|error| {
+            error!(
+                target: "brewdb.frontend",
+                error_code = error.error_code().as_str(),
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "frontend query failed"
+            );
             FrontendError::QueryExecutionFailed {
                 error_code: Some(error.error_code()),
                 reason: error.to_string(),
             }
         })?;
         let mut batches = Vec::new();
-        while let Some(batch) =
-            handle
-                .output
-                .next_result()
-                .map_err(|error| FrontendError::QueryExecutionFailed {
-                    error_code: None,
-                    reason: error.to_string(),
-                })?
-        {
+        while let Some(batch) = handle.output.next_result().map_err(|error| {
+            error!(
+                target: "brewdb.frontend",
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "frontend query result stream failed"
+            );
+            FrontendError::QueryExecutionFailed {
+                error_code: None,
+                reason: error.to_string(),
+            }
+        })? {
             batches.push(batch);
         }
 
@@ -263,6 +308,17 @@ impl SqlRequestHandler for BrewDbServer {
         } else {
             FrontendResponse::new(QueryResultOutput::command(handle.command_tag))
         };
+
+        info!(
+            target: "brewdb.frontend",
+            result_kind = ?response.result.kind,
+            command_tag = response.result.command_tag.as_str(),
+            row_count = response.result.row_count,
+            batch_count = batches.len(),
+            field_count = response.result.fields.len(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "frontend query completed"
+        );
 
         Ok(SqlExecutionResult { response, batches })
     }
@@ -748,5 +804,44 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&warehouse);
+    }
+
+    #[test]
+    fn logging_config_can_be_loaded_from_server_config_file() {
+        let warehouse = std::env::temp_dir().join(format!("brewdbd-log-config-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&warehouse).unwrap();
+        let log_path = std::env::temp_dir().join(format!("brewdbd-log-{}.log", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("brewdbd-log-config-{}.toml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+brewdb.catalog.store.backend = "memory"
+brewdb.catalog.paimon.warehouse = "{}"
+brewdb.logging.level = "debug"
+brewdb.logging.filter = "info,datafusion=warn,paimon=debug"
+brewdb.logging.path = "{}"
+brewdb.logging.rolling_policy = "hourly"
+brewdb.logging.format = "json"
+"#,
+                warehouse.to_string_lossy(),
+                log_path.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let config = super::load_system_config_file(&path).unwrap();
+        let logging = brewdb_common::logging::LoggingConfig::from_config_set(&config).unwrap();
+
+        assert_eq!(logging.level, brewdb_common::logging::LogLevel::Debug);
+        assert_eq!(
+            logging.path.as_deref(),
+            Some(log_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            logging.rolling_policy,
+            brewdb_common::logging::RollingPolicy::Hourly
+        );
+        assert_eq!(logging.filter, "info,datafusion=warn,paimon=debug");
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::common::config::ConfigSet;
 use crate::common::context::QueryContext;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::frontend::auth::{AuthContext, Authenticator};
@@ -183,10 +184,11 @@ impl FrontendService {
             });
         }
 
-        Ok(SqlRequest {
-            query_context: session.context.query_context(query_id),
-            sql,
-        })
+        let query_context = session.context.query_context(query_id);
+        let _guard = query_context.span().entered();
+        info!(target: "brewdb.frontend", sql_len = sql.len(), "frontend received query");
+
+        Ok(SqlRequest { query_context, sql })
     }
 }
 

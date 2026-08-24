@@ -9,4 +9,5 @@ rust-version.workspace = true
 [dependencies]
 arrow.workspace = true
 brewdb-common = { path = "../brewdb-common" }
+tracing.workspace = true
 uuid.workspace = true
