@@ -18,7 +18,7 @@ mod tests {
         StorageKind, TableCatalogEntry, TablePath,
     };
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-    use crate::storage::{StorageError, TableEngineFactory};
+    use crate::storage::{DataFileFormat, StorageError, TableEngineFactory};
     use arrow::array::Int64Array;
     use datafusion::prelude::SessionContext;
     use paimon::io::FileIO;
@@ -182,6 +182,173 @@ mod tests {
                 .unwrap();
 
             assert_eq!(count.value(0), 2);
+        });
+    }
+
+    #[test]
+    fn paimon_table_engine_plans_file_scan_splits() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql("insert into orders values (cast(1 as int)), (cast(2 as int))")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+
+            let splits = engine.plan_scan(&scan).unwrap();
+
+            assert_eq!(splits.len(), 1);
+            assert_eq!(splits.splits[0].data_files.len(), 1);
+            assert_eq!(
+                splits.splits[0].data_files[0].file_format,
+                DataFileFormat::Parquet
+            );
+            assert!(
+                splits.splits[0].partition.is_some(),
+                "Paimon scan split must carry partition row bytes"
+            );
+            assert!(
+                splits.splits[0].properties.is_empty(),
+                "Paimon scan split must not depend on a process-local plan key"
+            );
+            assert!(splits.splits[0].data_files[0].path.ends_with(".parquet"));
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    #[test]
+    fn paimon_table_engine_rebuilds_provider_from_scan_splits() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql("insert into orders values (cast(1 as int)), (cast(2 as int))")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+            let mut splits = engine.plan_scan(&scan).unwrap();
+            for split in &mut splits.splits {
+                split.properties.clear();
+            }
+
+            let assigned_provider = engine.get_table_provider(&splits).unwrap();
+            let assigned_ctx = SessionContext::new();
+            assigned_ctx
+                .register_table("orders", assigned_provider)
+                .unwrap();
+
+            let batches = assigned_ctx
+                .sql("select count(*) from orders")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let count = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            assert_eq!(count.value(0), 2);
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    #[test]
+    fn paimon_table_provider_scan_uses_paimon_scan_exec() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql("insert into orders values (cast(1 as int)), (cast(2 as int))")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let exec = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+
+            assert_eq!(exec.name(), "PaimonScanExec");
+
+            let _ = fs::remove_dir_all(&table.table_location);
         });
     }
 

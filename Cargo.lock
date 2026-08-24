@@ -828,6 +828,7 @@ dependencies = [
  "futures",
  "inventory",
  "paimon",
+ "serde_json",
  "tokio",
  "uuid",
 ]

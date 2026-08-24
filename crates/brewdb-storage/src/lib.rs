@@ -18,7 +18,10 @@ mod storage_engine;
 pub mod storage {
     pub use crate::{
         errors::StorageError,
-        scan::{TableScanSplit, TableScanSplitGroup},
+        scan::{
+            BucketDescriptor, DataFileDescriptor, DataFileFormat, DeletionFileDescriptor,
+            PartitionDescriptor, RowRangeDescriptor, TableScanSplit, TableScanSplitGroup,
+        },
         storage_engine::{
             StorageEngine, StorageEngineRegistration, TableEngine, TableEngineFactory,
             open_storage_engine,

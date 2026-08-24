@@ -10,13 +10,12 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::empty::EmptyExec;
-use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use paimon::DataSplit;
 use paimon::spec::TableSchema as PaimonTableSchema;
 use paimon::table::Table as PaimonTable;
 
 use super::engine::storage_scan_error;
-use super::reader::PaimonPartitionStream;
+use super::reader::PaimonScanExec;
 use super::table_sink::PaimonWriteSink;
 
 #[derive(Debug)]
@@ -74,25 +73,18 @@ impl TableProvider for PaimonTableProvider {
             return Ok(Arc::new(EmptyExec::new(schema)));
         }
 
-        let partitions = splits
+        let projected_schema = project_schema(&self.schema, projection)?;
+        let scan_splits = splits
             .into_iter()
-            .map(|split| {
-                Arc::new(PaimonPartitionStream::new(
-                    self.table.clone(),
-                    split,
-                    Arc::clone(&self.schema),
-                )) as Arc<dyn PartitionStream>
-            })
+            .map(|split| Arc::<[DataSplit]>::from(vec![split].into_boxed_slice()))
             .collect::<Vec<_>>();
-        let exec = StreamingTableExec::try_new(
-            Arc::clone(&self.schema),
-            partitions,
-            projection,
-            Vec::new(),
-            false,
+        Ok(Arc::new(PaimonScanExec::new(
+            self.table.clone(),
+            projected_schema,
+            scan_splits,
+            projection.cloned(),
             limit,
-        )?;
-        Ok(Arc::new(exec))
+        )))
     }
 
     async fn insert_into(

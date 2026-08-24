@@ -1,25 +1,24 @@
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use crate::catalog::{
     CreateTableRequest, PaimonSchemaAdapter, StorageFormatSchemaAdapter, StorageKind,
     TableCatalogEntry,
 };
 use crate::storage::{
-    StorageError, TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup,
+    BucketDescriptor, DataFileDescriptor, DataFileFormat, DeletionFileDescriptor,
+    PartitionDescriptor, RowRangeDescriptor, StorageError, TableEngine, TableEngineFactory,
+    TableScanSplit, TableScanSplitGroup,
 };
 use datafusion::datasource::TableProvider;
 use datafusion_expr::TableScan;
-use paimon::DataSplit;
 use paimon::catalog::Identifier as PaimonIdentifier;
 use paimon::io::FileIO;
-use paimon::spec::TableSchema as PaimonTableSchema;
+use paimon::spec::{BinaryRow, DataFileMeta, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
+use paimon::{DataSplit, DataSplitBuilder, DeletionFile, RowRange};
 
 use super::table_provider::PaimonTableProvider;
-
-static PAIMON_SCAN_PLANS: OnceLock<Mutex<HashMap<String, Vec<DataSplit>>>> = OnceLock::new();
 
 pub struct PaimonTableEngine {
     table: TableCatalogEntry,
@@ -68,25 +67,6 @@ impl PaimonTableEngine {
             None,
         ))
     }
-
-    fn store_planned_splits(&self, splits: Vec<DataSplit>) -> String {
-        let plan_key = uuid::Uuid::new_v4().to_string();
-        PAIMON_SCAN_PLANS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("paimon scan plan registry must not be poisoned")
-            .insert(plan_key.clone(), splits);
-        plan_key
-    }
-
-    fn take_planned_splits(plan_key: &str, ordinals: &[u32]) -> Option<Vec<DataSplit>> {
-        PAIMON_SCAN_PLANS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("paimon scan plan registry must not be poisoned")
-            .remove(plan_key)
-            .map(|splits| assigned_paimon_splits(splits, ordinals))
-    }
 }
 
 impl TableEngine for PaimonTableEngine {
@@ -101,27 +81,10 @@ impl TableEngine for PaimonTableEngine {
         &self,
         splits: &TableScanSplitGroup,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
-        let plan_key = splits
-            .splits
-            .iter()
-            .find_map(|split| split.properties.get("paimon.plan_key"))
-            .cloned();
-        let ordinals = splits
-            .splits
-            .iter()
-            .filter_map(|split| {
-                split
-                    .properties
-                    .contains_key("paimon.plan_key")
-                    .then_some(split.ordinal)
-            })
-            .collect::<Vec<_>>();
-        let planned_splits = plan_key
-            .as_deref()
-            .and_then(|plan_key| Self::take_planned_splits(plan_key, &ordinals));
+        let planned_splits = paimon_splits_from_table_scan_splits(splits)?;
         Ok(Arc::new(PaimonTableProvider::try_new(
             self.build_table()?,
-            planned_splits,
+            Some(planned_splits),
         )?))
     }
 
@@ -152,39 +115,186 @@ impl TableEngine for PaimonTableEngine {
             return Ok(TableScanSplitGroup::default());
         }
 
-        let split_count = planned_splits.len();
-        let plan_key = self.store_planned_splits(planned_splits);
-        let splits = (0..split_count)
-            .map(|ordinal| {
-                TableScanSplit::new(table_name.clone(), ordinal as u32)
-                    .with_property("paimon.plan_key", plan_key.clone())
+        let splits = planned_splits
+            .iter()
+            .enumerate()
+            .map(|(ordinal, split)| {
+                table_scan_split_from_paimon_split(table_name.clone(), ordinal as u32, split)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(TableScanSplitGroup::new(splits))
     }
 }
 
-fn assigned_paimon_splits(splits: Vec<DataSplit>, ordinals: &[u32]) -> Vec<DataSplit> {
-    if ordinals.is_empty() {
-        return splits;
-    }
-    assigned_ordinal_indices(splits.len(), ordinals)
-        .into_iter()
-        .filter_map(|index| splits.get(index).cloned())
+fn table_scan_split_from_paimon_split(
+    table_name: String,
+    ordinal: u32,
+    split: &DataSplit,
+) -> Result<TableScanSplit, StorageError> {
+    let data_files = split
+        .data_files()
+        .iter()
+        .map(|file| {
+            let path = data_file_path(split.bucket_path(), &file.file_name);
+            Ok(DataFileDescriptor {
+                file_format: DataFileFormat::from_path(&path),
+                file_name: file.file_name.clone(),
+                path,
+                file_size: u64::try_from(file.file_size).ok(),
+                row_count: u64::try_from(file.row_count).ok(),
+                schema_id: Some(file.schema_id),
+                serialized_metadata: Some(serde_json::to_vec(file).map_err(storage_scan_error)?),
+                min_sequence_number: Some(file.min_sequence_number),
+                max_sequence_number: Some(file.max_sequence_number),
+                delete_row_count: file.delete_row_count,
+                first_row_id: file.first_row_id,
+                external_path: file.external_path.clone(),
+                write_columns: file.write_cols.clone(),
+                extra_files: file.extra_files.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+
+    Ok(TableScanSplit::new(table_name, ordinal)
+        .with_snapshot_id(split.snapshot_id())
+        .with_partition(PartitionDescriptor {
+            serialized_binary_row: split.partition().to_serialized_bytes(),
+        })
+        .with_bucket(BucketDescriptor {
+            bucket: split.bucket(),
+            total_buckets: Some(split.total_buckets()),
+            path: Some(split.bucket_path().to_owned()),
+        })
+        .with_data_files(data_files)
+        .with_deletion_files(
+            split
+                .data_deletion_files()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(index, file)| file.as_ref().map(|file| (index, file)))
+                .map(|(index, file)| DeletionFileDescriptor {
+                    data_file_ordinal: index as u32,
+                    path: file.path().to_owned(),
+                    offset: file.offset(),
+                    length: file.length(),
+                    row_count: file
+                        .cardinality()
+                        .and_then(|value| u64::try_from(value).ok()),
+                })
+                .collect(),
+        )
+        .with_row_ranges(
+            split
+                .row_ranges()
+                .into_iter()
+                .flatten()
+                .map(|range| RowRangeDescriptor {
+                    from: range.from(),
+                    to: range.to(),
+                })
+                .collect(),
+        ))
+}
+
+fn paimon_splits_from_table_scan_splits(
+    splits: &TableScanSplitGroup,
+) -> Result<Vec<DataSplit>, StorageError> {
+    splits
+        .splits
+        .iter()
+        .map(paimon_split_from_table_scan_split)
         .collect()
 }
 
-fn assigned_ordinal_indices(split_count: usize, ordinals: &[u32]) -> Vec<usize> {
-    let mut ordinals = ordinals.to_vec();
-    ordinals.sort_unstable();
-    ordinals.dedup();
-    ordinals
-        .into_iter()
-        .filter_map(|ordinal| {
-            let index = ordinal as usize;
-            (index < split_count).then_some(index)
+fn paimon_split_from_table_scan_split(split: &TableScanSplit) -> Result<DataSplit, StorageError> {
+    let snapshot_id = split
+        .snapshot_id
+        .ok_or_else(|| StorageError::TableScanFailed {
+            reason: format!("Paimon scan split {} misses snapshot id", split.split_id),
+        })?;
+    let partition = split
+        .partition
+        .as_ref()
+        .ok_or_else(|| StorageError::TableScanFailed {
+            reason: format!("Paimon scan split {} misses partition", split.split_id),
         })
-        .collect()
+        .and_then(|partition| {
+            BinaryRow::from_serialized_bytes(&partition.serialized_binary_row)
+                .map_err(storage_scan_error)
+        })?;
+    let bucket = split
+        .bucket
+        .as_ref()
+        .ok_or_else(|| StorageError::TableScanFailed {
+            reason: format!("Paimon scan split {} misses bucket", split.split_id),
+        })?;
+    let bucket_path = bucket
+        .path
+        .clone()
+        .ok_or_else(|| StorageError::TableScanFailed {
+            reason: format!("Paimon scan split {} misses bucket path", split.split_id),
+        })?;
+    let data_files = split
+        .data_files
+        .iter()
+        .map(data_file_meta_from_descriptor)
+        .collect::<Result<Vec<_>, StorageError>>()?;
+
+    let mut builder = DataSplitBuilder::new()
+        .with_snapshot(snapshot_id)
+        .with_partition(partition)
+        .with_bucket(bucket.bucket)
+        .with_bucket_path(bucket_path)
+        .with_total_buckets(bucket.total_buckets.unwrap_or(1))
+        .with_data_files(data_files);
+
+    if !split.deletion_files.is_empty() {
+        let mut deletion_files = vec![None; split.data_files.len()];
+        for deletion_file in &split.deletion_files {
+            let index = deletion_file.data_file_ordinal as usize;
+            if index < deletion_files.len() {
+                deletion_files[index] = Some(DeletionFile::new(
+                    deletion_file.path.clone(),
+                    deletion_file.offset,
+                    deletion_file.length,
+                    deletion_file
+                        .row_count
+                        .and_then(|value| i64::try_from(value).ok()),
+                ));
+            }
+        }
+        builder = builder.with_data_deletion_files(deletion_files);
+    }
+
+    if !split.row_ranges.is_empty() {
+        builder = builder.with_row_ranges(
+            split
+                .row_ranges
+                .iter()
+                .map(|range| RowRange::new(range.from, range.to))
+                .collect(),
+        );
+    }
+
+    builder.build().map_err(storage_scan_error)
+}
+
+fn data_file_meta_from_descriptor(file: &DataFileDescriptor) -> Result<DataFileMeta, StorageError> {
+    let metadata =
+        file.serialized_metadata
+            .as_deref()
+            .ok_or_else(|| StorageError::TableScanFailed {
+                reason: format!("Paimon data file {} misses serialized metadata", file.path),
+            })?;
+    serde_json::from_slice(metadata).map_err(storage_scan_error)
+}
+
+fn data_file_path(bucket_path: &str, file_name: &str) -> String {
+    if file_name.starts_with("file:") || file_name.starts_with('/') {
+        return file_name.to_owned();
+    }
+    format!("{}/{}", bucket_path.trim_end_matches('/'), file_name)
 }
 
 pub(crate) fn storage_scan_error(error: impl ToString) -> StorageError {
@@ -219,14 +329,4 @@ fn build_paimon_schema(table: &TableCatalogEntry) -> Result<PaimonTableSchema, S
     )
     .map_err(storage_scan_error)?;
     Ok(PaimonTableSchema::new(0, &schema))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::assigned_ordinal_indices;
-
-    #[test]
-    fn assigned_ordinal_indices_keeps_only_requested_ordinals() {
-        assert_eq!(assigned_ordinal_indices(3, &[2, 0, 2, 9]), vec![0, 2]);
-    }
 }
