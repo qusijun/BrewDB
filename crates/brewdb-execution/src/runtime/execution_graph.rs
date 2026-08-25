@@ -367,7 +367,7 @@ mod tests {
             QueryContext::for_test(uuid::Uuid::new_v4()),
             fragment,
             vec![],
-            TableScanSplitGroup::default(),
+            None,
             crate::runtime::storage::build_storage_engine(),
         )
         .unwrap();
@@ -386,7 +386,7 @@ mod tests {
                 local_plan: None,
             },
             vec![],
-            TableScanSplitGroup::default(),
+            None,
             crate::runtime::storage::build_storage_engine(),
         )
         .unwrap_err();
@@ -449,12 +449,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].table_scan_splits.len(), 2);
+        assert_eq!(instances.len(), 2);
         assert_eq!(
-            instances[0].table_scan_splits.splits[0].table_name,
+            instances[0].table_scan_split.as_ref().unwrap().table_name,
             "orders"
         );
-        assert_eq!(instances[0].table_scan_splits.splits[1].ordinal, 1);
+        assert_eq!(instances[1].table_scan_split.as_ref().unwrap().ordinal, 1);
     }
 
     #[test]
@@ -503,6 +503,52 @@ mod tests {
         assert_eq!(
             root_instance.exchange_inputs[0],
             source_instance.exchange_outputs[0]
+        );
+    }
+
+    #[test]
+    fn runtime_wires_parallel_source_instances_to_root_exchange_inputs() {
+        let source_fragment = build_source_fragment();
+        let source_fragment_id = source_fragment.fragment_id;
+        let target_fragment = build_target_fragment(source_fragment_id);
+        let target_fragment_id = target_fragment.fragment_id;
+        let distributed_plan = DistributedFragmentPlan {
+            query_context: QueryContext::for_test(uuid::Uuid::new_v4()),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: true,
+            fragments: vec![source_fragment, target_fragment],
+            fragment_scan_splits: vec![FragmentScanSplits {
+                fragment_id: source_fragment_id,
+                table_scan_splits: TableScanSplitGroup::new(vec![
+                    TableScanSplit::new("orders", 0),
+                    TableScanSplit::new("orders", 1),
+                ]),
+            }],
+            exchanges: vec![ExchangeNode::gather(source_fragment_id, target_fragment_id)],
+        };
+
+        let instances = QueryCoordinator::default()
+            .build_fragment_instances(distributed_plan)
+            .unwrap();
+        let source_instances = instances
+            .iter()
+            .filter(|instance| instance.fragment_id() == source_fragment_id)
+            .collect::<Vec<_>>();
+        let root_instance = instances
+            .iter()
+            .find(|instance| instance.fragment_id() == target_fragment_id)
+            .expect("root instance must exist");
+
+        assert_eq!(source_instances.len(), 2);
+        assert!(source_instances.iter().all(|instance| {
+            instance.table_scan_split.is_some() && instance.exchange_outputs.len() == 1
+        }));
+        assert_eq!(root_instance.exchange_inputs.len(), 2);
+        assert_ne!(
+            root_instance.exchange_inputs[0].exchange_id,
+            root_instance.exchange_inputs[1].exchange_id
         );
     }
 

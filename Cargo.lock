@@ -716,6 +716,7 @@ dependencies = [
  "datafusion-common",
  "paimon",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -726,6 +727,8 @@ dependencies = [
  "arrow",
  "datafusion-common",
  "inventory",
+ "serde",
+ "serde_json",
  "toml",
  "tracing",
  "tracing-appender",
@@ -750,7 +753,9 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr",
  "futures",
+ "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

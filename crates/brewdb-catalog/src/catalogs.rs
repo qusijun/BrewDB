@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Instant;
 
 use paimon::CatalogFactory as PaimonCatalogFactory;
 use paimon::catalog::{Catalog as PaimonCatalog, Database as PaimonDatabase, Identifier};
@@ -19,6 +20,7 @@ use crate::catalog::requests::{
     RenameTableRequest,
 };
 use crate::catalog::storage_format_schema::StorageFormatSchemaAdapter;
+use tracing::info;
 
 pub trait Catalog: Send + Sync {
     fn entry(&self) -> &CatalogEntry;
@@ -126,8 +128,15 @@ impl ManagedPaimonRuntime {
             return Ok(catalog.clone());
         }
 
+        let started_at = Instant::now();
         let catalog = (self.catalog_loader)()?;
         let _ = self.catalog.set(catalog.clone());
+        info!(
+            target: "brewdb.catalog",
+            backend = "paimon",
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "paimon catalog opened"
+        );
         Ok(self
             .catalog
             .get()

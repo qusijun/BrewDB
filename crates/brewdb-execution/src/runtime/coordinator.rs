@@ -21,6 +21,7 @@ use crate::execution::executor::FragmentExecutionEnvelope;
 use crate::runtime::FragmentInstance;
 use crate::runtime::exchange_service::TransportExchangePageSink;
 use crate::runtime::execution_graph::{ExecutionGraph, QueryExecutionHandle, QueryOutput};
+use crate::runtime::profile::QueryProfiler;
 use crate::runtime::scheduler::{
     AllAtOnceFragmentScheduler, FragmentScheduler, ResourceManager, StaticResourceManager,
     WorkerInfo,
@@ -195,16 +196,23 @@ impl QueryCoordinator {
             .into_iter()
             .map(|instance| {
                 let fragment_id = instance.fragment_id();
+                let instance_id = instance.instance_id;
                 FragmentInstance {
                     query_context: query_context.clone(),
                     exchange_inputs: exchange_channels
                         .iter()
-                        .filter(|channel| channel.target_fragment_id == fragment_id)
+                        .filter(|channel| {
+                            channel.target_fragment_id == fragment_id
+                                && channel.target_instance_id == instance_id
+                        })
                         .cloned()
                         .collect(),
                     exchange_outputs: exchange_channels
                         .iter()
-                        .filter(|channel| channel.source_fragment_id == fragment_id)
+                        .filter(|channel| {
+                            channel.source_fragment_id == fragment_id
+                                && channel.source_instance_id == instance_id
+                        })
                         .cloned()
                         .collect(),
                     table_catalogs: table_catalogs.clone(),
@@ -222,6 +230,8 @@ impl QueryCoordinator {
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         let output = Arc::new(QueryOutput::default());
         let (command_tag, returns_rows) = Self::execution_result_shape(&distributed_plan);
+        let mut profiler = QueryProfiler::new(query_context.clone(), command_tag);
+        let execute_fragments_start = std::time::Instant::now();
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for instance in instances {
@@ -246,23 +256,34 @@ impl QueryCoordinator {
                     if is_root_fragment && returns_rows {
                         envelope = envelope.with_result_batch_sink(result_batch_sink);
                     }
-                    client
+                    let status = client
                         .execute_fragment(worker_id, envelope)
                         .map_err(|err| ExecutionRuntimeError::InvalidPlan {
                             reason: err.to_string(),
                         })?;
-                    Ok::<_, ExecutionRuntimeError>(())
+                    Ok::<_, ExecutionRuntimeError>(status.profile)
                 }));
             }
 
             for join in joins {
-                join.join()
-                    .map_err(|_| ExecutionRuntimeError::RuntimeInitFailed {
-                        reason: "fragment instance execution thread panicked".to_owned(),
-                    })??;
+                if let Some(profile) =
+                    join.join()
+                        .map_err(|_| ExecutionRuntimeError::RuntimeInitFailed {
+                            reason: "fragment instance execution thread panicked".to_owned(),
+                        })??
+                {
+                    profiler.record_fragment(profile);
+                }
             }
             Ok::<_, ExecutionRuntimeError>(())
         })?;
+        profiler.record_phase(
+            "execute_fragments",
+            execute_fragments_start.elapsed().as_millis() as u64,
+        );
+
+        let profile = profiler.finish_success();
+        QueryProfiler::emit_json_profile(&profile);
 
         Ok(QueryExecutionHandle {
             query_context,
@@ -498,6 +519,6 @@ mod tests {
         assert_eq!(graph.instances.len(), 1);
         assert_eq!(graph.instances[0].worker_id, worker_id);
         assert_eq!(graph.instances[0].endpoint, "rpc://worker-1");
-        assert_eq!(graph.instances[0].table_scan_splits.splits, vec![split]);
+        assert_eq!(graph.instances[0].table_scan_split, Some(split));
     }
 }

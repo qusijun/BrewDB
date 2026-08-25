@@ -4,7 +4,7 @@ use crate::catalog::TableCatalogEntry;
 use crate::common::context::QueryContext;
 use crate::planner::distributed::{PlanFragment, PlanFragmentId};
 use crate::runtime::exchange::ExchangeChannelDescriptor;
-use crate::storage::TableScanSplitGroup;
+use crate::storage::TableScanSplit;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct FragmentInstance {
     pub execution_fragment: Box<ExecutionFragment>,
     pub worker_id: Uuid,
     pub endpoint: String,
-    pub table_scan_splits: TableScanSplitGroup,
+    pub table_scan_split: Option<TableScanSplit>,
     pub query_context: QueryContext,
     pub table_catalogs: Vec<TableCatalogEntry>,
     pub exchange_inputs: Vec<ExchangeChannelDescriptor>,
@@ -41,14 +41,14 @@ impl FragmentInstance {
         execution_fragment: ExecutionFragment,
         worker_id: Uuid,
         endpoint: impl Into<String>,
-        table_scan_splits: TableScanSplitGroup,
+        table_scan_split: Option<TableScanSplit>,
     ) -> Self {
         Self {
             instance_id,
             execution_fragment: Box::new(execution_fragment),
             worker_id,
             endpoint: endpoint.into(),
-            table_scan_splits,
+            table_scan_split,
             query_context: QueryContext::for_test(Uuid::nil()),
             table_catalogs: vec![],
             exchange_inputs: vec![],

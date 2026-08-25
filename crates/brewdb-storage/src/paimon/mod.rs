@@ -20,6 +20,7 @@ mod tests {
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::storage::{DataFileFormat, StorageError, TableEngineFactory};
     use arrow::array::Int64Array;
+    use datafusion::physical_plan::ExecutionPlanProperties;
     use datafusion::prelude::SessionContext;
     use paimon::io::FileIO;
 
@@ -225,22 +226,20 @@ mod tests {
             .unwrap();
 
             let splits = engine.plan_scan(&scan).unwrap();
+            let splits = splits.only_table_source_splits().unwrap();
 
             assert_eq!(splits.len(), 1);
-            assert_eq!(splits.splits[0].data_files.len(), 1);
-            assert_eq!(
-                splits.splits[0].data_files[0].file_format,
-                DataFileFormat::Parquet
-            );
+            assert_eq!(splits[0].data_files.len(), 1);
+            assert_eq!(splits[0].data_files[0].file_format, DataFileFormat::Parquet);
             assert!(
-                splits.splits[0].partition.is_some(),
+                splits[0].partition.is_some(),
                 "Paimon scan split must carry partition row bytes"
             );
             assert!(
-                splits.splits[0].properties.is_empty(),
+                splits[0].properties.is_empty(),
                 "Paimon scan split must not depend on a process-local plan key"
             );
-            assert!(splits.splits[0].data_files[0].path.ends_with(".parquet"));
+            assert!(splits[0].data_files[0].path.ends_with(".parquet"));
 
             let _ = fs::remove_dir_all(&table.table_location);
         });
@@ -285,11 +284,13 @@ mod tests {
             )
             .unwrap();
             let mut splits = engine.plan_scan(&scan).unwrap();
-            for split in &mut splits.splits {
+            for split in splits.only_table_source_splits_mut().unwrap() {
                 split.properties.clear();
             }
 
-            let assigned_provider = engine.get_table_provider(&splits).unwrap();
+            let assigned_provider = engine
+                .get_table_provider(splits.only_table_source_splits().unwrap().first())
+                .unwrap();
             let assigned_ctx = SessionContext::new();
             assigned_ctx
                 .register_table("orders", assigned_provider)
@@ -347,6 +348,7 @@ mod tests {
             let exec = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
 
             assert_eq!(exec.name(), "PaimonScanExec");
+            assert_eq!(exec.output_partitioning().partition_count(), 1);
 
             let _ = fs::remove_dir_all(&table.table_location);
         });

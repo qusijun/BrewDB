@@ -30,6 +30,7 @@ pub mod runtime {
     pub mod execution_graph;
     pub mod fragment;
     pub mod function;
+    pub mod profile;
     pub mod scheduler;
     pub mod storage;
     pub mod transport;
@@ -49,6 +50,7 @@ pub mod runtime {
     pub use exchange_service::{ExchangePageSink, ResultBatchSink, TransportExchangePageSink};
     pub use execution_graph::{ExecutionGraph, QueryExecutionHandle, QueryOutput};
     pub use fragment::{ExecutionFragment, FragmentInstance};
+    pub use profile::QueryProfiler;
     pub use scheduler::{
         AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, ResourceManager,
         StaticResourceManager, WorkerInfo, WorkerSelector,

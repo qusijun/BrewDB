@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use crate::common::context::QueryContext;
 use crate::common::diagnostics::{DiagnosticContext, DiagnosticError, ErrorCode};
+use crate::common::profile::FragmentProfile;
 use crate::execution::exchange::WorkerExchangeService;
 use crate::planner::LocalFragmentPlan;
 use crate::runtime::exchange::{
@@ -34,9 +35,10 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FragmentExecutionStatus {
     pub query_context: QueryContext,
+    pub profile: Option<FragmentProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -360,7 +362,8 @@ impl LocalFragmentExecutor {
         &self,
         physical_plan: FragmentPhysicalPlan,
         output: FragmentOutputSinks,
-    ) -> Result<(), crate::runtime::RpcError> {
+    ) -> Result<Arc<dyn ExecutionPlan>, crate::runtime::RpcError> {
+        let plan_for_profile = Arc::clone(&physical_plan.physical_plan);
         let runtime = self.tokio_runtime()?;
         runtime.block_on(async move {
             let mut stream = execute_stream(physical_plan.physical_plan, physical_plan.task_ctx)
@@ -412,7 +415,7 @@ impl LocalFragmentExecutor {
             }
             Ok(())
         })?;
-        Ok(())
+        Ok(plan_for_profile)
     }
 
     fn execute_streaming(
@@ -420,7 +423,8 @@ impl LocalFragmentExecutor {
         query_context: QueryContext,
         logical_plan: DataFusionLogicalPlan,
         envelope: &FragmentExecutionEnvelope,
-    ) -> Result<(), crate::runtime::RpcError> {
+    ) -> Result<FragmentProfile, crate::runtime::RpcError> {
+        let start = std::time::Instant::now();
         let physical_plan = self.create_physical_plan(&query_context, logical_plan)?;
         let output = FragmentOutputSinks {
             exchange_outputs: envelope.instance.exchange_outputs.clone(),
@@ -428,7 +432,19 @@ impl LocalFragmentExecutor {
             result_batch_sink: envelope.result_batch_sink.clone(),
             exchange_buffers: Arc::clone(&self.exchange_buffers),
         };
-        self.execute_physical_plan_streaming(physical_plan, output)
+        let physical_plan = self.execute_physical_plan_streaming(physical_plan, output)?;
+        Ok(FragmentProfile {
+            fragment_id: format!("{:?}", envelope.instance.fragment_id()),
+            worker_id: Some(envelope.instance.worker_id.to_string()),
+            kind: format!("{:?}", envelope.instance.fragment().kind),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            metrics: vec![],
+            operators: vec![
+                crate::runtime::profile::operator_profile_from_execution_plan(
+                    physical_plan.as_ref(),
+                ),
+            ],
+        })
     }
 
     fn send_exchange_page_inner(
@@ -452,8 +468,13 @@ impl LocalFragmentExecutor {
     ) -> Result<DataFusionLogicalPlan, crate::runtime::RpcError> {
         let exchange_inputs = exchange_inputs
             .iter()
-            .map(|channel| (channel.source_fragment_id, channel.clone()))
-            .collect::<HashMap<_, _>>();
+            .fold(HashMap::new(), |mut inputs, channel| {
+                inputs
+                    .entry(channel.source_fragment_id)
+                    .or_insert_with(Vec::new)
+                    .push(channel.clone());
+                inputs
+            });
 
         plan.transform_down(|node| match &node {
             DataFusionLogicalPlan::Extension(extension) => {
@@ -464,21 +485,16 @@ impl LocalFragmentExecutor {
                 ) else {
                     return Ok(Transformed::no(node));
                 };
-                let exchange_ids = remote_source
-                    .source_fragment_ids
-                    .iter()
-                    .map(|source_fragment_id| {
-                        exchange_inputs
-                            .get(source_fragment_id)
-                            .map(|channel| channel.exchange_id)
-                            .ok_or_else(|| {
-                                datafusion_common::DataFusionError::Plan(format!(
-                                    "exchange input for fragment {:?} is missing",
-                                    source_fragment_id
-                                ))
-                            })
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let mut exchange_ids = Vec::new();
+                for source_fragment_id in &remote_source.source_fragment_ids {
+                    let channels = exchange_inputs.get(source_fragment_id).ok_or_else(|| {
+                        datafusion_common::DataFusionError::Plan(format!(
+                            "exchange input for fragment {:?} is missing",
+                            source_fragment_id
+                        ))
+                    })?;
+                    exchange_ids.extend(channels.iter().map(|channel| channel.exchange_id));
+                }
                 let provider = Arc::new(ExchangeStreamTableProvider {
                     schema: Arc::new(remote_source.schema.as_arrow().clone()),
                     exchange_ids,
@@ -523,7 +539,7 @@ impl FragmentService for LocalFragmentExecutor {
             instance.query_context.clone(),
             instance.execution_fragment.fragment.clone(),
             instance.table_catalogs.clone(),
-            instance.table_scan_splits.clone(),
+            instance.table_scan_split.clone(),
             Arc::clone(&self.storage),
         )
         .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
@@ -533,9 +549,11 @@ impl FragmentService for LocalFragmentExecutor {
             prepared.logical_plan.clone(),
             instance.exchange_inputs.as_slice(),
         )?;
-        self.execute_streaming(prepared.query_context.clone(), logical_plan, &envelope)?;
+        let profile =
+            self.execute_streaming(prepared.query_context.clone(), logical_plan, &envelope)?;
         Ok(FragmentExecutionStatus {
             query_context: prepared.query_context,
+            profile: Some(profile),
         })
     }
 

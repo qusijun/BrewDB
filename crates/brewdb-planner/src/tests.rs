@@ -194,14 +194,12 @@ mod tests {
             plan.fragments[0].fragment_id
         );
         assert_eq!(plan.fragment_scan_splits[0].table_scan_splits.len(), 1);
-        assert_eq!(
-            plan.fragment_scan_splits[0].table_scan_splits.splits[0].table_name,
-            "__copy_from_orders"
-        );
-        assert!(
-            plan.fragment_scan_splits[0].table_scan_splits.splits[0].locations[0]
-                .ends_with(path.file_name().unwrap().to_str().unwrap())
-        );
+        let splits = plan.fragment_scan_splits[0]
+            .table_scan_splits
+            .only_table_source_splits()
+            .unwrap();
+        assert_eq!(splits[0].table_name, "__copy_from_orders");
+        assert!(splits[0].locations[0].ends_with(path.file_name().unwrap().to_str().unwrap()));
     }
 
     #[test]

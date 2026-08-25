@@ -79,12 +79,15 @@ impl TableEngine for PaimonTableEngine {
 
     fn get_table_provider(
         &self,
-        splits: &TableScanSplitGroup,
+        split: Option<&TableScanSplit>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
-        let planned_splits = paimon_splits_from_table_scan_splits(splits)?;
+        let planned_splits = split
+            .map(paimon_split_from_table_scan_split)
+            .transpose()?
+            .map(|split| vec![split]);
         Ok(Arc::new(PaimonTableProvider::try_new(
             self.build_table()?,
-            Some(planned_splits),
+            planned_splits,
         )?))
     }
 
@@ -195,16 +198,6 @@ fn table_scan_split_from_paimon_split(
                 })
                 .collect(),
         ))
-}
-
-fn paimon_splits_from_table_scan_splits(
-    splits: &TableScanSplitGroup,
-) -> Result<Vec<DataSplit>, StorageError> {
-    splits
-        .splits
-        .iter()
-        .map(paimon_split_from_table_scan_split)
-        .collect()
 }
 
 fn paimon_split_from_table_scan_split(split: &TableScanSplit) -> Result<DataSplit, StorageError> {

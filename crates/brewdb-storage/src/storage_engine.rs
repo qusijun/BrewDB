@@ -19,7 +19,7 @@ pub trait TableEngine: Send + Sync {
 
     fn get_table_provider(
         &self,
-        _splits: &TableScanSplitGroup,
+        _split: Option<&TableScanSplit>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider()
     }

@@ -1,7 +1,6 @@
 //! Storage table scan split descriptors.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataFileFormat {
@@ -168,54 +167,101 @@ impl TableScanSplit {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TableSourceId(pub u32);
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TableScanSplitGroup {
-    pub splits: Vec<TableScanSplit>,
+    pub table_sources: BTreeMap<TableSourceId, Vec<TableScanSplit>>,
 }
 
 impl TableScanSplitGroup {
     pub fn new(splits: Vec<TableScanSplit>) -> Self {
-        Self { splits }
+        Self::from_table_source(TableSourceId::default(), splits)
+    }
+
+    pub fn from_table_source(table_source_id: TableSourceId, splits: Vec<TableScanSplit>) -> Self {
+        let mut table_sources = BTreeMap::new();
+        if !splits.is_empty() {
+            table_sources.insert(table_source_id, splits);
+        }
+        Self { table_sources }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.splits.is_empty()
+        self.table_sources.values().all(Vec::is_empty)
     }
 
     pub fn len(&self) -> usize {
-        self.splits.len()
+        self.table_sources.values().map(Vec::len).sum()
     }
 
-    pub fn for_table(&self, table_name: &str) -> Self {
-        let mut seen_split_ids = BTreeSet::new();
-        Self::new(
-            self.splits
-                .iter()
-                .filter(|split| split.table_name == table_name)
-                .filter(|split| seen_split_ids.insert(split.split_id.clone()))
-                .cloned()
-                .collect(),
-        )
+    pub fn splits_for_table_source(
+        &self,
+        table_source_id: TableSourceId,
+    ) -> Option<&[TableScanSplit]> {
+        self.table_sources.get(&table_source_id).map(Vec::as_slice)
+    }
+
+    pub fn into_only_table_source_splits(mut self) -> Option<Vec<TableScanSplit>> {
+        if self.table_sources.len() == 1 {
+            self.table_sources.pop_first().map(|(_, splits)| splits)
+        } else {
+            None
+        }
+    }
+
+    pub fn only_table_source_splits(&self) -> Option<&[TableScanSplit]> {
+        if self.table_sources.len() == 1 {
+            self.table_sources
+                .first_key_value()
+                .map(|(_, splits)| splits.as_slice())
+        } else {
+            None
+        }
+    }
+
+    pub fn only_table_source_splits_mut(&mut self) -> Option<&mut Vec<TableScanSplit>> {
+        if self.table_sources.len() == 1 {
+            self.table_sources
+                .first_entry()
+                .map(|entry| entry.into_mut())
+        } else {
+            None
+        }
+    }
+
+    pub fn extend_table_source(
+        &mut self,
+        table_source_id: TableSourceId,
+        splits: impl IntoIterator<Item = TableScanSplit>,
+    ) {
+        self.table_sources
+            .entry(table_source_id)
+            .or_default()
+            .extend(splits);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TableScanSplit, TableScanSplitGroup};
+    use super::{TableScanSplit, TableScanSplitGroup, TableSourceId};
 
     #[test]
-    fn for_table_deduplicates_repeated_scan_splits() {
-        let group = TableScanSplitGroup::new(vec![
-            TableScanSplit::new("orders", 0),
-            TableScanSplit::new("orders", 0),
-            TableScanSplit::new("orders", 1),
-            TableScanSplit::new("customers", 0),
-        ]);
+    fn split_group_keeps_splits_by_table_source_id() {
+        let group = TableScanSplitGroup::from_table_source(
+            TableSourceId(7),
+            vec![
+                TableScanSplit::new("orders", 0),
+                TableScanSplit::new("orders", 1),
+            ],
+        );
 
-        let splits = group.for_table("orders");
+        let splits = group.splits_for_table_source(TableSourceId(7)).unwrap();
 
-        assert_eq!(splits.splits.len(), 2);
-        assert_eq!(splits.splits[0].split_id, "orders#0");
-        assert_eq!(splits.splits[1].split_id, "orders#1");
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[0].split_id, "orders#0");
+        assert_eq!(splits[1].split_id, "orders#1");
+        assert!(group.splits_for_table_source(TableSourceId(8)).is_none());
     }
 }

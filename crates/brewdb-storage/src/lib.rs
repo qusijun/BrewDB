@@ -21,6 +21,7 @@ pub mod storage {
         scan::{
             BucketDescriptor, DataFileDescriptor, DataFileFormat, DeletionFileDescriptor,
             PartitionDescriptor, RowRangeDescriptor, TableScanSplit, TableScanSplitGroup,
+            TableSourceId,
         },
         storage_engine::{
             StorageEngine, StorageEngineRegistration, TableEngine, TableEngineFactory,

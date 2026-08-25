@@ -12,7 +12,7 @@ use crate::planner::logical::command::{
 };
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::LogicalOptimizer;
-use crate::storage::{StorageEngine, TableScanSplit, TableScanSplitGroup};
+use crate::storage::{StorageEngine, TableScanSplit, TableScanSplitGroup, TableSourceId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PlanFragmentId(pub u32);
@@ -533,18 +533,22 @@ fn collect_table_scan_splits(
     plan: &DataFusionLogicalPlan,
     storage: &StorageEngine,
 ) -> Result<TableScanSplitGroup, PlannerError> {
-    let mut splits = Vec::new();
-    collect_table_scan_splits_into(plan, storage, &mut splits)?;
-    Ok(TableScanSplitGroup::new(splits))
+    let mut splits = TableScanSplitGroup::default();
+    let mut next_table_source_id = 0u32;
+    collect_table_scan_splits_into(plan, storage, &mut splits, &mut next_table_source_id)?;
+    Ok(splits)
 }
 
 fn collect_table_scan_splits_into(
     plan: &DataFusionLogicalPlan,
     storage: &StorageEngine,
-    splits: &mut Vec<TableScanSplit>,
+    splits: &mut TableScanSplitGroup,
+    next_table_source_id: &mut u32,
 ) -> Result<(), PlannerError> {
     match plan {
         DataFusionLogicalPlan::TableScan(scan) => {
+            let table_source_id = TableSourceId(*next_table_source_id);
+            *next_table_source_id += 1;
             if let Some(table_source) = scan.source.downcast_ref::<DefaultTableSource>() {
                 let table_engine = match table_source.table_engine() {
                     Some(table_engine) => Arc::clone(table_engine),
@@ -560,14 +564,20 @@ fn collect_table_scan_splits_into(
                         .map_err(|err| PlannerError::InvalidPlan {
                             reason: err.to_string(),
                         })?;
-                splits.extend(planned_splits.splits);
+                let planned_splits = planned_splits
+                    .into_only_table_source_splits()
+                    .unwrap_or_else(Vec::new);
+                splits.extend_table_source(table_source_id, planned_splits);
             } else {
-                splits.push(TableScanSplit::new(scan.table_name.to_string(), 0));
+                splits.extend_table_source(
+                    table_source_id,
+                    [TableScanSplit::new(scan.table_name.to_string(), 0)],
+                );
             }
         }
         _ => {
             for input in plan.inputs() {
-                collect_table_scan_splits_into(input, storage, splits)?;
+                collect_table_scan_splits_into(input, storage, splits, next_table_source_id)?;
             }
         }
     }

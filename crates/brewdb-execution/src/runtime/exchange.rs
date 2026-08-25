@@ -30,6 +30,8 @@ pub struct ExchangeChannelDescriptor {
     pub exchange_id: ExchangeId,
     pub source_fragment_id: PlanFragmentId,
     pub target_fragment_id: PlanFragmentId,
+    pub source_instance_id: Uuid,
+    pub target_instance_id: Uuid,
     pub source_worker_id: Uuid,
     pub source_endpoint: String,
     pub target_worker_id: Uuid,
@@ -43,47 +45,46 @@ pub fn build_exchange_channels(
     exchanges: &[ExchangeNode],
     execution_graph: &ExecutionGraph,
 ) -> Result<Vec<ExchangeChannelDescriptor>, ExchangeRuntimeError> {
-    let placements = execution_graph
-        .instances
-        .iter()
-        .map(|instance| {
-            (
-                instance.fragment_id(),
-                (instance.worker_id, instance.endpoint.clone()),
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let mut placements = HashMap::<PlanFragmentId, Vec<_>>::new();
+    for instance in &execution_graph.instances {
+        placements
+            .entry(instance.fragment_id())
+            .or_default()
+            .push(instance);
+    }
 
-    exchanges
-        .iter()
-        .enumerate()
-        .map(|(ordinal, exchange)| {
-            let (source_worker_id, source_endpoint) = placements
-                .get(&exchange.source_fragment_id)
-                .cloned()
-                .ok_or(ExchangeRuntimeError::SourceFragmentNotScheduled {
-                    fragment_id: exchange.source_fragment_id,
-                })?;
-            let (target_worker_id, target_endpoint) = placements
-                .get(&exchange.target_fragment_id)
-                .cloned()
-                .ok_or(ExchangeRuntimeError::TargetFragmentNotScheduled {
-                    fragment_id: exchange.target_fragment_id,
-                })?;
-            Ok(ExchangeChannelDescriptor {
-                exchange_id: ExchangeId(ordinal as u32),
-                source_fragment_id: exchange.source_fragment_id,
-                target_fragment_id: exchange.target_fragment_id,
-                source_worker_id,
-                source_endpoint,
-                target_worker_id,
-                target_endpoint,
-                scope: exchange.scope,
-                exchange_type: exchange.exchange_type,
-                partitioning_scheme: exchange.partitioning_scheme.clone(),
-            })
-        })
-        .collect()
+    let mut channels = Vec::new();
+    for exchange in exchanges {
+        let source_instances = placements.get(&exchange.source_fragment_id).ok_or(
+            ExchangeRuntimeError::SourceFragmentNotScheduled {
+                fragment_id: exchange.source_fragment_id,
+            },
+        )?;
+        let target_instances = placements.get(&exchange.target_fragment_id).ok_or(
+            ExchangeRuntimeError::TargetFragmentNotScheduled {
+                fragment_id: exchange.target_fragment_id,
+            },
+        )?;
+        for source in source_instances {
+            for target in target_instances {
+                channels.push(ExchangeChannelDescriptor {
+                    exchange_id: ExchangeId(channels.len() as u32),
+                    source_fragment_id: exchange.source_fragment_id,
+                    target_fragment_id: exchange.target_fragment_id,
+                    source_instance_id: source.instance_id,
+                    target_instance_id: target.instance_id,
+                    source_worker_id: source.worker_id,
+                    source_endpoint: source.endpoint.clone(),
+                    target_worker_id: target.worker_id,
+                    target_endpoint: target.endpoint.clone(),
+                    scope: exchange.scope,
+                    exchange_type: exchange.exchange_type,
+                    partitioning_scheme: exchange.partitioning_scheme.clone(),
+                });
+            }
+        }
+    }
+    Ok(channels)
 }
 
 pub fn route_exchange_batch(
@@ -348,18 +349,32 @@ mod tests {
     use std::sync::Arc;
 
     use crate::planner::distributed::PlanFragmentId;
-    use crate::planner::distributed::exchange::{ExchangeScope, ExchangeType, PartitioningScheme};
+    use crate::planner::distributed::exchange::{
+        ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme,
+    };
+    use crate::planner::distributed::{PlanFragment, PlanFragmentKind};
+    use crate::runtime::execution_graph::ExecutionGraph;
+    use crate::runtime::{ExecutionFragment, FragmentInstance};
     use arrow::array::{ArrayRef, Int32Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
     use super::{
         ExchangeBufferManager, ExchangeChannelDescriptor, ExchangeDataEncoding, ExchangeDataPage,
-        ExchangeId, route_exchange_batch,
+        ExchangeId, build_exchange_channels, route_exchange_batch,
     };
 
     fn fragment_id(fragment_id: u32) -> PlanFragmentId {
         PlanFragmentId(fragment_id)
+    }
+
+    fn fragment(fragment_id: PlanFragmentId, kind: PlanFragmentKind) -> ExecutionFragment {
+        ExecutionFragment::new(PlanFragment {
+            fragment_id,
+            kind,
+            root: None,
+            local_plan: None,
+        })
     }
 
     fn channel(exchange_id: ExchangeId, exchange_type: ExchangeType) -> ExchangeChannelDescriptor {
@@ -367,6 +382,8 @@ mod tests {
             exchange_id,
             source_fragment_id: fragment_id(1),
             target_fragment_id: fragment_id(0),
+            source_instance_id: uuid::Uuid::new_v4(),
+            target_instance_id: uuid::Uuid::new_v4(),
             source_worker_id: uuid::Uuid::new_v4(),
             source_endpoint: "rpc://worker-1".to_owned(),
             target_worker_id: uuid::Uuid::new_v4(),
@@ -436,6 +453,56 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].encoding, ExchangeDataEncoding::ArrowIpcStream);
         assert!(!pages[0].payload.is_empty());
+    }
+
+    #[test]
+    fn exchange_channels_include_each_parallel_source_instance() {
+        let source_fragment_id = fragment_id(1);
+        let target_fragment_id = fragment_id(0);
+        let source = fragment(source_fragment_id, PlanFragmentKind::Source);
+        let target = fragment(target_fragment_id, PlanFragmentKind::Root);
+        let target_worker_id = uuid::Uuid::new_v4();
+        let graph = ExecutionGraph {
+            query_context: crate::common::context::QueryContext::for_test(uuid::Uuid::new_v4()),
+            fragments: vec![source.clone(), target.clone()],
+            instances: vec![
+                FragmentInstance::scheduled(
+                    uuid::Uuid::new_v4(),
+                    source.clone(),
+                    uuid::Uuid::new_v4(),
+                    "rpc://worker-1",
+                    None,
+                ),
+                FragmentInstance::scheduled(
+                    uuid::Uuid::new_v4(),
+                    source,
+                    uuid::Uuid::new_v4(),
+                    "rpc://worker-2",
+                    None,
+                ),
+                FragmentInstance::scheduled(
+                    uuid::Uuid::new_v4(),
+                    target,
+                    target_worker_id,
+                    "rpc://worker-0",
+                    None,
+                ),
+            ],
+        };
+
+        let channels = build_exchange_channels(
+            &[ExchangeNode::gather(source_fragment_id, target_fragment_id)],
+            &graph,
+        )
+        .unwrap();
+
+        assert_eq!(channels.len(), 2);
+        assert_ne!(channels[0].exchange_id, channels[1].exchange_id);
+        assert!(channels.iter().all(|channel| {
+            channel.source_fragment_id == source_fragment_id
+                && channel.target_fragment_id == target_fragment_id
+                && channel.target_worker_id == target_worker_id
+        }));
     }
 
     #[test]

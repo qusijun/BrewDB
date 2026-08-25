@@ -51,7 +51,7 @@ impl TableProvider for PaimonTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn datafusion::catalog::Session,
+        state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
@@ -74,16 +74,13 @@ impl TableProvider for PaimonTableProvider {
         }
 
         let projected_schema = project_schema(&self.schema, projection)?;
-        let scan_splits = splits
-            .into_iter()
-            .map(|split| Arc::<[DataSplit]>::from(vec![split].into_boxed_slice()))
-            .collect::<Vec<_>>();
         Ok(Arc::new(PaimonScanExec::new(
             self.table.clone(),
             projected_schema,
-            scan_splits,
+            splits,
             projection.cloned(),
             limit,
+            state.config_options().execution.target_partitions,
         )))
     }
 

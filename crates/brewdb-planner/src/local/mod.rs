@@ -13,7 +13,7 @@ use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerRule};
 use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::errors::PlannerError;
 use crate::planner::logical::table_source::DefaultTableSource;
-use crate::storage::TableScanSplitGroup;
+use crate::storage::TableScanSplit;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFragmentPlan {
@@ -21,7 +21,7 @@ pub struct LocalFragmentPlan {
     pub fragment_id: PlanFragmentId,
     pub fragment_kind: PlanFragmentKind,
     pub logical_plan: DataFusionLogicalPlan,
-    pub table_scan_splits: TableScanSplitGroup,
+    pub table_scan_split: Option<TableScanSplit>,
 }
 
 impl LocalFragmentPlan {
@@ -29,7 +29,7 @@ impl LocalFragmentPlan {
         query_context: QueryContext,
         fragment: PlanFragment,
         table_catalogs: Vec<TableCatalogEntry>,
-        table_scan_splits: TableScanSplitGroup,
+        table_scan_split: Option<TableScanSplit>,
         storage: Arc<StorageEngine>,
     ) -> Result<Self, PlannerError> {
         let logical_plan = fragment
@@ -44,7 +44,7 @@ impl LocalFragmentPlan {
             Arc::new(LocalTableScanRewriteRule {
                 storage: Arc::clone(&storage),
                 tables: table_catalogs.clone(),
-                table_scan_splits: table_scan_splits.clone(),
+                table_scan_split: table_scan_split.clone(),
             }),
             Arc::new(LocalDmlTargetRewriteRule {
                 storage,
@@ -67,7 +67,7 @@ impl LocalFragmentPlan {
             fragment_id: fragment.fragment_id,
             fragment_kind: fragment.kind,
             logical_plan: optimized,
-            table_scan_splits,
+            table_scan_split,
         })
     }
 }
@@ -76,7 +76,7 @@ impl LocalFragmentPlan {
 struct LocalTableScanRewriteRule {
     storage: Arc<StorageEngine>,
     tables: Vec<TableCatalogEntry>,
-    table_scan_splits: TableScanSplitGroup,
+    table_scan_split: Option<TableScanSplit>,
 }
 
 impl std::fmt::Debug for LocalTableScanRewriteRule {
@@ -110,9 +110,10 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                 let Some(table) = table_from_source.or(table_from_catalog) else {
                     return Ok(Transformed::no(DataFusionLogicalPlan::TableScan(scan)));
                 };
-                let assigned_splits = self
-                    .table_scan_splits
-                    .for_table(&scan.table_name.to_string());
+                let assigned_split = self
+                    .table_scan_split
+                    .as_ref()
+                    .filter(|split| split.table_name == scan.table_name.to_string());
                 let table_engine = match default_source.and_then(DefaultTableSource::table_engine) {
                     Some(table_engine) => Arc::clone(table_engine),
                     None => self
@@ -121,7 +122,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                         .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?,
                 };
                 let provider = table_engine
-                    .get_table_provider(&assigned_splits)
+                    .get_table_provider(assigned_split)
                     .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
                 let rebuilt = datafusion_expr::TableScan::try_new(
                     scan.table_name.clone(),

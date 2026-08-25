@@ -149,12 +149,11 @@ impl TableEngine for FileTableEngine {
 
     fn get_table_provider(
         &self,
-        splits: &TableScanSplitGroup,
+        split: Option<&TableScanSplit>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider_for_paths(
-            splits
-                .splits
-                .iter()
+            split
+                .into_iter()
                 .flat_map(|split| split.locations.iter().cloned())
                 .collect(),
         )
@@ -305,7 +304,7 @@ mod tests {
     use std::fs;
 
     use crate::catalog::TableCatalogEntry;
-    use crate::storage::{TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup};
+    use crate::storage::{TableEngine, TableEngineFactory, TableScanSplit};
 
     use super::{FileTableEngine, FileTableEngineFactory};
 
@@ -422,10 +421,11 @@ mod tests {
         )
         .unwrap();
         let splits = engine.plan_scan(&scan).unwrap();
+        let splits = splits.only_table_source_splits().unwrap();
 
-        assert_eq!(splits.splits.len(), 2);
-        assert!(splits.splits[0].locations[0].ends_with("part-1.csv"));
-        assert!(splits.splits[1].locations[0].ends_with("part-2.csv"));
+        assert_eq!(splits.len(), 2);
+        assert!(splits[0].locations[0].ends_with("part-1.csv"));
+        assert!(splits[1].locations[0].ends_with("part-2.csv"));
     }
 
     #[test]
@@ -444,10 +444,10 @@ mod tests {
             )
             .unwrap();
             let provider = engine
-                .get_table_provider(&TableScanSplitGroup::new(vec![
-                    TableScanSplit::new("source", 0)
+                .get_table_provider(Some(
+                    &TableScanSplit::new("source", 0)
                         .with_locations([dir.join("part-2.csv").display().to_string()]),
-                ]))
+                ))
                 .unwrap();
             let exec = provider
                 .scan(&SessionContext::new().state(), None, &[], None)
@@ -483,8 +483,9 @@ mod tests {
             )
             .unwrap();
             let splits = engine.plan_scan(&scan).unwrap();
-            assert_eq!(splits.splits.len(), 1);
-            let provider = engine.get_table_provider(&splits).unwrap();
+            let only_splits = splits.only_table_source_splits().unwrap();
+            assert_eq!(only_splits.len(), 1);
+            let provider = engine.get_table_provider(only_splits.first()).unwrap();
             let exec = provider
                 .scan(&SessionContext::new().state(), None, &[], None)
                 .await
@@ -496,8 +497,7 @@ mod tests {
                 batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
                 3,
                 "split locations: {:?}",
-                splits
-                    .splits
+                only_splits
                     .iter()
                     .flat_map(|split| split.locations.iter())
                     .collect::<Vec<_>>()

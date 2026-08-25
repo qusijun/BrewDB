@@ -11,5 +11,6 @@ async-trait.workspace = true
 brewdb-common = { path = "../brewdb-common" }
 datafusion-common.workspace = true
 paimon.workspace = true
+tracing.workspace = true
 tokio.workspace = true
 uuid.workspace = true

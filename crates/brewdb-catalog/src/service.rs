@@ -1,6 +1,7 @@
 //! Catalog-facing resolve service.
 
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::common::config::{ConfigSet, ConfigView, global_config_registry};
@@ -13,6 +14,7 @@ use crate::catalog::errors::CatalogError;
 use crate::catalog::model::{CatalogEntry, CatalogMode, CatalogRef, StorageKind};
 use crate::catalog::path::CatalogPath;
 use crate::catalog::requests::CreateDatabaseRequest;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct CatalogService {
@@ -106,11 +108,28 @@ impl CatalogService {
         &self,
         catalog_name: &str,
     ) -> Result<(), CatalogError> {
+        let started_at = Instant::now();
         let catalog = self.open_catalog(catalog_name)?;
         match catalog.get_database(DEFAULT_DATABASE_NAME) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                info!(
+                    target: "brewdb.catalog",
+                    catalog = catalog_name,
+                    default_database = DEFAULT_DATABASE_NAME,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "managed paimon default database ready"
+                );
+                Ok(())
+            }
             Err(CatalogError::DatabaseNotFound { .. }) => {
                 catalog.create_database(CreateDatabaseRequest::new(DEFAULT_DATABASE_NAME))?;
+                info!(
+                    target: "brewdb.catalog",
+                    catalog = catalog_name,
+                    default_database = DEFAULT_DATABASE_NAME,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "managed paimon default database created"
+                );
                 Ok(())
             }
             Err(error) => Err(error),
