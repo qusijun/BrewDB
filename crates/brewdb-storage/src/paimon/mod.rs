@@ -3,7 +3,6 @@
 mod engine;
 mod reader;
 mod table_provider;
-mod table_sink;
 mod writer;
 
 pub use engine::{PaimonTableEngine, PaimonTableEngineFactory};

@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::net::{TcpListener, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -221,7 +221,7 @@ pub fn load_system_config_file(path: impl AsRef<Path>) -> Result<ConfigSet, Brew
 
 pub fn bootstrap_system_config() -> Result<ConfigSet, BrewDbServerError> {
     let registry = global_config_registry()?;
-    let warehouse = std::env::temp_dir().join(format!("brewdb-warehouse-{}", Uuid::new_v4()));
+    let warehouse = brewdb_temp_root().join(format!("brewdb-warehouse-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&warehouse).map_err(|error| {
         BrewDbServerError::Common(CommonError::InvalidConfiguration {
             field: "brewdb.catalog.paimon.warehouse".to_owned(),
@@ -238,6 +238,10 @@ pub fn bootstrap_system_config() -> Result<ConfigSet, BrewDbServerError> {
             ),
     )?;
     Ok(config)
+}
+
+fn brewdb_temp_root() -> PathBuf {
+    PathBuf::from("/tmp")
 }
 
 pub fn init_logging() -> Result<(), BrewDbServerError> {
@@ -326,9 +330,7 @@ impl SqlRequestHandler for BrewDbServer {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::{Read, Write};
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
@@ -340,6 +342,7 @@ mod tests {
         open_catalog_store,
     };
     use brewdb_common::config::{ConfigPatch, ConfigScope, ConfigSet, global_config_registry};
+    use brewdb_common::test_util::{TestDir, TestFile};
     use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use brewdb_execution::runtime::QueryCoordinator;
     use brewdb_frontend::{
@@ -352,26 +355,8 @@ mod tests {
 
     use super::BrewDbServer;
 
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("brewdbd-e2e-{}", Uuid::new_v4()));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
     fn build_test_server() -> BrewDbServer {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdbd-e2e");
         let registry = global_config_registry().unwrap();
         let mut config = registry.materialize_defaults();
         config
@@ -381,14 +366,14 @@ mod tests {
                     .with_entry("brewdb.catalog.store.backend", "memory")
                     .with_entry(
                         "brewdb.catalog.paimon.warehouse",
-                        warehouse.path.to_string_lossy().as_ref(),
+                        warehouse.path().to_string_lossy().as_ref(),
                     ),
             )
             .unwrap();
         let catalog_service = CatalogService::with_config(
             open_catalog_store(&CatalogConfig {
                 store_backend: CatalogStoreBackendKind::Memory,
-                paimon_warehouse: warehouse.path.to_string_lossy().into_owned(),
+                paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
             }),
             config,
         );
@@ -502,14 +487,13 @@ mod tests {
     fn server_bootstraps_default_database_for_client_sessions() {
         let registry = global_config_registry().unwrap();
         let mut config = registry.materialize_defaults();
-        let warehouse = std::env::temp_dir().join(format!("brewdbd-default-db-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
+        let warehouse = TestDir::with_prefix("brewdbd-default-db");
         config
             .apply_patch_with_registry(
                 &registry,
                 &ConfigPatch::new(ConfigScope::System).with_entry(
                     "brewdb.catalog.paimon.warehouse",
-                    warehouse.to_string_lossy().as_ref(),
+                    warehouse.path().to_string_lossy().as_ref(),
                 ),
             )
             .unwrap();
@@ -542,22 +526,19 @@ mod tests {
 
         assert_eq!(result.response.result.kind, QueryResultKind::Command);
         assert_eq!(result.response.result.command_tag.as_str(), "CREATE TABLE");
-
-        let _ = std::fs::remove_dir_all(&warehouse);
     }
 
     #[test]
     fn server_inserts_values_into_managed_paimon_table() {
         let registry = global_config_registry().unwrap();
         let mut config = registry.materialize_defaults();
-        let warehouse = std::env::temp_dir().join(format!("brewdbd-insert-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
+        let warehouse = TestDir::with_prefix("brewdbd-insert");
         config
             .apply_patch_with_registry(
                 &registry,
                 &ConfigPatch::new(ConfigScope::System).with_entry(
                     "brewdb.catalog.paimon.warehouse",
-                    warehouse.to_string_lossy().as_ref(),
+                    warehouse.path().to_string_lossy().as_ref(),
                 ),
             )
             .unwrap();
@@ -601,23 +582,19 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(count.value(0), 2);
-
-        let _ = std::fs::remove_dir_all(&warehouse);
     }
 
     #[test]
     fn server_rejects_schema_less_create_table() {
         let registry = global_config_registry().unwrap();
         let mut config = registry.materialize_defaults();
-        let warehouse =
-            std::env::temp_dir().join(format!("brewdbd-empty-schema-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
+        let warehouse = TestDir::with_prefix("brewdbd-empty-schema");
         config
             .apply_patch_with_registry(
                 &registry,
                 &ConfigPatch::new(ConfigScope::System).with_entry(
                     "brewdb.catalog.paimon.warehouse",
-                    warehouse.to_string_lossy().as_ref(),
+                    warehouse.path().to_string_lossy().as_ref(),
                 ),
             )
             .unwrap();
@@ -651,8 +628,6 @@ mod tests {
             error.to_string(),
             "query execution failed: invalid planner input: CREATE TABLE must define at least one column"
         );
-
-        let _ = std::fs::remove_dir_all(&warehouse);
     }
 
     #[test]
@@ -733,14 +708,13 @@ mod tests {
                     .with_entry("brewdb.catalog.store.backend", "memory"),
             )
             .unwrap();
-        let warehouse = std::env::temp_dir().join(format!("brewdbd-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
+        let warehouse = TestDir::with_prefix("brewdbd-test");
         config
             .apply_patch_with_registry(
                 &registry,
                 &ConfigPatch::new(ConfigScope::System).with_entry(
                     "brewdb.catalog.paimon.warehouse",
-                    warehouse.to_string_lossy().as_ref(),
+                    warehouse.path().to_string_lossy().as_ref(),
                 ),
             )
             .unwrap();
@@ -769,19 +743,18 @@ mod tests {
 
     #[test]
     fn server_can_be_constructed_from_config_file() {
-        let warehouse = std::env::temp_dir().join(format!("brewdbd-config-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
-        let path = std::env::temp_dir().join(format!("brewdbd-config-{}.toml", Uuid::new_v4()));
+        let warehouse = TestDir::with_prefix("brewdbd-config");
+        let path = TestFile::new("brewdbd-config", "toml");
         std::fs::write(
-            &path,
+            path.path(),
             format!(
                 "brewdb.catalog.store.backend = \"memory\"\nbrewdb.catalog.paimon.warehouse = \"{}\"\n",
-                warehouse.to_string_lossy()
+                warehouse.path().to_string_lossy()
             ),
         )
         .unwrap();
 
-        let server = super::BrewDbServer::from_config_file(&path).unwrap();
+        let server = super::BrewDbServer::from_config_file(path.path()).unwrap();
         let session = OpenedClientSession {
             context: brewdb_frontend::ClientContext {
                 session: ClientSessionContext::new(
@@ -801,19 +774,15 @@ mod tests {
             .unwrap();
         let result = server.execute(&request).unwrap();
         assert_eq!(result.response.result.kind, QueryResultKind::Command);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&warehouse);
     }
 
     #[test]
     fn logging_config_can_be_loaded_from_server_config_file() {
-        let warehouse = std::env::temp_dir().join(format!("brewdbd-log-config-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&warehouse).unwrap();
-        let log_path = std::env::temp_dir().join(format!("brewdbd-log-{}.log", Uuid::new_v4()));
-        let path = std::env::temp_dir().join(format!("brewdbd-log-config-{}.toml", Uuid::new_v4()));
+        let warehouse = TestDir::with_prefix("brewdbd-log-config");
+        let log_path = TestFile::new("brewdbd-log", "log");
+        let path = TestFile::new("brewdbd-log-config", "toml");
         std::fs::write(
-            &path,
+            path.path(),
             format!(
                 r#"
 brewdb.catalog.store.backend = "memory"
@@ -824,19 +793,19 @@ brewdb.logging.path = "{}"
 brewdb.logging.rolling_policy = "hourly"
 brewdb.logging.format = "json"
 "#,
-                warehouse.to_string_lossy(),
-                log_path.to_string_lossy()
+                warehouse.path().to_string_lossy(),
+                log_path.path().to_string_lossy()
             ),
         )
         .unwrap();
 
-        let config = super::load_system_config_file(&path).unwrap();
+        let config = super::load_system_config_file(path.path()).unwrap();
         let logging = brewdb_common::logging::LoggingConfig::from_config_set(&config).unwrap();
 
         assert_eq!(logging.level, brewdb_common::logging::LogLevel::Debug);
         assert_eq!(
             logging.path.as_deref(),
-            Some(log_path.to_string_lossy().as_ref())
+            Some(log_path.path().to_string_lossy().as_ref())
         );
         assert_eq!(
             logging.rolling_policy,

@@ -13,6 +13,7 @@ pub enum CommandPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandTag {
     Select,
+    Explain,
     Insert,
     CreateTable,
     DropTable,
@@ -30,6 +31,7 @@ impl CommandTag {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Select => "SELECT",
+            Self::Explain => "EXPLAIN",
             Self::Insert => "INSERT",
             Self::CreateTable => "CREATE TABLE",
             Self::DropTable => "DROP TABLE",
@@ -63,6 +65,7 @@ pub fn command_plan(root: &DataFusionLogicalPlan) -> Option<CommandPlan> {
 
 pub(crate) fn command_tag(root: &DataFusionLogicalPlan) -> CommandTag {
     match root {
+        DataFusionLogicalPlan::Explain(_) => CommandTag::Explain,
         DataFusionLogicalPlan::Dml(_) => CommandTag::Insert,
         DataFusionLogicalPlan::Ddl(statement) => match statement {
             datafusion_expr::DdlStatement::CreateExternalTable(_) => CommandTag::CreateTable,

@@ -96,7 +96,6 @@ impl SqlDriver {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use crate::catalog::{
@@ -118,6 +117,7 @@ mod tests {
     use super::{SqlDriver, sql_to_statement};
     use crate::runtime::coordinator::QueryCoordinator;
     use crate::runtime::execution_graph::QueryExecutionHandle;
+    use brewdb_common::test_util::TestDir;
 
     #[test]
     fn sql_to_statement_accepts_brewdb_create_table_cluster_by_extension() {
@@ -129,28 +129,6 @@ mod tests {
                 assert!(create_table.cluster_by.is_some());
             }
             other => panic!("expected create table, got {other:?}"),
-        }
-    }
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("brewdb-driver-{}", Uuid::new_v4()));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 
@@ -217,7 +195,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_query_context_through_planner_and_runtime() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -263,7 +241,7 @@ mod tests {
 
     #[test]
     fn sql_driver_runs_single_node_queries_without_fragment_exchange() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -308,8 +286,139 @@ mod tests {
     }
 
     #[test]
+    fn sql_driver_explain_includes_physical_plan() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+
+        let storage = open_storage_engine().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            true,
+        )]));
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        register_batches(
+            &storage,
+            &table,
+            vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+        );
+        let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
+
+        let handle = execute_sql(&driver, "explain select count(id) from orders").unwrap();
+
+        assert_eq!(handle.command_tag, "EXPLAIN");
+        assert!(handle.returns_rows);
+        let batch = handle.output.next_result().unwrap().unwrap();
+        let plan_types = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let plans = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let rows = (0..batch.num_rows())
+            .map(|row| (plan_types.value(row), plans.value(row)))
+            .collect::<Vec<_>>();
+
+        assert!(
+            rows.iter()
+                .any(|(plan_type, _)| *plan_type == "logical_plan")
+        );
+        assert!(
+            rows.iter()
+                .any(|(plan_type, _)| *plan_type == "physical_plan")
+        );
+        assert!(
+            rows.iter()
+                .any(|(_, plan)| plan.contains("AggregateExec") || plan.contains("Aggregate"))
+        );
+        assert!(handle.output.next_result().unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_driver_explain_copy_from_includes_sink_physical_plan() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+        let storage = open_storage_engine().unwrap();
+        let csv_path = warehouse.path().join("orders.csv");
+        fs::write(&csv_path, "id\n1\n2\n3\n").unwrap();
+
+        let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
+        let handle = execute_sql(
+            &driver,
+            format!(
+                "explain copy from '{}' to orders with (format csv, header true)",
+                csv_path.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(handle.command_tag, "EXPLAIN");
+        assert!(handle.returns_rows);
+        let batch = handle.output.next_result().unwrap().unwrap();
+        let plan_types = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let plans = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let rows = (0..batch.num_rows())
+            .map(|row| (plan_types.value(row), plans.value(row)))
+            .collect::<Vec<_>>();
+
+        assert!(
+            rows.iter()
+                .any(|(plan_type, _)| *plan_type == "physical_plan")
+        );
+        assert!(rows.iter().any(|(_, plan)| plan.contains("PaimonSinkExec")));
+        assert!(
+            rows.iter()
+                .all(|(_, plan)| !plan.contains("CoalescePartitionsExec"))
+        );
+        assert!(handle.output.next_result().unwrap().is_none());
+
+        let select = execute_sql(&driver, "select count(id) from orders").unwrap();
+        let batch = select.output.next_result().unwrap().unwrap();
+        let count = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 0);
+    }
+
+    #[test]
     fn sql_driver_executes_create_table_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -336,7 +445,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_insert_values_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -375,7 +484,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_copy_from_csv_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -422,8 +531,52 @@ mod tests {
     }
 
     #[test]
+    fn sql_driver_executes_copy_from_csv_into_paimon_statement() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+        let storage = open_storage_engine().unwrap();
+        let csv_path = warehouse.path().join("orders.csv");
+        fs::write(&csv_path, "id\n1\n2\n3\n").unwrap();
+
+        let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
+        let handle = execute_sql(
+            &driver,
+            format!(
+                "copy from '{}' to orders with (format csv, header true)",
+                csv_path.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(handle.command_tag, "INSERT");
+        assert!(!handle.returns_rows);
+        assert!(handle.output.next_result().unwrap().is_none());
+
+        let select = execute_sql(&driver, "select count(id) from orders").unwrap();
+        let batch = select.output.next_result().unwrap().unwrap();
+        let count = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 3);
+        assert!(select.output.next_result().unwrap().is_none());
+    }
+
+    #[test]
     fn sql_driver_executes_create_database_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
 
@@ -441,7 +594,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_drop_database_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -459,7 +612,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_drop_table_statement() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -484,7 +637,7 @@ mod tests {
 
     #[test]
     fn sql_driver_rejects_alter_table_until_datafusion_ddl_supports_it() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog
@@ -510,7 +663,7 @@ mod tests {
 
     #[test]
     fn sql_driver_executes_show_statements() {
-        let warehouse = TestDir::new();
+        let warehouse = TestDir::new("brewdb-driver");
         let catalog_service = catalog_service(warehouse.path());
         let catalog = catalog_service.open_catalog("prod").unwrap();
         catalog

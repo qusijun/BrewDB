@@ -10,6 +10,8 @@ pub mod errors;
 pub mod logging;
 pub mod profile;
 pub mod table;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_util;
 pub mod utils;
 
 pub mod common {

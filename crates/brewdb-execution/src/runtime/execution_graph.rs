@@ -104,8 +104,6 @@ impl crate::runtime::exchange_service::ResultBatchSink for QueryOutput {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use crate::catalog::{
@@ -131,6 +129,7 @@ mod tests {
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use brewdb_common::test_util::TestDir;
     use datafusion_common::DFSchema;
     use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
     use datafusion_expr::{LogicalPlanBuilder, TableSource, TableType, lit};
@@ -142,28 +141,6 @@ mod tests {
     use crate::runtime::coordinator::QueryCoordinator;
     use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo, WorkerSelector};
     use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new(prefix: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&path).expect("test directory must be created");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     #[derive(Clone)]
     struct RecordingForwardingTransport {
@@ -430,7 +407,7 @@ mod tests {
             returns_rows: true,
             fragments: vec![PlanFragment {
                 fragment_id,
-                kind: PlanFragmentKind::Root,
+                kind: PlanFragmentKind::Source,
                 root: None,
                 local_plan: Some(build_fragment().local_plan.unwrap()),
             }],
@@ -448,7 +425,6 @@ mod tests {
             .build_fragment_instances(distributed_plan)
             .unwrap();
 
-        assert_eq!(instances.len(), 1);
         assert_eq!(instances.len(), 2);
         assert_eq!(
             instances[0].table_scan_split.as_ref().unwrap().table_name,

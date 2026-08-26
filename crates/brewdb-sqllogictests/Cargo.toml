@@ -12,5 +12,5 @@ path = "bin/integration_tests.rs"
 harness = false
 
 [dependencies]
+brewdb-common = { path = "../brewdb-common", features = ["test-utils"] }
 sqllogictest.workspace = true
-uuid.workspace = true

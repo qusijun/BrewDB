@@ -298,6 +298,7 @@ fn normalize_split_location(root_location: &str, is_directory: bool, path: Strin
 
 #[cfg(test)]
 mod tests {
+    use brewdb_common::test_util::{TestDir, TestFile};
     use datafusion::datasource::{TableProvider, provider_as_source};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
@@ -310,15 +311,16 @@ mod tests {
 
     #[test]
     fn file_table_engine_initializes_listing_components_from_path_and_options() {
-        let path =
-            std::env::temp_dir().join(format!("brewdb-file-engine-{}.csv", uuid::Uuid::new_v4()));
-        fs::write(&path, "id,name\n1,apple\n").unwrap();
+        let path = TestFile::new("brewdb-file-engine", "csv");
+        fs::write(path.path(), "id,name\n1,apple\n").unwrap();
 
-        let engine =
-            FileTableEngine::try_new(path.to_string_lossy().to_string(), [("has_header", "true")])
-                .unwrap();
+        let engine = FileTableEngine::try_new(
+            path.path().to_string_lossy().to_string(),
+            [("has_header", "true")],
+        )
+        .unwrap();
 
-        assert_eq!(engine.location(), path.to_string_lossy());
+        assert_eq!(engine.location(), path.path().to_string_lossy());
         assert_eq!(engine.file_format.get_ext(), "csv");
         assert_eq!(engine.listing_options.file_extension, "csv");
         assert_eq!(engine.schema_ref().field(0).name(), "id");
@@ -329,12 +331,11 @@ mod tests {
     fn file_table_engine_listing_table_reads_csv_data() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let path =
-                std::env::temp_dir().join(format!("brewdb-file-{}.csv", uuid::Uuid::new_v4()));
-            fs::write(&path, "id,name\n1,apple\n2,banana\n").unwrap();
+            let path = TestFile::new("brewdb-file", "csv");
+            fs::write(path.path(), "id,name\n1,apple\n2,banana\n").unwrap();
 
             let engine = FileTableEngine::try_new(
-                path.to_string_lossy().to_string(),
+                path.path().to_string_lossy().to_string(),
                 [("has_header", "true")],
             )
             .unwrap();
@@ -357,12 +358,11 @@ mod tests {
     fn file_table_engine_factory_infers_csv_format_from_file_location() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let path = std::env::temp_dir()
-                .join(format!("brewdb-file-infer-{}.csv", uuid::Uuid::new_v4()));
-            fs::write(&path, "id\n9\n").unwrap();
+            let path = TestFile::new("brewdb-file-infer", "csv");
+            fs::write(path.path(), "id\n9\n").unwrap();
             let table = TableCatalogEntry::temporary_file(
                 "copy_source",
-                path.to_string_lossy().to_string(),
+                path.path().to_string_lossy().to_string(),
                 [("has_header", "true")],
             )
             .unwrap();
@@ -387,13 +387,11 @@ mod tests {
 
     #[test]
     fn file_table_engine_factory_opens_directory_table_sources() {
-        let dir =
-            std::env::temp_dir().join(format!("brewdb-file-dir-source-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("part-1.csv"), "id\n11\n").unwrap();
+        let dir = TestDir::new("brewdb-file-dir-source");
+        fs::write(dir.path().join("part-1.csv"), "id\n11\n").unwrap();
         let table = TableCatalogEntry::temporary_file(
             "directory_source",
-            dir.to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
             [("has_header", "true")],
         )
         .unwrap();
@@ -404,14 +402,15 @@ mod tests {
 
     #[test]
     fn file_table_engine_plans_directory_files_as_splits() {
-        let dir = std::env::temp_dir().join(format!("brewdb-file-dir-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("part-1.csv"), "id\n1\n").unwrap();
-        fs::write(dir.join("part-2.csv"), "id\n2\n").unwrap();
+        let dir = TestDir::new("brewdb-file-dir");
+        fs::write(dir.path().join("part-1.csv"), "id\n1\n").unwrap();
+        fs::write(dir.path().join("part-2.csv"), "id\n2\n").unwrap();
 
-        let engine =
-            FileTableEngine::try_new(dir.to_string_lossy().to_string(), [("has_header", "true")])
-                .unwrap();
+        let engine = FileTableEngine::try_new(
+            dir.path().to_string_lossy().to_string(),
+            [("has_header", "true")],
+        )
+        .unwrap();
         let scan = datafusion_expr::TableScan::try_new(
             datafusion_common::TableReference::bare("source"),
             provider_as_source(engine.table_provider().unwrap()),
@@ -432,21 +431,22 @@ mod tests {
     fn file_table_engine_get_table_provider_reads_assigned_splits_only() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let dir =
-                std::env::temp_dir().join(format!("brewdb-file-assigned-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("part-1.csv"), "id\n1\n").unwrap();
-            fs::write(dir.join("part-2.csv"), "id\n2\n").unwrap();
+            let dir = TestDir::new("brewdb-file-assigned");
+            fs::write(dir.path().join("part-1.csv"), "id\n1\n").unwrap();
+            fs::write(dir.path().join("part-2.csv"), "id\n2\n").unwrap();
 
             let engine = FileTableEngine::try_new(
-                dir.to_string_lossy().to_string(),
+                dir.path().to_string_lossy().to_string(),
                 [("has_header", "true")],
             )
             .unwrap();
             let provider = engine
                 .get_table_provider(Some(
-                    &TableScanSplit::new("source", 0)
-                        .with_locations([dir.join("part-2.csv").display().to_string()]),
+                    &TableScanSplit::new("source", 0).with_locations([dir
+                        .path()
+                        .join("part-2.csv")
+                        .display()
+                        .to_string()]),
                 ))
                 .unwrap();
             let exec = provider
@@ -464,13 +464,10 @@ mod tests {
     fn file_table_engine_planned_single_file_split_reads_back() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let path = std::env::temp_dir().join(format!(
-                "brewdb-file-single-split-{}.csv",
-                uuid::Uuid::new_v4()
-            ));
-            fs::write(&path, "id\n1\n2\n3\n").unwrap();
+            let path = TestFile::new("brewdb-file-single-split", "csv");
+            fs::write(path.path(), "id\n1\n2\n3\n").unwrap();
             let engine = FileTableEngine::try_new(
-                path.to_string_lossy().to_string(),
+                path.path().to_string_lossy().to_string(),
                 [("has_header", "true")],
             )
             .unwrap();

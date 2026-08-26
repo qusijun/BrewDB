@@ -17,7 +17,8 @@ use datafusion_expr::{
 };
 
 use crate::planner::errors::{map_common_error, map_df_plan_error};
-use crate::planner::logical::expr::bind_expr;
+use crate::planner::logical::context::QueryPlannerContext;
+use crate::planner::logical::query::values::build_values_plan;
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::{
     resolve_query_tables, resolve_table, resolve_table_object, LogicalPlanningContext,
@@ -189,16 +190,8 @@ fn build_values_input(
     function_registry: &dyn FunctionRegistry,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
     validate_insert_columns(ast, target_table)?;
-    let rows = values
-        .rows
-        .iter()
-        .map(|row| {
-            row.content
-                .iter()
-                .map(|expr| bind_expr(expr, function_registry))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let tables = [];
+    let planner_context = QueryPlannerContext::new(&tables, function_registry);
     let schema = Arc::new(
         DFSchema::try_from(
             target_table
@@ -208,10 +201,7 @@ fn build_values_input(
         )
         .map_err(map_df_plan_error)?,
     );
-    let values_plan = LogicalPlanBuilder::values_with_schema(rows, &schema)
-        .map_err(map_df_plan_error)?
-        .build()
-        .map_err(map_df_plan_error)?;
+    let values_plan = build_values_plan(values, &planner_context, Some(schema))?;
     let projection = target_table
         .table_schema
         .fields
@@ -405,6 +395,7 @@ mod tests {
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
     use crate::common::diagnostics::DiagnosticError;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
+    use brewdb_common::test_util::{TestDir, TestFile};
 
     use super::plan_copy_from_file_statement;
 
@@ -423,14 +414,12 @@ mod tests {
 
     #[test]
     fn copy_from_rejects_directory_source_before_file_engine_setup() {
-        let dir =
-            std::env::temp_dir().join(format!("brewdb-copy-from-dir-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("part-1.csv"), "id\n11\n").unwrap();
+        let dir = TestDir::new("brewdb-copy-from-dir");
+        fs::write(dir.path().join("part-1.csv"), "id\n11\n").unwrap();
 
         let error = plan_copy_from_file_statement(
             target_table(),
-            &dir.to_string_lossy(),
+            &dir.path().to_string_lossy(),
             [("has_header".to_owned(), "true".to_owned())].into(),
         )
         .unwrap_err();
@@ -438,27 +427,23 @@ mod tests {
         assert!(error
             .to_string()
             .contains("COPY FROM expects a single file"));
-
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn copy_from_rejects_source_schema_column_count_mismatch() {
-        let file = std::env::temp_dir().join(format!(
-            "brewdb-copy-from-mismatch-{}.csv",
-            uuid::Uuid::new_v4()
-        ));
-        fs::write(&file, "1,2\n").unwrap();
+        let file = TestFile::new("brewdb-copy-from-mismatch", "csv");
+        fs::write(file.path(), "1,2\n").unwrap();
 
-        let error =
-            plan_copy_from_file_statement(target_table(), &file.to_string_lossy(), BTreeMap::new())
-                .unwrap_err();
+        let error = plan_copy_from_file_statement(
+            target_table(),
+            &file.path().to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()
             .contains("COPY FROM schema column count mismatch"));
         assert_eq!(error.error_code().as_str(), "BREWDB_PLANNER_SCHEMA_ERROR");
-
-        let _ = fs::remove_file(file);
     }
 }

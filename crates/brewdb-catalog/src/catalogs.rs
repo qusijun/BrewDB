@@ -345,7 +345,12 @@ impl Catalog for ManagedPaimonCatalog {
             });
         }
 
-        self.paimon_runtime.create_database(path.database())?;
+        match self.paimon_runtime.create_database(path.database()) {
+            Ok(()) => {}
+            Err(CatalogError::DuplicateDatabase { catalog, database })
+                if catalog == "<paimon>" && database == path.database() => {}
+            Err(error) => return Err(error),
+        }
         let entry = DatabaseCatalogEntry::new(uuid::Uuid::new_v4(), self.entry.catalog_id, path)
             .with_options(request.database_options);
         self.store.create_database(entry.clone())?;
@@ -371,7 +376,17 @@ impl Catalog for ManagedPaimonCatalog {
             });
         }
 
-        self.paimon_runtime.create_table(&request)?;
+        match self.paimon_runtime.create_table(&request) {
+            Ok(()) => {}
+            Err(CatalogError::DuplicateTable {
+                catalog,
+                database,
+                table,
+            }) if catalog == "<paimon>"
+                && database == table_path.database()
+                && table == table_path.table() => {}
+            Err(error) => return Err(error),
+        }
         let live_table = self
             .paimon_runtime
             .load_table(table_path.database(), table_path.table())?;

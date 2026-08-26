@@ -193,14 +193,14 @@ impl OptimizerRule for LocalDmlTargetRewriteRule {
 #[cfg(test)]
 mod tests {
     use crate::storage::TableEngine;
+    use brewdb_common::test_util::TestFile;
 
     #[test]
     fn file_table_engine_is_backed_by_storage_file_provider() {
-        let path =
-            std::env::temp_dir().join(format!("brewdb-local-file-{}.csv", uuid::Uuid::new_v4()));
-        std::fs::write(&path, "id\n1\n").unwrap();
+        let path = TestFile::new("brewdb-local-file", "csv");
+        std::fs::write(path.path(), "id\n1\n").unwrap();
         let engine = crate::storage::file::FileTableEngine::try_new(
-            path.to_string_lossy().to_string(),
+            path.path().to_string_lossy().to_string(),
             [("has_header", "true")],
         )
         .unwrap();

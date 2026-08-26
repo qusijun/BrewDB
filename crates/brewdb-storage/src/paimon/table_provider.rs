@@ -4,11 +4,11 @@ use crate::storage::StorageError;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::SchemaExt;
-use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::empty::EmptyExec;
 use paimon::DataSplit;
 use paimon::spec::TableSchema as PaimonTableSchema;
@@ -16,7 +16,7 @@ use paimon::table::Table as PaimonTable;
 
 use super::engine::storage_scan_error;
 use super::reader::PaimonScanExec;
-use super::table_sink::PaimonWriteSink;
+use super::writer::{PaimonCommitExec, PaimonSinkExec};
 
 #[derive(Debug)]
 pub struct PaimonTableProvider {
@@ -99,14 +99,9 @@ impl TableProvider for PaimonTableProvider {
             .schema()
             .logically_equivalent_names_and_types(&self.schema)
             .map_err(datafusion_scan_error)?;
-        Ok(Arc::new(DataSinkExec::new(
-            input,
-            Arc::new(PaimonWriteSink::new(
-                self.table.clone(),
-                Arc::clone(&self.schema),
-            )),
-            None,
-        )))
+        let sink = Arc::new(PaimonSinkExec::new(input, self.table.clone()));
+        let gather = Arc::new(CoalescePartitionsExec::new(sink));
+        Ok(Arc::new(PaimonCommitExec::new(gather, self.table.clone())))
     }
 
     fn supports_filters_pushdown(

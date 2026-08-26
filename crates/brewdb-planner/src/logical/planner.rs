@@ -17,6 +17,7 @@ use datafusion_functions_aggregate as datafusion_aggregate_functions;
 use super::plan::LogicalPlanNode;
 use crate::planner::errors::PlannerError;
 
+use super::context::cte_name_from_object_name;
 use super::ddl::{
     bind_alter_statement, bind_create_database_statement, bind_create_table_statement,
     bind_drop_statement, bind_show_catalogs_statement, bind_show_databases_statement,
@@ -261,7 +262,7 @@ pub(crate) fn resolve_query_tables(
     query: &crate::parser::ast::Query,
 ) -> Result<Vec<TableCatalogEntry>, PlannerError> {
     let mut names = Vec::new();
-    collect_query_table_names(query, &mut names)?;
+    collect_query_table_names(query, &mut names, &mut BTreeSet::new())?;
     let mut seen = BTreeSet::new();
     let mut tables = Vec::new();
     for name in names {
@@ -276,47 +277,68 @@ pub(crate) fn resolve_query_tables(
 fn collect_query_table_names(
     query: &crate::parser::ast::Query,
     names: &mut Vec<ObjectName>,
+    ctes_in_scope: &mut BTreeSet<String>,
 ) -> Result<(), PlannerError> {
-    if query.with.is_some() {
-        return Err(PlannerError::UnsupportedPlan {
-            reason: "WITH queries are not supported yet".to_string(),
-        });
+    let mut cte_names = Vec::new();
+    if let Some(with) = &query.with {
+        if with.recursive {
+            return Err(PlannerError::UnsupportedPlan {
+                reason: "recursive CTEs are not supported yet".to_string(),
+            });
+        }
+        for cte in &with.cte_tables {
+            collect_query_table_names(&cte.query, names, ctes_in_scope)?;
+            let cte_name = super::context::cte_name_from_ident(&cte.alias.name);
+            ctes_in_scope.insert(cte_name.clone());
+            cte_names.push(cte_name);
+        }
     }
-    collect_set_expr_table_names(query.body.as_ref(), names)
+    let result = collect_set_expr_table_names(query.body.as_ref(), names, ctes_in_scope);
+    for cte_name in cte_names {
+        ctes_in_scope.remove(&cte_name);
+    }
+    result
 }
 
 fn collect_set_expr_table_names(
     set_expr: &crate::parser::ast::SetExpr,
     names: &mut Vec<ObjectName>,
+    ctes_in_scope: &mut BTreeSet<String>,
 ) -> Result<(), PlannerError> {
     match set_expr {
         crate::parser::ast::SetExpr::Select(select) => {
             for from in &select.from {
-                collect_table_factor_names(&from.relation, names)?;
+                collect_table_factor_names(&from.relation, names, ctes_in_scope)?;
                 for join in &from.joins {
-                    collect_table_factor_names(&join.relation, names)?;
+                    collect_table_factor_names(&join.relation, names, ctes_in_scope)?;
                 }
             }
             for projection in &select.projection {
-                collect_select_item_table_names(projection, names)?;
+                collect_select_item_table_names(projection, names, ctes_in_scope)?;
             }
             if let Some(selection) = &select.selection {
-                collect_expr_table_names(selection, names)?;
+                collect_expr_table_names(selection, names, ctes_in_scope)?;
             }
             match &select.group_by {
                 crate::parser::ast::GroupByExpr::Expressions(expressions, _) => {
                     for expr in expressions {
-                        collect_expr_table_names(expr, names)?;
+                        collect_expr_table_names(expr, names, ctes_in_scope)?;
                     }
                 }
                 crate::parser::ast::GroupByExpr::All(_) => {}
             }
             if let Some(having) = &select.having {
-                collect_expr_table_names(having, names)?;
+                collect_expr_table_names(having, names, ctes_in_scope)?;
             }
             Ok(())
         }
-        crate::parser::ast::SetExpr::Query(query) => collect_query_table_names(query, names),
+        crate::parser::ast::SetExpr::Query(query) => {
+            collect_query_table_names(query, names, ctes_in_scope)
+        }
+        crate::parser::ast::SetExpr::SetOperation { left, right, .. } => {
+            collect_set_expr_table_names(left, names, ctes_in_scope)?;
+            collect_set_expr_table_names(right, names, ctes_in_scope)
+        }
         crate::parser::ast::SetExpr::Values(_) => Ok(()),
         other => Err(PlannerError::UnsupportedPlan {
             reason: format!("unsupported query body `{other}`"),
@@ -327,12 +349,13 @@ fn collect_set_expr_table_names(
 fn collect_select_item_table_names(
     item: &crate::parser::ast::SelectItem,
     names: &mut Vec<ObjectName>,
+    ctes_in_scope: &mut BTreeSet<String>,
 ) -> Result<(), PlannerError> {
     match item {
         crate::parser::ast::SelectItem::UnnamedExpr(expr)
         | crate::parser::ast::SelectItem::ExprWithAlias { expr, .. }
         | crate::parser::ast::SelectItem::ExprWithAliases { expr, .. } => {
-            collect_expr_table_names(expr, names)
+            collect_expr_table_names(expr, names, ctes_in_scope)
         }
         crate::parser::ast::SelectItem::Wildcard(_)
         | crate::parser::ast::SelectItem::QualifiedWildcard(_, _) => Ok(()),
@@ -342,6 +365,7 @@ fn collect_select_item_table_names(
 fn collect_expr_table_names(
     expr: &crate::parser::ast::Expr,
     names: &mut Vec<ObjectName>,
+    ctes_in_scope: &mut BTreeSet<String>,
 ) -> Result<(), PlannerError> {
     use crate::parser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
 
@@ -349,50 +373,50 @@ fn collect_expr_table_names(
         Expr::Nested(expr)
         | Expr::UnaryOp { expr, .. }
         | Expr::IsNull(expr)
-        | Expr::IsNotNull(expr) => collect_expr_table_names(expr, names),
+        | Expr::IsNotNull(expr) => collect_expr_table_names(expr, names, ctes_in_scope),
         Expr::BinaryOp { left, right, .. } => {
-            collect_expr_table_names(left, names)?;
-            collect_expr_table_names(right, names)
+            collect_expr_table_names(left, names, ctes_in_scope)?;
+            collect_expr_table_names(right, names, ctes_in_scope)
         }
         Expr::Between {
             expr, low, high, ..
         } => {
-            collect_expr_table_names(expr, names)?;
-            collect_expr_table_names(low, names)?;
-            collect_expr_table_names(high, names)
+            collect_expr_table_names(expr, names, ctes_in_scope)?;
+            collect_expr_table_names(low, names, ctes_in_scope)?;
+            collect_expr_table_names(high, names, ctes_in_scope)
         }
         Expr::InList { expr, list, .. } => {
-            collect_expr_table_names(expr, names)?;
+            collect_expr_table_names(expr, names, ctes_in_scope)?;
             for item in list {
-                collect_expr_table_names(item, names)?;
+                collect_expr_table_names(item, names, ctes_in_scope)?;
             }
             Ok(())
         }
         Expr::InSubquery { expr, subquery, .. } => {
-            collect_expr_table_names(expr, names)?;
-            collect_query_table_names(subquery, names)
+            collect_expr_table_names(expr, names, ctes_in_scope)?;
+            collect_query_table_names(subquery, names, ctes_in_scope)
         }
         Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
-            collect_query_table_names(subquery, names)
+            collect_query_table_names(subquery, names, ctes_in_scope)
         }
         Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-            collect_expr_table_names(expr, names)?;
-            collect_expr_table_names(pattern, names)
+            collect_expr_table_names(expr, names, ctes_in_scope)?;
+            collect_expr_table_names(pattern, names, ctes_in_scope)
         }
-        Expr::Interval(interval) => collect_expr_table_names(&interval.value, names),
-        Expr::Extract { expr, .. } => collect_expr_table_names(expr, names),
+        Expr::Interval(interval) => collect_expr_table_names(&interval.value, names, ctes_in_scope),
+        Expr::Extract { expr, .. } => collect_expr_table_names(expr, names, ctes_in_scope),
         Expr::Substring {
             expr,
             substring_from,
             substring_for,
             ..
         } => {
-            collect_expr_table_names(expr, names)?;
+            collect_expr_table_names(expr, names, ctes_in_scope)?;
             if let Some(from) = substring_from {
-                collect_expr_table_names(from, names)?;
+                collect_expr_table_names(from, names, ctes_in_scope)?;
             }
             if let Some(for_expr) = substring_for {
-                collect_expr_table_names(for_expr, names)?;
+                collect_expr_table_names(for_expr, names, ctes_in_scope)?;
             }
             Ok(())
         }
@@ -403,14 +427,14 @@ fn collect_expr_table_names(
             ..
         } => {
             if let Some(operand) = operand {
-                collect_expr_table_names(operand, names)?;
+                collect_expr_table_names(operand, names, ctes_in_scope)?;
             }
             for condition in conditions {
-                collect_expr_table_names(&condition.condition, names)?;
-                collect_expr_table_names(&condition.result, names)?;
+                collect_expr_table_names(&condition.condition, names, ctes_in_scope)?;
+                collect_expr_table_names(&condition.result, names, ctes_in_scope)?;
             }
             if let Some(else_result) = else_result {
-                collect_expr_table_names(else_result, names)?;
+                collect_expr_table_names(else_result, names, ctes_in_scope)?;
             }
             Ok(())
         }
@@ -422,13 +446,13 @@ fn collect_expr_table_names(
                         | FunctionArg::Named {
                             arg: FunctionArgExpr::Expr(expr),
                             ..
-                        } => collect_expr_table_names(expr, names)?,
+                        } => collect_expr_table_names(expr, names, ctes_in_scope)?,
                         _ => {}
                     }
                 }
             }
             if let Some(filter) = &function.filter {
-                collect_expr_table_names(filter, names)?;
+                collect_expr_table_names(filter, names, ctes_in_scope)?;
             }
             Ok(())
         }
@@ -439,6 +463,7 @@ fn collect_expr_table_names(
 fn collect_table_factor_names(
     factor: &crate::parser::ast::TableFactor,
     names: &mut Vec<ObjectName>,
+    ctes_in_scope: &mut BTreeSet<String>,
 ) -> Result<(), PlannerError> {
     match factor {
         crate::parser::ast::TableFactor::Table { .. } => {
@@ -447,6 +472,12 @@ fn collect_table_factor_names(
                     reason: format!("unsupported table factor `{factor}`"),
                 });
             };
+            if cte_name_from_object_name(name)?
+                .as_ref()
+                .is_some_and(|cte_name| ctes_in_scope.contains(cte_name))
+            {
+                return Ok(());
+            }
             names.push(name.clone());
             Ok(())
         }
@@ -461,7 +492,7 @@ fn collect_table_factor_names(
                     reason: format!("unsupported table factor `{factor}`"),
                 });
             }
-            collect_query_table_names(subquery, names)
+            collect_query_table_names(subquery, names, ctes_in_scope)
         }
         crate::parser::ast::TableFactor::NestedJoin {
             table_with_joins,
@@ -472,9 +503,9 @@ fn collect_table_factor_names(
                     reason: format!("unsupported nested join alias `{factor}`"),
                 });
             }
-            collect_table_factor_names(&table_with_joins.relation, names)?;
+            collect_table_factor_names(&table_with_joins.relation, names, ctes_in_scope)?;
             for join in &table_with_joins.joins {
-                collect_table_factor_names(&join.relation, names)?;
+                collect_table_factor_names(&join.relation, names, ctes_in_scope)?;
             }
             Ok(())
         }
@@ -532,9 +563,6 @@ pub(crate) fn object_name_to_string(name: &ObjectName) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
     use crate::catalog::{
         open_catalog_store, CatalogConfig, CatalogEntry, CatalogMode, CatalogPath, CatalogService,
         CatalogStoreBackendKind, CreateDatabaseRequest, CreateTableRequest, StorageKind,
@@ -547,6 +575,7 @@ mod tests {
     use crate::parser::Parser;
     use crate::planner::PlannerError;
     use crate::Statement;
+    use brewdb_common::test_util::{TestDir, TestFile};
     use datafusion_expr::TableSource;
     use uuid::Uuid;
 
@@ -555,28 +584,6 @@ mod tests {
     use crate::planner::logical::{LogicalOptimizer, LogicalPlanningContext};
 
     use super::LogicalPlanner;
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new(prefix: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
-            fs::create_dir_all(&path).expect("test directory must be created");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn catalog_service() -> CatalogService {
         let store = open_catalog_store(&CatalogConfig {
@@ -720,6 +727,60 @@ mod tests {
     }
 
     #[test]
+    fn logical_planner_turns_union_all_into_datafusion_logical_plan() {
+        let planned = bind("select id from orders union all select id from customers");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Union(union) => {
+                assert_eq!(union.inputs.len(), 2);
+            }
+            other => panic!("expected DataFusion union plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_turns_values_query_into_datafusion_logical_plan() {
+        let planned = bind("values (1), (2)");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Values(values) => {
+                assert_eq!(values.values.len(), 2);
+            }
+            other => panic!("expected DataFusion values plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_turns_union_into_distinct_plan() {
+        let planned = bind("select id from orders union select id from customers");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Distinct(_) => {}
+            other => panic!("expected DataFusion distinct union plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_turns_intersect_into_datafusion_logical_plan() {
+        let planned = bind("select id from orders intersect select id from customers");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Join(_) | datafusion_expr::LogicalPlan::Distinct(_) => {}
+            other => panic!("expected DataFusion intersect plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_turns_except_into_datafusion_logical_plan() {
+        let planned = bind("select id from orders except select id from customers");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Join(_) | datafusion_expr::LogicalPlan::Distinct(_) => {}
+            other => panic!("expected DataFusion except plan, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn logical_planner_turns_insert_into_datafusion_logical_plan() {
         let planned = bind("insert into orders values (1), (2)");
 
@@ -826,14 +887,13 @@ mod tests {
 
     #[test]
     fn logical_planner_turns_copy_from_csv_into_insert_plan() {
-        let csv_path =
-            std::env::temp_dir().join(format!("brewdb-copy-source-{}.csv", uuid::Uuid::new_v4()));
-        std::fs::write(&csv_path, "id\n1\n").unwrap();
+        let csv_path = TestFile::new("brewdb-copy-source", "csv");
+        std::fs::write(csv_path.path(), "id\n1\n").unwrap();
         let source_name =
-            crate::common::utils::normalize_file_path(csv_path.to_string_lossy().as_ref());
+            crate::common::utils::normalize_file_path(csv_path.path().to_string_lossy().as_ref());
         let planned = bind(&format!(
             "copy from '{}' to orders with (format csv, header true)",
-            csv_path.display()
+            csv_path.path().display()
         ));
 
         match planned {
@@ -860,7 +920,7 @@ mod tests {
                 assert_eq!(table.storage_kind, StorageKind::File);
                 assert_eq!(table.catalog_mode, CatalogMode::Temporary);
                 assert_eq!(table.path.table(), source_name);
-                assert_eq!(table.table_location, csv_path.to_string_lossy());
+                assert_eq!(table.table_location, csv_path.path().to_string_lossy());
                 assert_eq!(table.table_schema.fields.len(), 1);
                 assert_eq!(table.table_schema.fields[0].name, "id");
                 assert!(source.table_engine().is_some());

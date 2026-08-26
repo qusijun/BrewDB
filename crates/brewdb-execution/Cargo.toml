@@ -24,3 +24,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+brewdb-common = { path = "../brewdb-common", features = ["test-utils"] }

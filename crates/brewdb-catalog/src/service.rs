@@ -204,8 +204,7 @@ impl CatalogService {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
 
     use crate::common::config::{ConfigPatch, ConfigScope, global_config_registry};
@@ -223,28 +222,7 @@ mod tests {
 
     use super::CatalogService;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new(prefix: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&path).expect("test directory must be created");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use brewdb_common::test_util::TestDir;
 
     fn service() -> CatalogService {
         CatalogService::new(CatalogStore::new(Arc::new(
@@ -423,5 +401,105 @@ mod tests {
 
         let catalog = service.open_catalog("prod").unwrap();
         assert!(catalog.get_database(DEFAULT_DATABASE_NAME).is_ok());
+    }
+
+    #[test]
+    fn catalog_service_bootstraps_default_database_from_existing_warehouse() {
+        let warehouse = TestDir::new("brewdb-paimon-existing-default-db");
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System)
+                    .with_entry("brewdb.catalog.store.backend", "memory")
+                    .with_entry(
+                        "brewdb.catalog.paimon.warehouse",
+                        warehouse.path().to_string_lossy().as_ref(),
+                    ),
+            )
+            .unwrap();
+        let catalog_config = crate::catalog::config::CatalogConfig {
+            store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
+            paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+        };
+
+        CatalogService::with_config_and_default_managed_paimon_catalog(
+            CatalogStore::new(Arc::new(MemoryCatalogStoreBackend::default())),
+            config.clone(),
+            catalog_config.clone(),
+            "prod",
+        )
+        .unwrap();
+
+        let service = CatalogService::with_config_and_default_managed_paimon_catalog(
+            CatalogStore::new(Arc::new(MemoryCatalogStoreBackend::default())),
+            config,
+            catalog_config,
+            "prod",
+        )
+        .unwrap();
+
+        let catalog = service.open_catalog("prod").unwrap();
+        assert!(catalog.get_database(DEFAULT_DATABASE_NAME).is_ok());
+    }
+
+    #[test]
+    fn catalog_service_registers_existing_paimon_table_in_fresh_store() {
+        let warehouse = TestDir::new("brewdb-paimon-existing-table");
+        let registry = global_config_registry().unwrap();
+        let mut config = registry.materialize_defaults();
+        config
+            .apply_patch_with_registry(
+                &registry,
+                &ConfigPatch::new(ConfigScope::System)
+                    .with_entry("brewdb.catalog.store.backend", "memory")
+                    .with_entry(
+                        "brewdb.catalog.paimon.warehouse",
+                        warehouse.path().to_string_lossy().as_ref(),
+                    ),
+            )
+            .unwrap();
+        let catalog_config = crate::catalog::config::CatalogConfig {
+            store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
+            paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+        };
+        let schema = TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]);
+
+        let first = CatalogService::with_config_and_default_managed_paimon_catalog(
+            CatalogStore::new(Arc::new(MemoryCatalogStoreBackend::default())),
+            config.clone(),
+            catalog_config.clone(),
+            "prod",
+        )
+        .unwrap();
+        first
+            .open_catalog("prod")
+            .unwrap()
+            .create_table(CreateTableRequest::new(
+                DEFAULT_DATABASE_NAME,
+                "hits",
+                schema.clone(),
+            ))
+            .unwrap();
+
+        let second = CatalogService::with_config_and_default_managed_paimon_catalog(
+            CatalogStore::new(Arc::new(MemoryCatalogStoreBackend::default())),
+            config,
+            catalog_config,
+            "prod",
+        )
+        .unwrap();
+        let catalog = second.open_catalog("prod").unwrap();
+        let adopted = catalog
+            .create_table(CreateTableRequest::new(
+                DEFAULT_DATABASE_NAME,
+                "hits",
+                schema,
+            ))
+            .unwrap();
+
+        assert_eq!(adopted.path.to_string(), "prod.brewdb.hits");
+        assert!(catalog.get_table(DEFAULT_DATABASE_NAME, "hits").is_ok());
     }
 }

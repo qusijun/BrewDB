@@ -127,6 +127,7 @@ pub fn open_storage_engine() -> Result<Arc<StorageEngine>, StorageError> {
 mod tests {
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry};
     use crate::storage::open_storage_engine;
+    use brewdb_common::test_util::TestFile;
 
     #[test]
     fn registry_storage_opens_file_table_engine_from_temporary_file_entry() {
@@ -135,12 +136,11 @@ mod tests {
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let path = std::env::temp_dir()
-                .join(format!("brewdb-file-entry-{}.csv", uuid::Uuid::new_v4()));
-            std::fs::write(&path, "id\n7\n").unwrap();
+            let path = TestFile::new("brewdb-file-entry", "csv");
+            std::fs::write(path.path(), "id\n7\n").unwrap();
             let table = TableCatalogEntry::temporary_file(
                 "copy_source",
-                path.to_string_lossy().to_string(),
+                path.path().to_string_lossy().to_string(),
                 [("format", "csv"), ("has_header", "true")],
             )
             .unwrap();

@@ -818,8 +818,8 @@ dependencies = [
 name = "brewdb-sqllogictests"
 version = "0.1.0"
 dependencies = [
+ "brewdb-common",
  "sqllogictest",
- "uuid",
 ]
 
 [[package]]
@@ -836,6 +836,7 @@ dependencies = [
  "futures",
  "inventory",
  "paimon",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",

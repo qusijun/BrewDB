@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use brewdb_common::test_util::{TestDir, temp_root};
 use sqllogictest::{DBOutput, DefaultColumnType};
 
 pub struct ServerHarness {
@@ -23,7 +24,7 @@ impl ServerHarness {
         let server_bin = binary_path(&target_dir, "brewdbd");
         let client_bin = binary_path(&target_dir, "brewdb");
 
-        let sandbox = TestDir::new();
+        let sandbox = TestDir::new("brewdb-sqllogic");
         let port = reserve_port();
         let config_path = sandbox.path().join("brewdb.toml");
         fs::write(
@@ -145,30 +146,8 @@ impl fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
-pub struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new() -> Self {
-        let path = test_sandbox_root().join(format!("brewdb-sqllogic-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 pub fn test_sandbox_root() -> PathBuf {
-    PathBuf::from("/tmp")
+    temp_root()
 }
 
 pub fn test_data_dir() -> String {
@@ -319,7 +298,7 @@ select bad;
 
     #[test]
     fn test_dir_uses_tmp_root_for_inspection() {
-        let dir = super::TestDir::new();
+        let dir = super::TestDir::new("brewdb-sqllogic");
 
         assert_eq!(dir.path().parent().unwrap(), Path::new("/tmp"));
         assert!(

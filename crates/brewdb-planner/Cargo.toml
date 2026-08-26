@@ -23,5 +23,6 @@ datafusion-optimizer.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+brewdb-common = { path = "../brewdb-common", features = ["test-utils"] }
 tokio.workspace = true
 pretty_assertions = "1.4.1"

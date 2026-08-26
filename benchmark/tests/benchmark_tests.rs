@@ -174,7 +174,7 @@ fn generate_tpch_csv_writes_all_tables_with_headers() {
 
     generate_tpch_csv(&TpchGenConfig {
         scale_factor: 0.001,
-        output_dir: output_dir.clone(),
+        output_dir: output_dir.to_path_buf(),
         overwrite: false,
     })
     .unwrap();
@@ -426,7 +426,8 @@ fn load_queries_from_dir_reads_sql_files_in_name_order() {
 
 #[test]
 fn load_queries_from_file_reads_single_sql_file() {
-    let query_file = fresh_dir("single_query").join("q01.sql");
+    let query_dir = fresh_dir("single_query");
+    let query_file = query_dir.join("q01.sql");
     fs::write(&query_file, "select 1;").unwrap();
 
     let queries = brewdb_benchmark::benchmark::load_queries_from_file(&query_file).unwrap();
@@ -436,13 +437,54 @@ fn load_queries_from_file_reads_single_sql_file() {
     assert_eq!(queries[0].sql, "select 1;");
 }
 
-fn fresh_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("brewdb-benchmark-{name}-{}", std::process::id()));
-    if dir.exists() {
-        fs::remove_dir_all(&dir).unwrap();
+#[test]
+fn fresh_dir_removes_directory_when_dropped() {
+    let path = {
+        let dir = fresh_dir("cleanup");
+        let path = dir.to_path_buf();
+        fs::write(dir.join("marker"), "ok").unwrap();
+        assert!(path.exists());
+        path
+    };
+
+    assert!(!path.exists(), "{} should be cleaned up", path.display());
+}
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let path = PathBuf::from("/tmp").join(format!("{prefix}-{}", std::process::id()));
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
     }
-    fs::create_dir_all(&dir).unwrap();
-    dir
+
+    fn to_path_buf(&self) -> PathBuf {
+        self.path.clone()
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn fresh_dir(name: &str) -> TestDir {
+    TestDir::new(&format!("brewdb-benchmark-{name}"))
 }
 
 fn default_brewdb_bin() -> PathBuf {

@@ -1,6 +1,7 @@
 //! SQL statement logical planning.
 
 pub mod command;
+mod context;
 pub(crate) mod ddl;
 pub(crate) mod explain;
 mod expr;
@@ -9,6 +10,7 @@ pub mod optimizer;
 pub mod plan;
 mod planner;
 pub(crate) mod query;
+mod relation;
 pub(crate) mod session;
 pub(crate) mod table_source;
 pub(crate) mod transaction;
