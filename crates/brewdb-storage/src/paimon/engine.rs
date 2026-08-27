@@ -20,7 +20,7 @@ use paimon::spec::{BinaryRow, DataFileMeta, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
 use paimon::{DataSplit, DataSplitBuilder, DeletionFile, RowRange};
 
-use super::filter::{filter_predicates, filter_pushdown_status};
+use super::predicate::{filter_predicates, filter_pushdown_status};
 use super::table_provider::PaimonTableProvider;
 
 pub struct PaimonTableEngine {
@@ -101,6 +101,10 @@ struct PaimonPruning {
 }
 
 impl TableEngine for PaimonTableEngine {
+    fn storage_kind(&self) -> StorageKind {
+        StorageKind::Paimon
+    }
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError> {
         Ok(Arc::new(PaimonTableProvider::try_new(
             self.build_table()?,

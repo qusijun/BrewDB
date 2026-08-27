@@ -114,12 +114,12 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                     .table_scan_split
                     .as_ref()
                     .filter(|split| split.table_name == scan.table_name.to_string());
-                let table_engine = match default_source.and_then(DefaultTableSource::table_engine) {
-                    Some(table_engine) => Arc::clone(table_engine),
-                    None => self
-                        .storage
+                let table_engine = if let Some(default_source) = default_source {
+                    Arc::clone(default_source.table_engine())
+                } else {
+                    self.storage
                         .table_engine(table)
-                        .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?,
+                        .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?
                 };
                 let provider = table_engine
                     .get_table_provider(assigned_split)

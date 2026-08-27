@@ -29,7 +29,7 @@ mod tests {
     use crate::planner::logical::query::plan_query_statement;
     use crate::planner::logical::table_source::DefaultTableSource;
     use crate::planner::{CommandPlan, CommandTag};
-    use crate::storage::{TableScanSplit, TableScanSplitGroup};
+    use crate::storage::{open_storage_engine, TableScanSplit, TableScanSplitGroup};
 
     fn find_table_scan<'a>(
         plan: &'a DataFusionLogicalPlan,
@@ -95,6 +95,11 @@ mod tests {
             StorageKind::Paimon,
             CatalogMode::Managed,
         )
+    }
+
+    fn default_table_source(table: TableCatalogEntry) -> DefaultTableSource {
+        let engine = open_storage_engine().unwrap().table_engine(&table).unwrap();
+        DefaultTableSource::new(table, engine)
     }
 
     fn make_hits_table() -> TableCatalogEntry {
@@ -313,7 +318,7 @@ mod tests {
         let mut table = make_table("orders");
         table.table_schema.primary_keys = vec!["id".to_owned()];
 
-        let source: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(table));
+        let source: Arc<dyn TableSource> = Arc::new(default_table_source(table));
         let plan = LogicalPlanBuilder::scan("orders", source, None)
             .unwrap()
             .build()
@@ -386,12 +391,12 @@ mod tests {
             [("format", "csv"), ("has_header", "true")],
         )
         .unwrap();
-        let source: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(source_table));
+        let source: Arc<dyn TableSource> = Arc::new(default_table_source(source_table));
         let input = LogicalPlanBuilder::scan(source_name, source, None)
             .unwrap()
             .build()
             .unwrap();
-        let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table.clone()));
+        let target: Arc<dyn TableSource> = Arc::new(default_table_source(target_table.clone()));
         let logical_plan = DataFusionLogicalPlan::Dml(DmlStatement::new(
             TableReference::full(
                 target_table.path.catalog(),

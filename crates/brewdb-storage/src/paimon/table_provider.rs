@@ -15,7 +15,7 @@ use paimon::spec::{Predicate, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
 
 use super::engine::storage_scan_error;
-use super::filter::{filter_predicates, filter_pushdown_status};
+use super::predicate::{filter_predicates, filter_pushdown_status};
 use super::reader::PaimonScanExec;
 use super::writer::{PaimonCommitExec, PaimonSinkExec};
 

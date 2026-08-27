@@ -1,7 +1,7 @@
 //! Apache Paimon storage adapter for BrewDB.
 
 mod engine;
-mod filter;
+mod predicate;
 mod reader;
 mod table_provider;
 mod writer;

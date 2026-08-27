@@ -271,7 +271,7 @@ fn build_table_factor(
             }
             let table = planner_context.resolve_table(name)?;
             let scan_name = planner_context.table_reference_for_scan(name, alias)?;
-            let table_source = planner_context.table_source(table);
+            let table_source = planner_context.table_source(table)?;
             LogicalPlanBuilder::scan(scan_name, table_source, None)
                 .map_err(map_df_plan_error)?
                 .build()
