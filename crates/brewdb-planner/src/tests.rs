@@ -24,6 +24,7 @@ mod tests {
     use crate::planner::distributed::{DistributedFragmentPlanner, FragmentPlanner};
     use crate::planner::distributed::{DistributedPlanRoot, PlanFragmentKind};
     use crate::planner::logical::mutation::plan_insert_statement;
+    use crate::planner::logical::optimizer::LogicalOptimizer;
     use crate::planner::logical::plan::{Ddl, LogicalPlanNode, Show};
     use crate::planner::logical::query::plan_query_statement;
     use crate::planner::logical::table_source::DefaultTableSource;
@@ -328,6 +329,47 @@ mod tests {
         assert_ne!(
             scan.projected_schema.functional_dependencies(),
             &FunctionalDependencies::empty()
+        );
+    }
+
+    #[test]
+    fn logical_optimizer_pushes_inexact_paimon_filter_into_table_scan() {
+        let ast = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "select id from orders where name = 'latte'",
+        )
+        .unwrap()
+        .remove(0);
+        let planned =
+            plan_query_statement(ast, vec![make_table("orders")], &function_registry()).unwrap();
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+        let scan = find_table_scan(&optimized).expect("expected table scan");
+
+        assert_eq!(scan.filters.len(), 1);
+        assert!(
+            find_filter(&optimized).is_some(),
+            "inexact Paimon filters need residual filtering"
+        );
+    }
+
+    #[test]
+    fn logical_optimizer_pushes_exact_paimon_partition_filter_into_table_scan() {
+        let mut table = make_table("orders");
+        table.table_schema.partition_keys = vec!["name".to_owned()];
+        let ast = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "select id from orders where name = 'latte'",
+        )
+        .unwrap()
+        .remove(0);
+        let planned = plan_query_statement(ast, vec![table], &function_registry()).unwrap();
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+        let scan = find_table_scan(&optimized).expect("expected table scan");
+
+        assert_eq!(scan.filters.len(), 1);
+        assert!(
+            find_filter(&optimized).is_none(),
+            "exact partition filters should not leave residual filtering"
         );
     }
 

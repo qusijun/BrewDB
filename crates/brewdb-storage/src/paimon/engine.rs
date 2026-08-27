@@ -11,13 +11,16 @@ use crate::storage::{
     TableScanSplit, TableScanSplitGroup,
 };
 use datafusion::datasource::TableProvider;
-use datafusion_expr::TableScan;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_expr::{Expr, TableProviderFilterPushDown, TableScan};
 use paimon::catalog::Identifier as PaimonIdentifier;
 use paimon::io::FileIO;
+use paimon::spec::Predicate;
 use paimon::spec::{BinaryRow, DataFileMeta, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
 use paimon::{DataSplit, DataSplitBuilder, DeletionFile, RowRange};
 
+use super::filter::{filter_predicates, filter_pushdown_status};
 use super::table_provider::PaimonTableProvider;
 
 pub struct PaimonTableEngine {
@@ -67,6 +70,34 @@ impl PaimonTableEngine {
             None,
         ))
     }
+
+    /// Normalizes a DataFusion table scan into storage-side scan constraints.
+    ///
+    /// This is intentionally private to the Paimon engine: the shape of a
+    /// pruning result is storage-specific, while BrewDB's public boundary is
+    /// still `plan_scan`. The projection remains in BrewDB/DataFusion index
+    /// form here and is translated to Paimon column names only at the Paimon
+    /// `ReadBuilder` boundary.
+    fn pruning(
+        &self,
+        table: &PaimonTable,
+        scan: &TableScan,
+    ) -> Result<PaimonPruning, StorageError> {
+        validate_projection(table.schema(), scan.projection.as_deref())?;
+        let filters = filter_predicates(table.schema().fields(), &scan.filters);
+        let filter = (!filters.is_empty()).then(|| Predicate::and(filters));
+        Ok(PaimonPruning {
+            projection: scan.projection.clone(),
+            filter,
+            limit: scan.fetch,
+        })
+    }
+}
+
+struct PaimonPruning {
+    projection: Option<Vec<usize>>,
+    filter: Option<Predicate>,
+    limit: Option<usize>,
 }
 
 impl TableEngine for PaimonTableEngine {
@@ -91,6 +122,29 @@ impl TableEngine for PaimonTableEngine {
         )?))
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        let schema = build_paimon_schema(&self.table)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        Ok(filters
+            .iter()
+            .map(|filter| {
+                match filter_pushdown_status(schema.fields(), schema.partition_keys(), filter) {
+                    Some((_predicate, exact)) => {
+                        if exact {
+                            TableProviderFilterPushDown::Exact
+                        } else {
+                            TableProviderFilterPushDown::Inexact
+                        }
+                    }
+                    None => TableProviderFilterPushDown::Unsupported,
+                }
+            })
+            .collect())
+    }
+
     fn plan_scan(&self, scan: &TableScan) -> Result<TableScanSplitGroup, StorageError> {
         let table_name = scan.table_name.to_string();
         if !self.table.table_location.starts_with('/')
@@ -102,8 +156,20 @@ impl TableEngine for PaimonTableEngine {
         }
 
         let table = self.build_table()?;
+        let pruning = self.pruning(&table, scan)?;
         let mut read_builder = table.new_read_builder();
-        if let Some(limit) = scan.fetch {
+        if let Some(projection) = &pruning.projection {
+            let projection_names = projection_names(table.schema(), projection)?;
+            let projection = projection_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            read_builder.with_projection(&projection);
+        }
+        if let Some(filter) = pruning.filter {
+            read_builder.with_filter(filter);
+        }
+        if let Some(limit) = pruning.limit {
             read_builder.with_limit(limit);
         }
         let planned_splits = block_on_storage_future(async move {
@@ -127,6 +193,41 @@ impl TableEngine for PaimonTableEngine {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(TableScanSplitGroup::new(splits))
     }
+}
+
+fn validate_projection(
+    schema: &PaimonTableSchema,
+    projection: Option<&[usize]>,
+) -> Result<(), StorageError> {
+    let Some(projection) = projection else {
+        return Ok(());
+    };
+    for index in projection {
+        if schema.fields().get(*index).is_none() {
+            return Err(StorageError::TableScanFailed {
+                reason: format!("invalid Paimon scan projection index {index}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn projection_names(
+    schema: &PaimonTableSchema,
+    projection: &[usize],
+) -> Result<Vec<String>, StorageError> {
+    projection
+        .iter()
+        .map(|index| {
+            schema
+                .fields()
+                .get(*index)
+                .map(|field| field.name().to_owned())
+                .ok_or_else(|| StorageError::TableScanFailed {
+                    reason: format!("invalid Paimon scan projection index {index}"),
+                })
+        })
+        .collect()
 }
 
 fn table_scan_split_from_paimon_split(
