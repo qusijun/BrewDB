@@ -111,7 +111,16 @@ impl<'a> QueryPlannerContext<'a> {
     }
 
     pub(super) fn table_source(&self, table: TableCatalogEntry) -> Arc<dyn TableSource> {
-        Arc::new(DefaultTableSource::new(table))
+        let table_engine = crate::storage::open_storage_engine()
+            .and_then(|storage| storage.table_engine(&table))
+            .ok();
+        match table_engine {
+            Some(table_engine) => Arc::new(DefaultTableSource::new_with_engine_capabilities(
+                table,
+                table_engine,
+            )),
+            None => Arc::new(DefaultTableSource::new(table)),
+        }
     }
 
     pub(super) fn contains_cte(&self, cte_name: &str) -> bool {

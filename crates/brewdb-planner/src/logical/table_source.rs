@@ -2,8 +2,8 @@ use crate::catalog::TableCatalogEntry;
 use crate::common::table::TableSchema;
 use crate::storage::{StorageError, TableEngine};
 use arrow::datatypes::SchemaRef;
-use datafusion_common::{Constraint, Constraints};
-use datafusion_expr::{TableSource, TableType};
+use datafusion_common::{Constraint, Constraints, Result as DataFusionResult};
+use datafusion_expr::{Expr, TableProviderFilterPushDown, TableSource, TableType};
 use std::sync::Arc;
 
 pub(crate) struct DefaultTableSource {
@@ -66,6 +66,18 @@ impl DefaultTableSource {
         })
     }
 
+    pub(crate) fn new_with_engine_capabilities(
+        table: TableCatalogEntry,
+        table_engine: Arc<dyn TableEngine>,
+    ) -> Self {
+        // Logical planning should use the catalog schema as the source of
+        // truth. The engine is attached here only so DataFusion optimizer
+        // rules can query storage capabilities such as filter pushdown.
+        let mut source = Self::new(table);
+        source.table_engine = Some(table_engine);
+        source
+    }
+
     pub(crate) fn table(&self) -> &TableCatalogEntry {
         &self.table
     }
@@ -86,6 +98,21 @@ impl TableSource for DefaultTableSource {
 
     fn table_type(&self) -> TableType {
         TableType::Base
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        self.table_engine
+            .as_ref()
+            .map(|engine| engine.supports_filters_pushdown(filters))
+            .unwrap_or_else(|| {
+                Ok(vec![
+                    TableProviderFilterPushDown::Unsupported;
+                    filters.len()
+                ])
+            })
     }
 }
 
