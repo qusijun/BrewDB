@@ -550,14 +550,7 @@ fn collect_table_scan_splits_into(
             let table_source_id = TableSourceId(*next_table_source_id);
             *next_table_source_id += 1;
             if let Some(table_source) = scan.source.downcast_ref::<DefaultTableSource>() {
-                let table_engine = match table_source.table_engine() {
-                    Some(table_engine) => Arc::clone(table_engine),
-                    None => storage.table_engine(table_source.table()).map_err(|err| {
-                        PlannerError::InvalidPlan {
-                            reason: err.to_string(),
-                        }
-                    })?,
-                };
+                let table_engine = Arc::clone(table_source.table_engine());
                 let planned_splits =
                     table_engine
                         .plan_scan(scan)

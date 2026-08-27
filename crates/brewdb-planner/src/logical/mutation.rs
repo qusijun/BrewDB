@@ -25,7 +25,7 @@ use crate::planner::logical::{
     LogicalPlanningSession,
 };
 use crate::storage::file::FileTableEngine;
-use crate::storage::TableEngine;
+use crate::storage::{open_storage_engine, TableEngine};
 
 pub(crate) fn bind_insert_statement(
     ast: AstStatement,
@@ -151,7 +151,7 @@ pub(crate) fn plan_insert_statement(
         target_table.path.database(),
         target_table.path.table(),
     );
-    let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table));
+    let target = table_source_for_catalog(target_table)?;
     Ok(DataFusionLogicalPlan::Dml(DmlStatement::new(
         table_name,
         target,
@@ -263,7 +263,7 @@ fn plan_copy_from_file_statement(
         target_table.path.database(),
         target_table.path.table(),
     );
-    let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table.clone()));
+    let target = table_source_for_catalog(target_table.clone())?;
     let source_name = normalize_file_path(filename);
     let source_table = TableCatalogEntry::temporary_file_with_schema(
         source_name.clone(),
@@ -283,13 +283,8 @@ fn plan_copy_from_file_statement(
     let source_file_schema = source_engine.schema_ref();
     validate_copy_from_schema(&source_table, source_file_schema.clone())?;
     let source_engine: Arc<dyn TableEngine> = Arc::new(source_engine);
-    let source: Arc<dyn TableSource> = Arc::new(
-        DefaultTableSource::new_with_engine(source_table, source_engine).map_err(|error| {
-            PlannerError::InvalidPlan {
-                reason: error.to_string(),
-            }
-        })?,
-    );
+    let source: Arc<dyn TableSource> =
+        Arc::new(DefaultTableSource::new(source_table, source_engine));
     let input = LogicalPlanBuilder::scan(source_name, source, None)
         .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
@@ -308,6 +303,17 @@ fn plan_copy_from_file_statement(
         WriteOp::Insert(InsertOp::Append),
         Arc::new(input),
     )))
+}
+
+fn table_source_for_catalog(
+    table: TableCatalogEntry,
+) -> Result<Arc<dyn TableSource>, PlannerError> {
+    let table_engine = open_storage_engine()
+        .and_then(|storage| storage.table_engine(&table))
+        .map_err(|error| PlannerError::InvalidPlan {
+            reason: error.to_string(),
+        })?;
+    Ok(Arc::new(DefaultTableSource::new(table, table_engine)))
 }
 
 fn ensure_copy_from_single_file(location: &str) -> Result<(), PlannerError> {

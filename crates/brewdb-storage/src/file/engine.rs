@@ -139,6 +139,10 @@ impl FileTableEngine {
 }
 
 impl TableEngine for FileTableEngine {
+    fn storage_kind(&self) -> StorageKind {
+        StorageKind::File
+    }
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider_for_paths(Vec::new())
     }

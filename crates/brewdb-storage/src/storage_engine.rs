@@ -12,6 +12,8 @@ use crate::catalog::{StorageKind, TableCatalogEntry};
 use crate::storage::{StorageError, TableScanSplit, TableScanSplitGroup};
 
 pub trait TableEngine: Send + Sync {
+    fn storage_kind(&self) -> StorageKind;
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError>;
 
     fn schema_ref(&self) -> Result<SchemaRef, StorageError> {
@@ -196,5 +198,22 @@ mod tests {
             assert_eq!(batches[0].num_rows(), 1);
             assert_eq!(batches[0].schema().field(0).name(), "id");
         });
+    }
+
+    #[test]
+    fn table_engine_reports_its_storage_kind() {
+        let storage = open_storage_engine().unwrap();
+        let path = TestFile::new("brewdb-file-engine-kind", "csv");
+        std::fs::write(path.path(), "id\n7\n").unwrap();
+        let table = TableCatalogEntry::temporary_file(
+            "copy_source",
+            path.path().to_string_lossy().to_string(),
+            [("format", "csv"), ("has_header", "true")],
+        )
+        .unwrap();
+
+        let engine = storage.table_engine(&table).unwrap();
+
+        assert_eq!(engine.storage_kind(), StorageKind::File);
     }
 }

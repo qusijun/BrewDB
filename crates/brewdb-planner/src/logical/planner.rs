@@ -923,7 +923,7 @@ mod tests {
                 assert_eq!(table.table_location, csv_path.path().to_string_lossy());
                 assert_eq!(table.table_schema.fields.len(), 1);
                 assert_eq!(table.table_schema.fields[0].name, "id");
-                assert!(source.table_engine().is_some());
+                assert_eq!(source.table_engine().storage_kind(), StorageKind::File);
                 assert_eq!(source.schema().field(0).name(), "id");
                 assert_eq!(table.table_options.get("file_type"), None);
                 assert_eq!(
