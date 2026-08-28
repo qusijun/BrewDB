@@ -63,23 +63,23 @@ pub(super) fn bind_order_by(
                         reason: format!("unsupported order by expression `{expr}`"),
                     });
                 }
-                Ok(DataFusionSort::new(
+                Ok::<_, PlannerError>(DataFusionSort::new(
                     bind_expr_for_query(&expr.expr, tables, planner_context, scope)?,
                     expr.options.asc.unwrap_or(true),
                     nulls_first_or_datafusion_default(expr.options.asc, expr.options.nulls_first),
                 ))
             })
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<Vec<_>, PlannerError>>()?,
         OrderByKind::All(options) => projection
             .iter()
             .map(|expr| {
-                Ok(DataFusionSort::new(
+                Ok::<_, PlannerError>(DataFusionSort::new(
                     order_by_all_expr(expr)?,
                     options.asc.unwrap_or(true),
                     nulls_first_or_datafusion_default(options.asc, options.nulls_first),
                 ))
             })
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<Vec<_>, PlannerError>>()?,
     };
     Ok(expressions)
 }

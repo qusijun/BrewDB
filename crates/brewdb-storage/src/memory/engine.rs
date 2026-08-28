@@ -36,6 +36,10 @@ impl MemoryTableEngine {
 }
 
 impl TableEngine for MemoryTableEngine {
+    fn storage_kind(&self) -> StorageKind {
+        StorageKind::Memory
+    }
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError> {
         Ok(Arc::clone(&self.provider))
     }

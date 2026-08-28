@@ -12,9 +12,7 @@ use crate::planner::PlannerError;
 use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::logical_plan::dml::{DmlStatement, InsertOp, WriteOp};
 use datafusion_expr::registry::FunctionRegistry;
-use datafusion_expr::{
-    cast, col, LogicalPlan as DataFusionLogicalPlan, LogicalPlanBuilder, TableSource,
-};
+use datafusion_expr::{col, LogicalPlan as DataFusionLogicalPlan, LogicalPlanBuilder, TableSource};
 
 use crate::planner::errors::{map_common_error, map_df_plan_error};
 use crate::planner::logical::context::QueryPlannerContext;
@@ -24,8 +22,7 @@ use crate::planner::logical::{
     resolve_query_tables, resolve_table, resolve_table_object, LogicalPlanningContext,
     LogicalPlanningSession,
 };
-use crate::storage::file::FileTableEngine;
-use crate::storage::TableEngine;
+use crate::storage::open_storage_engine;
 
 pub(crate) fn bind_insert_statement(
     ast: AstStatement,
@@ -151,7 +148,7 @@ pub(crate) fn plan_insert_statement(
         target_table.path.database(),
         target_table.path.table(),
     );
-    let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table));
+    let target = table_source_for_catalog(target_table)?;
     Ok(DataFusionLogicalPlan::Dml(DmlStatement::new(
         table_name,
         target,
@@ -258,43 +255,28 @@ fn plan_copy_from_file_statement(
     file_options: BTreeMap<String, String>,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
     ensure_copy_from_single_file(filename)?;
+    // COPY FROM is the file engine's expected-schema path. This mirrors
+    // DuckDB's COPY FROM bind flow: the target table provides expected names
+    // and types, and the file reader is responsible for reading/casting source
+    // rows into that contract. Ordinary file scans still infer file schema.
     let table_name = TableReference::full(
         target_table.path.catalog(),
         target_table.path.database(),
         target_table.path.table(),
     );
-    let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table.clone()));
+    let target = table_source_for_catalog(target_table.clone())?;
     let source_name = normalize_file_path(filename);
     let source_table = TableCatalogEntry::temporary_file_with_schema(
         source_name.clone(),
         filename.to_owned(),
         target_table.table_schema.clone(),
-        file_options.clone(),
+        file_options,
     )
     .map_err(|error| PlannerError::InvalidPlan {
         reason: error.to_string(),
     })?;
-    let source_engine =
-        FileTableEngine::try_new(filename.to_owned(), file_options).map_err(|error| {
-            PlannerError::InvalidPlan {
-                reason: error.to_string(),
-            }
-        })?;
-    let source_file_schema = source_engine.schema_ref();
-    validate_copy_from_schema(&source_table, source_file_schema.clone())?;
-    let source_engine: Arc<dyn TableEngine> = Arc::new(source_engine);
-    let source: Arc<dyn TableSource> = Arc::new(
-        DefaultTableSource::new_with_engine(source_table, source_engine).map_err(|error| {
-            PlannerError::InvalidPlan {
-                reason: error.to_string(),
-            }
-        })?,
-    );
+    let source = table_source_for_catalog(source_table)?;
     let input = LogicalPlanBuilder::scan(source_name, source, None)
-        .map_err(|error| PlannerError::InvalidPlan {
-            reason: error.to_string(),
-        })?
-        .project(copy_projection(&target_table, &source_file_schema)?)
         .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
         })?
@@ -308,6 +290,17 @@ fn plan_copy_from_file_statement(
         WriteOp::Insert(InsertOp::Append),
         Arc::new(input),
     )))
+}
+
+fn table_source_for_catalog(
+    table: TableCatalogEntry,
+) -> Result<Arc<dyn TableSource>, PlannerError> {
+    let table_engine = open_storage_engine()
+        .and_then(|storage| storage.table_engine(&table))
+        .map_err(|error| PlannerError::InvalidPlan {
+            reason: error.to_string(),
+        })?;
+    Ok(Arc::new(DefaultTableSource::new(table, table_engine)))
 }
 
 fn ensure_copy_from_single_file(location: &str) -> Result<(), PlannerError> {
@@ -347,53 +340,11 @@ fn bind_copy_from_file_options(
     Ok(file_options)
 }
 
-fn copy_projection(
-    target_table: &TableCatalogEntry,
-    source_schema: &arrow::datatypes::SchemaRef,
-) -> Result<Vec<datafusion_expr::Expr>, PlannerError> {
-    let projection = target_table
-        .table_schema
-        .fields
-        .iter()
-        .zip(source_schema.fields().iter())
-        .map(|(target_field, source_field)| {
-            target_field
-                .data_type
-                .to_arrow_data_type()
-                .map_err(|error| PlannerError::InvalidPlan {
-                    reason: error.to_string(),
-                })
-                .map(|data_type| {
-                    cast(col(source_field.name().as_str()), data_type)
-                        .alias(target_field.name.clone())
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(projection)
-}
-
-fn validate_copy_from_schema(
-    source_table: &TableCatalogEntry,
-    source_schema: arrow::datatypes::SchemaRef,
-) -> Result<(), PlannerError> {
-    let source_count = source_schema.fields().len();
-    let target_count = source_table.table_schema.fields.len();
-    if source_count != target_count {
-        return Err(PlannerError::Schema {
-            reason: format!(
-                "COPY FROM schema column count mismatch: source {source_count}, target {target_count}"
-            ),
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs};
 
     use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
-    use crate::common::diagnostics::DiagnosticError;
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use brewdb_common::test_util::{TestDir, TestFile};
 
@@ -430,20 +381,27 @@ mod tests {
     }
 
     #[test]
-    fn copy_from_rejects_source_schema_column_count_mismatch() {
+    fn copy_from_plans_source_scan_with_target_schema() {
         let file = TestFile::new("brewdb-copy-from-mismatch", "csv");
         fs::write(file.path(), "1,2\n").unwrap();
 
-        let error = plan_copy_from_file_statement(
+        let plan = plan_copy_from_file_statement(
             target_table(),
             &file.path().to_string_lossy(),
             BTreeMap::new(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("COPY FROM schema column count mismatch"));
-        assert_eq!(error.error_code().as_str(), "BREWDB_PLANNER_SCHEMA_ERROR");
+        let datafusion_expr::LogicalPlan::Dml(dml) = plan else {
+            panic!("expected COPY FROM to bind to a DML plan");
+        };
+        let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
+            panic!("expected COPY FROM input to be a table scan");
+        };
+        assert_eq!(scan.source.schema().field(0).name(), "id");
+        assert_eq!(
+            scan.source.schema().field(0).data_type(),
+            &arrow::datatypes::DataType::Int32
+        );
     }
 }

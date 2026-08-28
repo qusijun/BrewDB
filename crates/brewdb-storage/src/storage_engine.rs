@@ -5,18 +5,27 @@ use std::sync::{Arc, RwLock};
 
 use arrow::datatypes::SchemaRef;
 use datafusion::datasource::TableProvider;
-use datafusion_expr::TableScan;
+use datafusion_common::Result as DataFusionResult;
+use datafusion_expr::{Expr, TableProviderFilterPushDown, TableScan};
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
 use crate::storage::{StorageError, TableScanSplit, TableScanSplitGroup};
 
 pub trait TableEngine: Send + Sync {
+    fn storage_kind(&self) -> StorageKind;
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError>;
 
     fn schema_ref(&self) -> Result<SchemaRef, StorageError> {
         Ok(self.table_provider()?.schema())
     }
 
+    /// Builds the table provider used by worker-side physical planning.
+    ///
+    /// The optional split is the scan assignment chosen by coordinator-side
+    /// planning. Implementations should use it to restrict the provider to the
+    /// worker's assigned data before DataFusion builds the local physical scan.
+    /// Coarse-grained pruning and split generation belong to [`Self::plan_scan`].
     fn get_table_provider(
         &self,
         _split: Option<&TableScanSplit>,
@@ -24,6 +33,32 @@ pub trait TableEngine: Send + Sync {
         self.table_provider()
     }
 
+    /// Returns this engine's logical filter pushdown capability.
+    ///
+    /// This method is called from DataFusion's logical optimizer through
+    /// BrewDB's `TableSource`. It must only classify filters as exact,
+    /// inexact, or unsupported. It should not plan splits or perform pruning
+    /// I/O; coarse-grained pruning happens later in [`Self::plan_scan`].
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![
+            TableProviderFilterPushDown::Unsupported;
+            filters.len()
+        ])
+    }
+
+    /// Plans a logical table scan into schedulable scan splits.
+    ///
+    /// This is the coordinator-side scan planning boundary. Implementations
+    /// should use the projection, pushed filters, and fetch limit carried by
+    /// the DataFusion `TableScan` to perform coarse-grained pruning before
+    /// producing BrewDB scan splits. Examples include partition pruning,
+    /// manifest pruning, file pruning, and storage-specific split planning.
+    ///
+    /// Worker-side scan execution may still apply finer-grained pruning inside
+    /// an assigned split, such as row-group or page pruning.
     fn plan_scan(&self, scan: &TableScan) -> Result<TableScanSplitGroup, StorageError> {
         Ok(TableScanSplitGroup::new(vec![TableScanSplit::new(
             scan.table_name.to_string(),
@@ -163,5 +198,22 @@ mod tests {
             assert_eq!(batches[0].num_rows(), 1);
             assert_eq!(batches[0].schema().field(0).name(), "id");
         });
+    }
+
+    #[test]
+    fn table_engine_reports_its_storage_kind() {
+        let storage = open_storage_engine().unwrap();
+        let path = TestFile::new("brewdb-file-engine-kind", "csv");
+        std::fs::write(path.path(), "id\n7\n").unwrap();
+        let table = TableCatalogEntry::temporary_file(
+            "copy_source",
+            path.path().to_string_lossy().to_string(),
+            [("format", "csv"), ("has_header", "true")],
+        )
+        .unwrap();
+
+        let engine = storage.table_engine(&table).unwrap();
+
+        assert_eq!(engine.storage_kind(), StorageKind::File);
     }
 }

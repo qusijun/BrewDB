@@ -15,6 +15,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use futures::{StreamExt, stream};
+use paimon::spec::Predicate;
 use paimon::table::Table as PaimonTable;
 use paimon::{DataSplit, DataSplitBuilder};
 
@@ -26,7 +27,8 @@ pub(crate) struct PaimonScanExec {
     table: PaimonTable,
     projected_schema: SchemaRef,
     partitions: Vec<Arc<[DataSplit]>>,
-    projection: Option<Vec<usize>>,
+    projection: Option<Vec<String>>,
+    filter: Option<Predicate>,
     limit: Option<usize>,
     metrics: ExecutionPlanMetricsSet,
     storage_rows: Count,
@@ -39,7 +41,8 @@ impl PaimonScanExec {
         table: PaimonTable,
         projected_schema: SchemaRef,
         assigned_splits: Vec<DataSplit>,
-        projection: Option<Vec<usize>>,
+        projection: Option<Vec<String>>,
+        filter: Option<Predicate>,
         limit: Option<usize>,
         target_partitions: usize,
     ) -> Self {
@@ -67,6 +70,7 @@ impl PaimonScanExec {
             projected_schema,
             partitions,
             projection,
+            filter,
             limit,
             metrics,
             storage_rows,
@@ -112,15 +116,23 @@ impl ExecutionPlan for PaimonScanExec {
             )));
         };
 
-        let result = self
-            .table
-            .new_read_builder()
+        let mut read_builder = self.table.new_read_builder();
+        if let Some(projection) = &self.projection {
+            let projection: Vec<&str> = projection.iter().map(String::as_str).collect();
+            read_builder.with_projection(&projection);
+        }
+        if let Some(filter) = &self.filter {
+            read_builder.with_filter(filter.clone());
+        }
+        if let Some(limit) = self.limit {
+            read_builder.with_limit(limit);
+        }
+        let result = read_builder
             .new_read()
             .map_err(datafusion_scan_error)
             .and_then(|read| read.to_arrow(scan_partition).map_err(datafusion_scan_error));
 
         let schema = Arc::clone(&self.projected_schema);
-        let projection = self.projection.clone();
         let mut remaining = self.limit;
         let storage_rows = self.storage_rows.clone();
         let storage_bytes = self.storage_bytes.clone();
@@ -129,9 +141,6 @@ impl ExecutionPlan for PaimonScanExec {
                 Arc::clone(&schema),
                 batch_stream.map(move |batch| {
                     let mut batch = batch.map_err(datafusion_scan_error)?;
-                    if let Some(indices) = &projection {
-                        batch = batch.project(indices)?;
-                    }
                     if let Some(remaining_rows) = remaining.as_mut() {
                         let rows_to_take = (*remaining_rows).min(batch.num_rows());
                         *remaining_rows -= rows_to_take;
@@ -230,6 +239,9 @@ impl DisplayAs for PaimonScanExec {
                 )?;
                 if let Some(projection) = &self.projection {
                     write!(f, ", projection={projection:?}")?;
+                }
+                if self.filter.is_some() {
+                    write!(f, ", filter=true")?;
                 }
                 if let Some(limit) = self.limit {
                     write!(f, ", limit={limit}")?;

@@ -115,6 +115,31 @@ impl TableSchema {
         Ok(Arc::new(self.to_arrow_schema()?))
     }
 
+    pub fn datafusion_constraints(&self) -> Result<Constraints, CommonError> {
+        if self.primary_keys.is_empty() {
+            return Ok(Constraints::default());
+        }
+
+        let mut indices = Vec::with_capacity(self.primary_keys.len());
+        for primary_key in &self.primary_keys {
+            let Some(index) = self
+                .fields
+                .iter()
+                .position(|field| field.name == *primary_key)
+            else {
+                return Err(CommonError::SchemaConversionFailed {
+                    reason: format!(
+                        "PRIMARY KEY column `{primary_key}` is not defined in table schema"
+                    ),
+                });
+            };
+            indices.push(index);
+        }
+        Ok(Constraints::new_unverified(vec![Constraint::PrimaryKey(
+            indices,
+        )]))
+    }
+
     pub fn from_arrow_schema(schema: &ArrowSchema) -> Result<Self, CommonError> {
         let metadata = schema.metadata();
         let bucket_count = metadata
@@ -262,6 +287,20 @@ mod tests {
         assert_eq!(schema.bucket_count, Some(8));
         assert_eq!(schema.bucket_function.as_deref(), Some("hash"));
         assert_eq!(schema.cluster_keys, vec!["region"]);
+    }
+
+    #[test]
+    fn table_schema_builds_datafusion_primary_key_constraints() {
+        let schema = TableSchema::new(vec![
+            ColumnField::new("id", DataType::Int64),
+            ColumnField::new("dt", DataType::String),
+        ])
+        .with_primary_keys(["id"]);
+
+        assert_eq!(
+            schema.datafusion_constraints().unwrap(),
+            Constraints::new_unverified(vec![Constraint::PrimaryKey(vec![0])])
+        );
     }
 
     #[test]

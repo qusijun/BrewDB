@@ -24,11 +24,12 @@ mod tests {
     use crate::planner::distributed::{DistributedFragmentPlanner, FragmentPlanner};
     use crate::planner::distributed::{DistributedPlanRoot, PlanFragmentKind};
     use crate::planner::logical::mutation::plan_insert_statement;
+    use crate::planner::logical::optimizer::LogicalOptimizer;
     use crate::planner::logical::plan::{Ddl, LogicalPlanNode, Show};
     use crate::planner::logical::query::plan_query_statement;
     use crate::planner::logical::table_source::DefaultTableSource;
     use crate::planner::{CommandPlan, CommandTag};
-    use crate::storage::{TableScanSplit, TableScanSplitGroup};
+    use crate::storage::{open_storage_engine, TableScanSplit, TableScanSplitGroup};
 
     fn find_table_scan<'a>(
         plan: &'a DataFusionLogicalPlan,
@@ -94,6 +95,11 @@ mod tests {
             StorageKind::Paimon,
             CatalogMode::Managed,
         )
+    }
+
+    fn default_table_source(table: TableCatalogEntry) -> DefaultTableSource {
+        let engine = open_storage_engine().unwrap().table_engine(&table).unwrap();
+        DefaultTableSource::new(table, engine)
     }
 
     fn make_hits_table() -> TableCatalogEntry {
@@ -312,7 +318,7 @@ mod tests {
         let mut table = make_table("orders");
         table.table_schema.primary_keys = vec!["id".to_owned()];
 
-        let source: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(table));
+        let source: Arc<dyn TableSource> = Arc::new(default_table_source(table));
         let plan = LogicalPlanBuilder::scan("orders", source, None)
             .unwrap()
             .build()
@@ -332,6 +338,47 @@ mod tests {
     }
 
     #[test]
+    fn logical_optimizer_pushes_inexact_paimon_filter_into_table_scan() {
+        let ast = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "select id from orders where name = 'latte'",
+        )
+        .unwrap()
+        .remove(0);
+        let planned =
+            plan_query_statement(ast, vec![make_table("orders")], &function_registry()).unwrap();
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+        let scan = find_table_scan(&optimized).expect("expected table scan");
+
+        assert_eq!(scan.filters.len(), 1);
+        assert!(
+            find_filter(&optimized).is_some(),
+            "inexact Paimon filters need residual filtering"
+        );
+    }
+
+    #[test]
+    fn logical_optimizer_pushes_exact_paimon_partition_filter_into_table_scan() {
+        let mut table = make_table("orders");
+        table.table_schema.partition_keys = vec!["name".to_owned()];
+        let ast = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "select id from orders where name = 'latte'",
+        )
+        .unwrap()
+        .remove(0);
+        let planned = plan_query_statement(ast, vec![table], &function_registry()).unwrap();
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+        let scan = find_table_scan(&optimized).expect("expected table scan");
+
+        assert_eq!(scan.filters.len(), 1);
+        assert!(
+            find_filter(&optimized).is_none(),
+            "exact partition filters should not leave residual filtering"
+        );
+    }
+
+    #[test]
     fn distributed_fragment_planner_collects_file_table_engine_split_candidates() {
         let path = TestFile::new("brewdb-file-split", "csv");
         std::fs::write(path.path(), "id\n1\n").unwrap();
@@ -344,12 +391,12 @@ mod tests {
             [("format", "csv"), ("has_header", "true")],
         )
         .unwrap();
-        let source: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(source_table));
+        let source: Arc<dyn TableSource> = Arc::new(default_table_source(source_table));
         let input = LogicalPlanBuilder::scan(source_name, source, None)
             .unwrap()
             .build()
             .unwrap();
-        let target: Arc<dyn TableSource> = Arc::new(DefaultTableSource::new(target_table.clone()));
+        let target: Arc<dyn TableSource> = Arc::new(default_table_source(target_table.clone()));
         let logical_plan = DataFusionLogicalPlan::Dml(DmlStatement::new(
             TableReference::full(
                 target_table.path.catalog(),

@@ -44,10 +44,23 @@ impl TableEngineFactory for FileTableEngineFactory {
                 storage_kind: table.storage_kind.as_str().to_owned(),
             });
         }
-        Ok(Arc::new(FileTableEngine::try_new(
-            table.table_location.clone(),
-            table.table_options.clone(),
-        )?))
+        let expected_table_schema = if table.table_schema.fields.is_empty() {
+            None
+        } else {
+            Some(
+                table
+                    .table_schema
+                    .to_arrow_schema_ref()
+                    .map_err(storage_error)?,
+            )
+        };
+        Ok(Arc::new(
+            FileTableEngine::try_new_with_expected_table_schema(
+                table.table_location.clone(),
+                table.table_options.clone(),
+                expected_table_schema,
+            )?,
+        ))
     }
 }
 
@@ -62,6 +75,20 @@ impl FileTableEngine {
         location: impl Into<String>,
         options: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Result<Self, StorageError> {
+        Self::try_new_with_expected_table_schema(location, options, None)
+    }
+
+    /// Creates a file engine whose scan output follows the expected table
+    /// schema when provided.
+    ///
+    /// COPY FROM uses this path to let the target table define the reader's
+    /// output names and types, matching DuckDB's expected schema driven bind
+    /// flow. Ordinary file scans pass `None` and infer the schema from files.
+    pub fn try_new_with_expected_table_schema(
+        location: impl Into<String>,
+        options: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+        expected_table_schema: Option<SchemaRef>,
+    ) -> Result<Self, StorageError> {
         let location = location.into();
         let options = options
             .into_iter()
@@ -70,7 +97,7 @@ impl FileTableEngine {
         let is_directory = fs::metadata(&location).map_err(storage_error)?.is_dir();
         let state = SessionContext::new().state();
         let table_path = ListingTableUrl::parse(location.clone()).map_err(storage_error)?;
-        let config = build_listing_config(state, table_path, options)?;
+        let config = build_listing_config(state, table_path, options, expected_table_schema)?;
         let listing_table = Arc::new(ListingTable::try_new(config.clone()).map_err(storage_error)?);
         let listing_options =
             config
@@ -139,6 +166,10 @@ impl FileTableEngine {
 }
 
 impl TableEngine for FileTableEngine {
+    fn storage_kind(&self) -> StorageKind {
+        StorageKind::File
+    }
+
     fn table_provider(&self) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider_for_paths(Vec::new())
     }
@@ -197,12 +228,16 @@ fn build_listing_config(
     state: SessionState,
     table_path: ListingTableUrl,
     options: BTreeMap<String, String>,
+    expected_table_schema: Option<SchemaRef>,
 ) -> Result<ListingTableConfig, StorageError> {
     let config = ListingTableConfig::new_with_multi_paths(vec![table_path]);
     block_on_storage_future(async move {
         let config = config.infer_options(&state).await.map_err(storage_error)?;
         let config = apply_format_options(config, &state, &options)?;
-        config.infer_schema(&state).await.map_err(storage_error)
+        match expected_table_schema {
+            Some(expected_table_schema) => Ok(config.with_schema(expected_table_schema)),
+            None => config.infer_schema(&state).await.map_err(storage_error),
+        }
     })
 }
 
@@ -299,6 +334,7 @@ fn normalize_split_location(root_location: &str, is_directory: bool, path: Strin
 #[cfg(test)]
 mod tests {
     use brewdb_common::test_util::{TestDir, TestFile};
+    use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use datafusion::datasource::{TableProvider, provider_as_source};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
@@ -383,6 +419,49 @@ mod tests {
             assert_eq!(batches[0].num_rows(), 1);
             assert_eq!(batches[0].schema().field(0).name(), "id");
         });
+    }
+
+    #[test]
+    fn file_table_engine_uses_expected_table_schema_when_provided() {
+        let path = TestFile::new("brewdb-file-catalog-schema", "csv");
+        fs::write(path.path(), "\n").unwrap();
+        let expected_table_schema = TableSchema::new(vec![ColumnField::new("id", DataType::Int32)])
+            .to_arrow_schema_ref()
+            .unwrap();
+
+        let engine = FileTableEngine::try_new_with_expected_table_schema(
+            path.path().to_string_lossy().to_string(),
+            [("has_header", "false")],
+            Some(expected_table_schema),
+        )
+        .unwrap();
+
+        assert_eq!(engine.schema_ref().field(0).name(), "id");
+        assert_eq!(
+            engine.schema_ref().field(0).data_type(),
+            &arrow::datatypes::DataType::Int32
+        );
+    }
+
+    #[test]
+    fn file_table_engine_factory_uses_catalog_schema_when_present() {
+        let path = TestFile::new("brewdb-file-factory-expected-schema", "csv");
+        fs::write(path.path(), "20\n").unwrap();
+        let table = TableCatalogEntry::temporary_file_with_schema(
+            "copy_source",
+            path.path().to_string_lossy().to_string(),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            [("has_header", "false")],
+        )
+        .unwrap();
+
+        let engine = FileTableEngineFactory.create_table_engine(&table).unwrap();
+
+        assert_eq!(engine.schema_ref().unwrap().field(0).name(), "id");
+        assert_eq!(
+            engine.schema_ref().unwrap().field(0).data_type(),
+            &arrow::datatypes::DataType::Int32
+        );
     }
 
     #[test]

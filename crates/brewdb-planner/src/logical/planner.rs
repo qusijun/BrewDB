@@ -902,14 +902,8 @@ mod tests {
                     dml.table_name.to_string(),
                     "managed_paimon_catalog.brewdb.orders"
                 );
-                let datafusion_expr::LogicalPlan::Projection(projection) = dml.input.as_ref()
-                else {
-                    panic!("expected COPY FROM input to be a projection");
-                };
-                assert_eq!(projection.expr.len(), 1);
-                let datafusion_expr::LogicalPlan::TableScan(scan) = projection.input.as_ref()
-                else {
-                    panic!("expected COPY FROM projection input to be a table scan");
+                let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
+                    panic!("expected COPY FROM input to be a table scan");
                 };
                 assert_eq!(scan.table_name.table(), source_name);
                 let source = scan
@@ -923,7 +917,7 @@ mod tests {
                 assert_eq!(table.table_location, csv_path.path().to_string_lossy());
                 assert_eq!(table.table_schema.fields.len(), 1);
                 assert_eq!(table.table_schema.fields[0].name, "id");
-                assert!(source.table_engine().is_some());
+                assert_eq!(source.table_engine().storage_kind(), StorageKind::File);
                 assert_eq!(source.schema().field(0).name(), "id");
                 assert_eq!(table.table_options.get("file_type"), None);
                 assert_eq!(
@@ -937,6 +931,33 @@ mod tests {
             }
             other => panic!("expected DataFusion DML logical plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logical_planner_copy_from_uses_target_schema_for_source_scan() {
+        let csv_path = TestFile::new("brewdb-copy-source-no-header", "csv");
+        std::fs::write(csv_path.path(), "1\n").unwrap();
+        let planned = bind(&format!(
+            "copy from '{}' to orders with (format csv, header false)",
+            csv_path.path().display()
+        ));
+
+        let datafusion_expr::LogicalPlan::Dml(dml) = planned else {
+            panic!("expected COPY FROM to bind to a DML plan");
+        };
+        let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
+            panic!("expected COPY FROM input to be a table scan");
+        };
+
+        let source = scan
+            .source
+            .downcast_ref::<DefaultTableSource>()
+            .expect("COPY FROM source must be catalog-backed table source");
+        assert_eq!(source.schema().field(0).name(), "id");
+        assert_eq!(
+            source.schema().field(0).data_type(),
+            &arrow::datatypes::DataType::Int32
+        );
     }
 
     #[test]

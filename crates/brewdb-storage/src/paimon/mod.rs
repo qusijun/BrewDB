@@ -1,6 +1,7 @@
 //! Apache Paimon storage adapter for BrewDB.
 
 mod engine;
+mod predicate;
 mod reader;
 mod table_provider;
 mod writer;
@@ -19,7 +20,9 @@ mod tests {
     use crate::common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use crate::storage::{DataFileFormat, StorageError, TableEngineFactory};
     use arrow::array::Int64Array;
+    use datafusion::logical_expr::{BinaryExpr, Expr, Operator, col, lit};
     use datafusion::physical_plan::ExecutionPlanProperties;
+    use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
     use paimon::io::FileIO;
 
@@ -46,6 +49,24 @@ mod tests {
             uuid::Uuid::new_v4(),
             TablePath::new("prod", "sales", "orders").unwrap(),
             TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            location,
+            storage_kind,
+            CatalogMode::Managed,
+        )
+    }
+
+    fn make_partitioned_file_table(storage_kind: StorageKind) -> TableCatalogEntry {
+        let location = format!("/tmp/brewdb-paimon-test-{}", uuid::Uuid::new_v4());
+        TableCatalogEntry::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            TablePath::new("prod", "sales", "orders").unwrap(),
+            TableSchema::new(vec![
+                ColumnField::new("id", DataType::Int32),
+                ColumnField::new("dt", DataType::String),
+            ])
+            .with_partition_keys(["dt"]),
             location,
             storage_kind,
             CatalogMode::Managed,
@@ -245,6 +266,76 @@ mod tests {
     }
 
     #[test]
+    fn paimon_table_engine_plan_scan_prunes_partition_splits() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_partitioned_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql(
+                "insert into orders values \
+                 (cast(1 as int), '2024-01-01'), \
+                 (cast(2 as int), '2024-01-02')",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+            let unfiltered_scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider.clone()),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+            let partition_filter = Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(col("dt")),
+                Operator::Eq,
+                Box::new(lit("2024-01-01")),
+            ));
+            let filtered_scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![partition_filter],
+                None,
+            )
+            .unwrap();
+
+            let unfiltered_splits = engine.plan_scan(&unfiltered_scan).unwrap();
+            let filtered_splits = engine.plan_scan(&filtered_scan).unwrap();
+            let unfiltered_splits = unfiltered_splits.only_table_source_splits().unwrap();
+            let filtered_splits = filtered_splits.only_table_source_splits().unwrap();
+
+            assert_eq!(unfiltered_splits.len(), 2);
+            assert_eq!(filtered_splits.len(), 1);
+            assert!(filtered_splits[0].data_files[0].path.contains("2024-01-01"));
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    #[test]
     fn paimon_table_engine_rebuilds_provider_from_scan_splits() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -309,6 +400,117 @@ mod tests {
                 .unwrap();
 
             assert_eq!(count.value(0), 2);
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    #[test]
+    fn paimon_assigned_split_provider_pushes_predicate_to_reader() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql("insert into orders values (cast(1 as int)), (cast(2 as int))")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+            let splits = engine.plan_scan(&scan).unwrap();
+            let assigned_provider = engine
+                .get_table_provider(splits.only_table_source_splits().unwrap().first())
+                .unwrap();
+            let predicate = Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(col("id")),
+                Operator::Eq,
+                Box::new(lit(2_i32)),
+            ));
+
+            let exec = assigned_provider
+                .scan(&ctx.state(), None, &[predicate], None)
+                .await
+                .unwrap();
+            let batches = collect(exec, ctx.task_ctx()).await.unwrap();
+            let row_count = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+
+            assert_eq!(row_count, 1);
+
+            let _ = fs::remove_dir_all(&table.table_location);
+        });
+    }
+
+    #[test]
+    fn paimon_table_provider_pushes_projection_to_reader() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = PaimonTableEngineFactory;
+            let table = make_partitioned_file_table(StorageKind::Paimon);
+            let _ = fs::remove_dir_all(&table.table_location);
+            let file_io = FileIO::from_path(&table.table_location)
+                .unwrap()
+                .build()
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/snapshot/", table.table_location))
+                .await
+                .unwrap();
+            file_io
+                .mkdirs(&format!("{}/manifest/", table.table_location))
+                .await
+                .unwrap();
+            let engine = factory.create_table_engine(&table).unwrap();
+            let provider = engine.table_provider().unwrap();
+            let ctx = SessionContext::new();
+            ctx.register_table("orders", provider.clone()).unwrap();
+
+            ctx.sql(
+                "insert into orders values \
+                 (cast(1 as int), '2024-01-01'), \
+                 (cast(2 as int), '2024-01-02')",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+            let projection = vec![0];
+
+            let exec = provider
+                .scan(&ctx.state(), Some(&projection), &[], None)
+                .await
+                .unwrap();
+            let batches = collect(exec, ctx.task_ctx()).await.unwrap();
+
+            assert_eq!(batches[0].schema().fields().len(), 1);
+            assert_eq!(batches[0].schema().field(0).name(), "id");
+            assert!(batches.iter().all(|batch| batch.num_columns() == 1));
 
             let _ = fs::remove_dir_all(&table.table_location);
         });

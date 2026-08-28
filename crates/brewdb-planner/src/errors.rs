@@ -4,6 +4,8 @@ use std::error::Error;
 use std::fmt;
 
 use crate::common::diagnostics::{DiagnosticError, ErrorCode};
+use crate::common::errors::{datafusion_error_is_data_read, datafusion_error_variant_name};
+use datafusion_common::DataFusionError;
 
 const PLANNER_INVALID_PLAN: ErrorCode = ErrorCode::new("BREWDB_PLANNER_INVALID_PLAN");
 const PLANNER_UNSUPPORTED_PLAN: ErrorCode = ErrorCode::new("BREWDB_PLANNER_UNSUPPORTED_PLAN");
@@ -14,16 +16,38 @@ const PLANNER_EXECUTION_ERROR: ErrorCode = ErrorCode::new("BREWDB_PLANNER_EXECUT
 const PLANNER_EXTERNAL_ERROR: ErrorCode = ErrorCode::new("BREWDB_PLANNER_EXTERNAL_ERROR");
 const PLANNER_NOT_IMPLEMENTED: ErrorCode = ErrorCode::new("BREWDB_PLANNER_NOT_IMPLEMENTED");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum PlannerError {
-    InvalidPlan { reason: String },
-    UnsupportedPlan { reason: String },
-    Plan { reason: String },
-    Schema { reason: String },
-    Internal { reason: String },
-    Execution { reason: String },
-    External { reason: String },
-    NotImplemented { reason: String },
+    InvalidPlan {
+        reason: String,
+    },
+    UnsupportedPlan {
+        reason: String,
+    },
+    Plan {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    Schema {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    Internal {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    Execution {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    External {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    NotImplemented {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
 }
 
 impl fmt::Display for PlannerError {
@@ -33,12 +57,12 @@ impl fmt::Display for PlannerError {
             Self::UnsupportedPlan { reason } => {
                 write!(f, "unsupported planner shape: {reason}")
             }
-            Self::Plan { reason } => write!(f, "planner error: {reason}"),
-            Self::Schema { reason } => write!(f, "planner schema error: {reason}"),
-            Self::Internal { reason } => write!(f, "planner internal error: {reason}"),
-            Self::Execution { reason } => write!(f, "planner execution error: {reason}"),
-            Self::External { reason } => write!(f, "planner external error: {reason}"),
-            Self::NotImplemented { reason } => {
+            Self::Plan { reason, .. } => write!(f, "planner error: {reason}"),
+            Self::Schema { reason, .. } => write!(f, "planner schema error: {reason}"),
+            Self::Internal { reason, .. } => write!(f, "planner internal error: {reason}"),
+            Self::Execution { reason, .. } => write!(f, "planner execution error: {reason}"),
+            Self::External { reason, .. } => write!(f, "planner external error: {reason}"),
+            Self::NotImplemented { reason, .. } => {
                 write!(f, "planner feature not implemented: {reason}")
             }
         }
@@ -71,34 +95,56 @@ impl DiagnosticError for PlannerError {
     ) -> crate::common::diagnostics::DiagnosticContext {
         crate::common::diagnostics::DiagnosticContext::new(self.log_target(), event_name)
             .with_error_code(self.error_code())
+            .with_error_variant(self.variant_name())
     }
 }
 
-pub(crate) fn map_df_plan_error(error: datafusion_common::DataFusionError) -> PlannerError {
-    use datafusion_common::DataFusionError;
+pub(crate) fn map_df_plan_error(error: DataFusionError) -> PlannerError {
+    PlannerError::from(error)
+}
 
-    match error {
-        DataFusionError::NotImplemented(reason) => PlannerError::NotImplemented { reason },
-        DataFusionError::Internal(reason) => PlannerError::Internal { reason },
-        DataFusionError::Plan(reason) => PlannerError::Plan { reason },
-        DataFusionError::SchemaError(error, _) => PlannerError::Schema {
-            reason: error.to_string(),
+impl From<DataFusionError> for PlannerError {
+    fn from(error: DataFusionError) -> Self {
+        map_datafusion_error(error)
+    }
+}
+
+fn map_datafusion_error(error: DataFusionError) -> PlannerError {
+    let reason = error.to_string();
+    if datafusion_error_is_data_read(&error) {
+        return PlannerError::Execution {
+            reason,
+            cause: Some(error),
+        };
+    }
+    match datafusion_error_variant_name(&error) {
+        "NotImplemented" => PlannerError::NotImplemented {
+            reason,
+            cause: Some(error),
         },
-        DataFusionError::Execution(reason) => PlannerError::Execution { reason },
-        DataFusionError::ExecutionJoin(error) => PlannerError::Execution {
-            reason: error.to_string(),
+        "Internal" => PlannerError::Internal {
+            reason,
+            cause: Some(error),
         },
-        DataFusionError::ResourcesExhausted(reason) => PlannerError::Execution { reason },
-        DataFusionError::External(error) => PlannerError::External {
-            reason: error.to_string(),
+        "Plan" | "Configuration" => PlannerError::Plan {
+            reason,
+            cause: Some(error),
         },
-        DataFusionError::Context(context, error) => {
-            let mapped = map_df_plan_error(*error);
-            mapped.with_context(context)
-        }
-        DataFusionError::Diagnostic(_, error) => map_df_plan_error(*error),
-        other => PlannerError::External {
-            reason: other.to_string(),
+        "AmbiguousReference"
+        | "DuplicateQualifiedField"
+        | "DuplicateUnqualifiedField"
+        | "FieldNotFound"
+        | "SchemaError" => PlannerError::Schema {
+            reason,
+            cause: Some(error),
+        },
+        "Execution" | "ResourcesExhausted" => PlannerError::Execution {
+            reason,
+            cause: Some(error),
+        },
+        _ => PlannerError::External {
+            reason,
+            cause: Some(error),
         },
     }
 }
@@ -107,44 +153,78 @@ pub(crate) fn map_common_error(error: crate::common::errors::CommonError) -> Pla
     use crate::common::errors::CommonError;
 
     match error {
-        CommonError::SchemaConversionFailed { reason } => PlannerError::Schema { reason },
-        CommonError::LoggingInitializationFailed { reason } => PlannerError::Internal { reason },
+        CommonError::SchemaConversionFailed { reason } => PlannerError::Schema {
+            reason,
+            cause: None,
+        },
+        CommonError::LoggingInitializationFailed { reason } => PlannerError::Internal {
+            reason,
+            cause: None,
+        },
         CommonError::InvalidConfiguration { field, reason } => PlannerError::Plan {
             reason: format!("invalid configuration for `{field}`: {reason}"),
+            cause: None,
         },
         CommonError::InvalidTableReference { reference } => PlannerError::Plan {
             reason: format!("table reference must be fully qualified: {reference}"),
+            cause: None,
         },
     }
 }
 
 impl PlannerError {
-    fn with_context(self, context: String) -> Self {
+    pub fn datafusion_cause(&self) -> Option<&DataFusionError> {
         match self {
-            Self::InvalidPlan { reason } => Self::InvalidPlan {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::UnsupportedPlan { reason } => Self::UnsupportedPlan {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::Plan { reason } => Self::Plan {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::Schema { reason } => Self::Schema {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::Internal { reason } => Self::Internal {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::Execution { reason } => Self::Execution {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::External { reason } => Self::External {
-                reason: format!("{context}: {reason}"),
-            },
-            Self::NotImplemented { reason } => Self::NotImplemented {
-                reason: format!("{context}: {reason}"),
-            },
+            Self::Plan { cause, .. }
+            | Self::Schema { cause, .. }
+            | Self::Internal { cause, .. }
+            | Self::Execution { cause, .. }
+            | Self::External { cause, .. }
+            | Self::NotImplemented { cause, .. } => cause.as_ref(),
+            Self::InvalidPlan { .. } | Self::UnsupportedPlan { .. } => None,
+        }
+    }
+
+    pub fn into_datafusion_cause(self) -> Option<DataFusionError> {
+        match self {
+            Self::Plan { cause, .. }
+            | Self::Schema { cause, .. }
+            | Self::Internal { cause, .. }
+            | Self::Execution { cause, .. }
+            | Self::External { cause, .. }
+            | Self::NotImplemented { cause, .. } => cause,
+            Self::InvalidPlan { .. } | Self::UnsupportedPlan { .. } => None,
+        }
+    }
+
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::InvalidPlan { .. } => "InvalidPlan",
+            Self::UnsupportedPlan { .. } => "UnsupportedPlan",
+            Self::Plan { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("Plan"),
+            Self::Schema { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("Schema"),
+            Self::Internal { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("Internal"),
+            Self::Execution { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("Execution"),
+            Self::External { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("External"),
+            Self::NotImplemented { cause, .. } => cause
+                .as_ref()
+                .map(datafusion_error_variant_name)
+                .unwrap_or("NotImplemented"),
         }
     }
 }
@@ -165,6 +245,14 @@ mod tests {
     }
 
     #[test]
+    fn planner_error_exposes_datafusion_cause() {
+        let error = PlannerError::from(DataFusionError::Plan("bad projection".to_owned()));
+
+        assert!(error.datafusion_cause().is_some());
+        assert_eq!(error.variant_name(), "Plan");
+    }
+
+    #[test]
     fn datafusion_schema_error_keeps_schema_error_code() {
         let error = map_df_plan_error(DataFusionError::SchemaError(
             Box::new(SchemaError::FieldNotFound {
@@ -174,8 +262,12 @@ mod tests {
             Box::new(None),
         ));
 
-        assert!(matches!(error, PlannerError::Schema { .. }));
+        assert!(matches!(error, PlannerError::Schema { cause: Some(_), .. }));
         assert_eq!(error.error_code().as_str(), "BREWDB_PLANNER_SCHEMA_ERROR");
+        assert_eq!(
+            error.diagnostic_context("planner.bind").error_variant,
+            Some("FieldNotFound")
+        );
     }
 
     #[test]
@@ -184,5 +276,40 @@ mod tests {
 
         assert!(matches!(error, PlannerError::Internal { .. }));
         assert_eq!(error.error_code().as_str(), "BREWDB_PLANNER_INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn datafusion_error_from_impl_keeps_datafusion_cause() {
+        let error = PlannerError::from(DataFusionError::Execution(
+            "Arrow error: Csv error: incorrect number of fields".to_owned(),
+        ));
+
+        assert!(matches!(
+            error,
+            PlannerError::Execution { cause: Some(_), .. }
+        ));
+        assert_eq!(
+            error.error_code().as_str(),
+            "BREWDB_PLANNER_EXECUTION_ERROR"
+        );
+    }
+
+    #[test]
+    fn datafusion_context_keeps_schema_detail() {
+        let error = PlannerError::from(DataFusionError::Context(
+            "while planning".to_owned(),
+            Box::new(DataFusionError::SchemaError(
+                Box::new(SchemaError::DuplicateUnqualifiedField {
+                    name: "id".to_owned(),
+                }),
+                Box::new(None),
+            )),
+        ));
+
+        assert!(matches!(error, PlannerError::Schema { cause: Some(_), .. }));
+        assert_eq!(
+            error.diagnostic_context("planner.bind").error_variant,
+            Some("DuplicateUnqualifiedField")
+        );
     }
 }

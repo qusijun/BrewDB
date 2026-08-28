@@ -110,8 +110,16 @@ impl<'a> QueryPlannerContext<'a> {
         Ok(table.clone())
     }
 
-    pub(super) fn table_source(&self, table: TableCatalogEntry) -> Arc<dyn TableSource> {
-        Arc::new(DefaultTableSource::new(table))
+    pub(super) fn table_source(
+        &self,
+        table: TableCatalogEntry,
+    ) -> Result<Arc<dyn TableSource>, PlannerError> {
+        let table_engine = crate::storage::open_storage_engine()
+            .and_then(|storage| storage.table_engine(&table))
+            .map_err(|error| PlannerError::InvalidPlan {
+                reason: error.to_string(),
+            })?;
+        Ok(Arc::new(DefaultTableSource::new(table, table_engine)))
     }
 
     pub(super) fn contains_cte(&self, cte_name: &str) -> bool {

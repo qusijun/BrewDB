@@ -51,17 +51,9 @@ impl LocalFragmentPlan {
                 tables: table_catalogs,
             }),
         ]);
-        let optimizer_context = crate::planner::logical::optimizer::optimizer_context(
-            &query_context,
-        )
-        .map_err(|err| PlannerError::InvalidPlan {
-            reason: err.to_string(),
-        })?;
-        let optimized = optimizer
-            .optimize(logical_plan, &optimizer_context, |_, _| {})
-            .map_err(|err| PlannerError::InvalidPlan {
-                reason: err.to_string(),
-            })?;
+        let optimizer_context =
+            crate::planner::logical::optimizer::optimizer_context(&query_context)?;
+        let optimized = optimizer.optimize(logical_plan, &optimizer_context, |_, _| {})?;
         Ok(Self {
             query_context,
             fragment_id: fragment.fragment_id,
@@ -114,16 +106,16 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                     .table_scan_split
                     .as_ref()
                     .filter(|split| split.table_name == scan.table_name.to_string());
-                let table_engine = match default_source.and_then(DefaultTableSource::table_engine) {
-                    Some(table_engine) => Arc::clone(table_engine),
-                    None => self
-                        .storage
-                        .table_engine(table)
-                        .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?,
+                let table_engine = if let Some(default_source) = default_source {
+                    Arc::clone(default_source.table_engine())
+                } else {
+                    self.storage.table_engine(table).map_err(|err| {
+                        datafusion_common::DataFusionError::External(Box::new(err))
+                    })?
                 };
                 let provider = table_engine
                     .get_table_provider(assigned_split)
-                    .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                    .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)))?;
                 let rebuilt = datafusion_expr::TableScan::try_new(
                     scan.table_name.clone(),
                     provider_as_source(provider),
@@ -177,9 +169,9 @@ impl OptimizerRule for LocalDmlTargetRewriteRule {
         let provider = self
             .storage
             .table_engine(table)
-            .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?
+            .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)))?
             .table_provider()
-            .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+            .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)))?;
         let rebuilt = datafusion_expr::logical_plan::dml::DmlStatement::new(
             dml.table_name,
             provider_as_source(provider),

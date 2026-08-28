@@ -11,10 +11,11 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::empty::EmptyExec;
 use paimon::DataSplit;
-use paimon::spec::TableSchema as PaimonTableSchema;
+use paimon::spec::{Predicate, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
 
 use super::engine::storage_scan_error;
+use super::predicate::{filter_predicates, filter_pushdown_status};
 use super::reader::PaimonScanExec;
 use super::writer::{PaimonCommitExec, PaimonSinkExec};
 
@@ -53,13 +54,27 @@ impl TableProvider for PaimonTableProvider {
         &self,
         state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let splits = match &self.planned_splits {
             Some(splits) => splits.clone(),
             None => {
-                let read_builder = self.table.new_read_builder();
+                let mut read_builder = self.table.new_read_builder();
+                if let Some(projection) = projection {
+                    let projection = projection
+                        .iter()
+                        .map(|index| self.schema.field(*index).name().as_str())
+                        .collect::<Vec<_>>();
+                    read_builder.with_projection(&projection);
+                }
+                let translated_filters = filter_predicates(self.table.schema().fields(), filters);
+                if !translated_filters.is_empty() {
+                    read_builder.with_filter(Predicate::and(translated_filters));
+                }
+                if let Some(limit) = limit {
+                    read_builder.with_limit(limit);
+                }
                 let plan = read_builder
                     .new_scan()
                     .plan()
@@ -74,11 +89,22 @@ impl TableProvider for PaimonTableProvider {
         }
 
         let projected_schema = project_schema(&self.schema, projection)?;
+        let projection = projection.map(|indices| {
+            indices
+                .iter()
+                .map(|index| self.schema.field(*index).name().to_string())
+                .collect::<Vec<_>>()
+        });
+        let filter = {
+            let filters = filter_predicates(self.table.schema().fields(), filters);
+            (!filters.is_empty()).then(|| Predicate::and(filters))
+        };
         Ok(Arc::new(PaimonScanExec::new(
             self.table.clone(),
             projected_schema,
             splits,
-            projection.cloned(),
+            projection,
+            filter,
             limit,
             state.config_options().execution.target_partitions,
         )))
@@ -108,15 +134,32 @@ impl TableProvider for PaimonTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![
-            TableProviderFilterPushDown::Unsupported;
-            filters.len()
-        ])
+        Ok(filters
+            .iter()
+            .map(|filter| {
+                match filter_pushdown_status(
+                    self.table.schema().fields(),
+                    self.table.schema().partition_keys(),
+                    filter,
+                ) {
+                    Some((_predicate, exact)) => {
+                        if exact {
+                            TableProviderFilterPushDown::Exact
+                        } else {
+                            TableProviderFilterPushDown::Inexact
+                        }
+                    }
+                    None => TableProviderFilterPushDown::Unsupported,
+                }
+            })
+            .collect())
     }
 }
 
-pub(crate) fn datafusion_scan_error(error: impl ToString) -> DataFusionError {
-    DataFusionError::Execution(error.to_string())
+pub(crate) fn datafusion_scan_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> DataFusionError {
+    DataFusionError::External(Box::new(error))
 }
 
 fn project_schema(
