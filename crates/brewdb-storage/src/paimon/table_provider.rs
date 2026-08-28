@@ -156,8 +156,10 @@ impl TableProvider for PaimonTableProvider {
     }
 }
 
-pub(crate) fn datafusion_scan_error(error: impl ToString) -> DataFusionError {
-    DataFusionError::Execution(error.to_string())
+pub(crate) fn datafusion_scan_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> DataFusionError {
+    DataFusionError::External(Box::new(error))
 }
 
 fn project_schema(

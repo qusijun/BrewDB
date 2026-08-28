@@ -246,11 +246,9 @@ impl QueryCoordinator {
                     let page_sink = Arc::new(TransportExchangePageSink::new(Arc::clone(
                         &transport_registry,
                     )));
-                    let client = transport_registry.transport(&endpoint).map_err(|err| {
-                        ExecutionRuntimeError::InvalidPlan {
-                            reason: err.to_string(),
-                        }
-                    })?;
+                    let client = transport_registry
+                        .transport(&endpoint)
+                        .map_err(ExecutionRuntimeError::from)?;
                     let mut envelope =
                         FragmentExecutionEnvelope::new(instance).with_exchange_page_sink(page_sink);
                     if is_root_fragment && returns_rows {
@@ -258,9 +256,7 @@ impl QueryCoordinator {
                     }
                     let status = client
                         .execute_fragment(worker_id, envelope)
-                        .map_err(|err| ExecutionRuntimeError::InvalidPlan {
-                            reason: err.to_string(),
-                        })?;
+                        .map_err(ExecutionRuntimeError::from)?;
                     Ok::<_, ExecutionRuntimeError>(status.profile)
                 }));
             }

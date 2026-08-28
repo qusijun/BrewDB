@@ -9,6 +9,7 @@ use crate::common::diagnostics::{DiagnosticContext, DiagnosticError, ErrorCode};
 use crate::common::profile::FragmentProfile;
 use crate::execution::exchange::WorkerExchangeService;
 use crate::planner::LocalFragmentPlan;
+use crate::runtime::RpcError;
 use crate::runtime::exchange::{
     ExchangeBufferManager, ExchangeDataPage, ExchangeId, route_exchange_batch,
 };
@@ -23,6 +24,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
+use datafusion_common::DataFusionError;
 use datafusion_common::TableReference;
 use datafusion_common::error::Result as DataFusionResult;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -178,7 +180,7 @@ impl PartitionStream for ExchangePartitionStream {
                         Ok(batches) => batches,
                         Err(err) => {
                             return Some((
-                                Err(datafusion_common::DataFusionError::Plan(err.to_string())),
+                                Err(datafusion_common::DataFusionError::External(Box::new(err))),
                                 (receiver, pending),
                             ));
                         }
@@ -326,6 +328,7 @@ impl LocalFragmentExecutor {
             .get()
             .ok_or_else(|| crate::runtime::RpcError::ExecutionFailed {
                 reason: "tokio runtime was not initialized".to_owned(),
+                cause: None,
             })
     }
 
@@ -337,8 +340,10 @@ impl LocalFragmentExecutor {
         let runtime = self.tokio_runtime()?;
         let session =
             crate::execution::context::session_context(&query_context).map_err(|err| {
+                let reason = err.to_string();
                 crate::runtime::RpcError::ExecutionFailed {
-                    reason: err.to_string(),
+                    reason,
+                    cause: Some(err),
                 }
             })?;
         let physical_plan = runtime.block_on(async move {
@@ -347,9 +352,7 @@ impl LocalFragmentExecutor {
             let physical_plan = state
                 .create_physical_plan(&logical_plan)
                 .await
-                .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
-                    reason: err.to_string(),
-                })?;
+                .map_err(map_datafusion_rpc_error)?;
             Ok::<_, crate::runtime::RpcError>(FragmentPhysicalPlan {
                 physical_plan,
                 task_ctx,
@@ -367,13 +370,9 @@ impl LocalFragmentExecutor {
         let runtime = self.tokio_runtime()?;
         runtime.block_on(async move {
             let mut stream = execute_stream(physical_plan.physical_plan, physical_plan.task_ctx)
-                .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
-                    reason: err.to_string(),
-                })?;
+                .map_err(map_datafusion_rpc_error)?;
             while let Some(batch) = stream.next().await {
-                let batch = batch.map_err(|err| crate::runtime::RpcError::ExecutionFailed {
-                    reason: err.to_string(),
-                })?;
+                let batch = batch.map_err(map_datafusion_rpc_error)?;
                 if output.exchange_outputs.is_empty() {
                     if let Some(sink) = &output.result_batch_sink {
                         sink.send_batch(batch)?;
@@ -383,12 +382,14 @@ impl LocalFragmentExecutor {
                 for (channel, routed_batch) in route_exchange_batch(&output.exchange_outputs, batch)
                     .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
                         reason: err.to_string(),
+                        cause: None,
                     })?
                 {
                     let page =
                         ExchangeDataPage::from_record_batch(channel.exchange_id, routed_batch)
                             .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
                                 reason: err.to_string(),
+                                cause: None,
                             })?;
                     if let Some(sink) = &output.exchange_page_sink {
                         sink.send_page(&channel, page)?;
@@ -396,6 +397,7 @@ impl LocalFragmentExecutor {
                         output.exchange_buffers.enqueue_page(page).map_err(|err| {
                             crate::runtime::RpcError::ExecutionFailed {
                                 reason: err.to_string(),
+                                cause: None,
                             }
                         })?;
                     }
@@ -409,11 +411,12 @@ impl LocalFragmentExecutor {
                     output.exchange_buffers.enqueue_page(page).map_err(|err| {
                         crate::runtime::RpcError::ExecutionFailed {
                             reason: err.to_string(),
+                            cause: None,
                         }
                     })?;
                 }
             }
-            Ok(())
+            Ok::<_, RpcError>(())
         })?;
         Ok(plan_for_profile)
     }
@@ -507,24 +510,25 @@ impl LocalFragmentExecutor {
                     ),
                     provider_as_source(provider),
                     None,
-                )
-                .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                )?;
                 if let Some(qualifier) = remote_source_single_qualifier(remote_source) {
-                    builder = builder
-                        .alias(qualifier)
-                        .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                    builder = builder.alias(qualifier)?;
                 }
-                let rewritten = builder
-                    .build()
-                    .map_err(|err| datafusion_common::DataFusionError::Plan(err.to_string()))?;
+                let rewritten = builder.build()?;
                 Ok(Transformed::yes(rewritten))
             }
             _ => Ok(Transformed::no(node)),
         })
         .map(|result| result.data)
-        .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
-            reason: err.to_string(),
-        })
+        .map_err(map_datafusion_rpc_error)
+    }
+}
+
+fn map_datafusion_rpc_error(error: DataFusionError) -> RpcError {
+    let reason = error.to_string();
+    RpcError::ExecutionFailed {
+        reason,
+        cause: Some(error),
     }
 }
 
@@ -542,8 +546,12 @@ impl FragmentService for LocalFragmentExecutor {
             instance.table_scan_split.clone(),
             Arc::clone(&self.storage),
         )
-        .map_err(|err| crate::runtime::RpcError::ExecutionFailed {
-            reason: err.to_string(),
+        .map_err(|err| {
+            let reason = err.to_string();
+            crate::runtime::RpcError::ExecutionFailed {
+                reason,
+                cause: err.into_datafusion_cause(),
+            }
         })?;
         let logical_plan = self.materialize_exchange_inputs(
             prepared.logical_plan.clone(),
@@ -561,6 +569,7 @@ impl FragmentService for LocalFragmentExecutor {
         self.send_exchange_page_inner(page).map_err(|err| {
             crate::runtime::RpcError::ExecutionFailed {
                 reason: err.to_string(),
+                cause: None,
             }
         })
     }
@@ -572,6 +581,7 @@ impl FragmentService for LocalFragmentExecutor {
         self.drain_exchange_pages_inner(exchange_id).map_err(|err| {
             crate::runtime::RpcError::ExecutionFailed {
                 reason: err.to_string(),
+                cause: None,
             }
         })
     }

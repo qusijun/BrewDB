@@ -92,6 +92,7 @@ impl FragmentTransport for LocalFragmentTransport {
             .send_exchange_page(page)
             .map_err(|error| RpcError::ExecutionFailed {
                 reason: error.to_string(),
+                cause: None,
             })
     }
 
@@ -103,6 +104,7 @@ impl FragmentTransport for LocalFragmentTransport {
             .drain_exchange_pages(exchange_id)
             .map_err(|error| RpcError::ExecutionFailed {
                 reason: error.to_string(),
+                cause: None,
             })
     }
 }
