@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
-use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
+use crate::file::util::{file_extension, normalize_split_location, table_name};
 use crate::storage::{
     StorageError, TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup,
 };
@@ -23,6 +23,7 @@ use datafusion_expr::TableScan;
 
 #[derive(Clone, Debug)]
 pub struct FileTableEngine {
+    table_name: String,
     location: String,
     is_directory: bool,
     file_format: Arc<dyn FileFormat>,
@@ -33,6 +34,12 @@ pub struct FileTableEngine {
 
 #[derive(Clone, Debug, Default)]
 pub struct FileTableEngineFactory;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileTableLocationKind {
+    Directory,
+    File,
+}
 
 impl TableEngineFactory for FileTableEngineFactory {
     fn create_table_engine(
@@ -71,6 +78,18 @@ fn open_file_table_engine_factory() -> Arc<dyn TableEngineFactory> {
 crate::register_table_engine_factory!(StorageKind::File, open_file_table_engine_factory);
 
 impl FileTableEngine {
+    pub fn classify_location(location: &str) -> Result<FileTableLocationKind, StorageError> {
+        fs::metadata(location)
+            .map(|metadata| {
+                if metadata.is_dir() {
+                    FileTableLocationKind::Directory
+                } else {
+                    FileTableLocationKind::File
+                }
+            })
+            .map_err(storage_error)
+    }
+
     pub fn try_new(
         location: impl Into<String>,
         options: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -90,6 +109,7 @@ impl FileTableEngine {
         expected_table_schema: Option<SchemaRef>,
     ) -> Result<Self, StorageError> {
         let location = location.into();
+        let table_name = table_name(&location);
         let options = options
             .into_iter()
             .map(|(key, value)| (key.into(), value.into()))
@@ -113,6 +133,7 @@ impl FileTableEngine {
                 reason: "file schema was not initialized".to_string(),
             })?;
         Ok(Self {
+            table_name,
             location,
             is_directory,
             file_format: Arc::clone(&listing_options.format),
@@ -134,6 +155,18 @@ impl FileTableEngine {
 
     pub fn location(&self) -> &str {
         &self.location
+    }
+
+    pub fn location_kind(&self) -> FileTableLocationKind {
+        if self.is_directory {
+            FileTableLocationKind::Directory
+        } else {
+            FileTableLocationKind::File
+        }
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
     }
 
     pub fn file_format(&self) -> &Arc<dyn FileFormat> {
@@ -298,22 +331,18 @@ fn apply_format_options(
             .with_table_partition_cols(listing_options.table_partition_cols)
             .with_file_sort_order(listing_options.file_sort_order),
         None => ListingOptions::new(file_format)
-            .with_file_extension(file_extension_for_listing(&config, file_type))
+            .with_file_extension(file_extension(
+                config
+                    .table_paths
+                    .first()
+                    .map(|table_path| table_path.as_str())
+                    .unwrap_or_default(),
+                file_type,
+            ))
             .with_target_partitions(state.config().target_partitions())
             .with_collect_stat(state.config().collect_statistics()),
     };
     Ok(config.with_listing_options(listing_options))
-}
-
-fn file_extension_for_listing(config: &ListingTableConfig, fallback_file_type: &str) -> String {
-    let Some(table_path) = config.table_paths.first() else {
-        return fallback_file_type.to_string();
-    };
-    Path::new(table_path.as_str())
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or(fallback_file_type)
-        .to_string()
 }
 
 fn block_on_storage_future<T>(
@@ -347,25 +376,6 @@ fn storage_error(error: impl ToString) -> StorageError {
     }
 }
 
-fn normalize_split_location(root_location: &str, is_directory: bool, path: String) -> String {
-    if Path::new(&path).is_absolute() || path.contains("://") {
-        return path;
-    }
-    let absolute_candidate = format!("/{path}");
-    if Path::new(&absolute_candidate).exists() {
-        return absolute_candidate;
-    }
-    if !is_directory {
-        if let Some(parent) = Path::new(root_location).parent() {
-            return parent.join(path).to_string_lossy().into_owned();
-        }
-    }
-    Path::new(root_location)
-        .join(path)
-        .to_string_lossy()
-        .into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use arrow::array::{Int32Array, StringArray};
@@ -382,7 +392,7 @@ mod tests {
     use crate::catalog::TableCatalogEntry;
     use crate::storage::{TableEngine, TableEngineFactory, TableScanSplit};
 
-    use super::{FileTableEngine, FileTableEngineFactory};
+    use super::{FileTableEngine, FileTableEngineFactory, FileTableLocationKind};
 
     fn parquet_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -473,6 +483,42 @@ mod tests {
             assert_eq!(batches[0].num_rows(), 1);
             assert_eq!(batches[0].schema().field(0).name(), "id");
         });
+    }
+
+    #[test]
+    fn file_table_engine_reports_single_file_locations() {
+        let path = TestFile::new("brewdb-file-single-location", "csv");
+        fs::write(path.path(), "id\n1\n").unwrap();
+
+        assert_eq!(
+            FileTableEngine::classify_location(path.path().to_string_lossy().as_ref()).unwrap(),
+            FileTableLocationKind::File
+        );
+    }
+
+    #[test]
+    fn file_table_engine_reports_directory_locations() {
+        let dir = TestDir::new("brewdb-file-directory-location");
+
+        assert_eq!(
+            FileTableEngine::classify_location(dir.path().to_string_lossy().as_ref()).unwrap(),
+            FileTableLocationKind::Directory
+        );
+    }
+
+    #[test]
+    fn file_table_engine_derives_table_name_from_file_location() {
+        let path = TestFile::new("brewdb-file-table-name", "csv");
+        fs::write(path.path(), "id\n1\n").unwrap();
+
+        let engine = FileTableEngine::try_new(
+            path.path().to_string_lossy().to_string(),
+            [("has_header", "true")],
+        )
+        .unwrap();
+
+        assert!(engine.table_name().starts_with("brewdb_file_table_name_"));
+        assert!(engine.table_name().ends_with("_csv"));
     }
 
     #[test]
