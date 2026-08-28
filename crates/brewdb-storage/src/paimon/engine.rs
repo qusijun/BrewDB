@@ -131,7 +131,7 @@ impl TableEngine for PaimonTableEngine {
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
         let schema = build_paimon_schema(&self.table)
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         Ok(filters
             .iter()
             .map(|filter| {

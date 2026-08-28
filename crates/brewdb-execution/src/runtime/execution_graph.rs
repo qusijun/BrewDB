@@ -98,6 +98,7 @@ impl crate::runtime::exchange_service::ResultBatchSink for QueryOutput {
         self.push_result(batch)
             .map_err(|error| crate::runtime::RpcError::ExecutionFailed {
                 reason: error.to_string(),
+                cause: None,
             })
     }
 }

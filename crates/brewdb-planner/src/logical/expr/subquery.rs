@@ -38,6 +38,7 @@ pub(super) fn validate_single_column_subquery(
     }
     Err(PlannerError::Plan {
         reason: format!("subquery must return exactly one column, got {column_count}"),
+        cause: None,
     })
 }
 

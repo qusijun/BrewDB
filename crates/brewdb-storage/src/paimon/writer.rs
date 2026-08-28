@@ -299,12 +299,12 @@ fn encode_commit_messages(messages: Vec<CommitMessage>) -> DataFusionResult<Stri
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&messages).map_err(|error| DataFusionError::Execution(error.to_string()))
+    serde_json::to_string(&messages).map_err(|error| DataFusionError::External(Box::new(error)))
 }
 
 fn decode_commit_messages(encoded: &str) -> DataFusionResult<Vec<CommitMessage>> {
     let values = serde_json::from_str::<Vec<serde_json::Value>>(encoded)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     values
         .into_iter()
         .map(decode_commit_message)
@@ -333,7 +333,7 @@ fn required_field<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value.get(name).cloned().ok_or_else(|| {
         DataFusionError::Execution(format!("missing Paimon commit message field: {name}"))
     })?)
-    .map_err(|error| DataFusionError::Execution(error.to_string()))
+    .map_err(|error| DataFusionError::External(Box::new(error)))
 }
 
 #[cfg(test)]

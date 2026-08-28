@@ -5,10 +5,12 @@ use std::fmt;
 
 use crate::catalog::CatalogError;
 use crate::common::diagnostics::{DiagnosticError, ErrorCode};
+use crate::common::errors::{datafusion_error_is_data_read, datafusion_error_message_is_data_read};
 use crate::parser::parser::ParserError;
 use crate::planner::PlannerError;
 use crate::planner::distributed::PlanFragmentId;
 use crate::runtime::exchange::{ExchangeDataEncoding, ExchangeId};
+use datafusion_common::DataFusionError;
 
 const SQL_DRIVER_INVALID_REQUEST: ErrorCode = ErrorCode::new("BREWDB_SQL_DRIVER_INVALID_REQUEST");
 const SQL_DRIVER_UNSUPPORTED_STATEMENT: ErrorCode =
@@ -34,6 +36,9 @@ const EXCHANGE_UNSUPPORTED_DATA_ENCODING: ErrorCode =
 const EXCHANGE_BUFFER_LOCK_POISONED: ErrorCode =
     ErrorCode::new("BREWDB_RUNTIME_EXCHANGE_BUFFER_LOCK_POISONED");
 const EXECUTION_INVALID_PLAN: ErrorCode = ErrorCode::new("BREWDB_RUNTIME_EXECUTION_INVALID_PLAN");
+const EXECUTION_FRAGMENT_FAILED: ErrorCode =
+    ErrorCode::new("BREWDB_RUNTIME_EXECUTION_FRAGMENT_FAILED");
+const EXECUTION_READ_FAILED: ErrorCode = ErrorCode::new("BREWDB_RUNTIME_EXECUTION_READ_FAILED");
 const EXECUTION_RUNTIME_INIT_FAILED: ErrorCode =
     ErrorCode::new("BREWDB_RUNTIME_EXECUTION_RUNTIME_INIT_FAILED");
 const EXECUTION_STORAGE_ERROR: ErrorCode = ErrorCode::new("BREWDB_RUNTIME_EXECUTION_STORAGE_ERROR");
@@ -146,18 +151,38 @@ impl DiagnosticError for FragmentSchedulerError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ExecutionRuntimeError {
-    InvalidPlan { reason: String },
-    RuntimeInitFailed { reason: String },
-    StorageError { reason: String },
-    CatalogError { reason: String },
+    InvalidPlan {
+        reason: String,
+    },
+    FragmentFailed {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    ReadFailed {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
+    RuntimeInitFailed {
+        reason: String,
+    },
+    StorageError {
+        reason: String,
+    },
+    CatalogError {
+        reason: String,
+    },
 }
 
 impl fmt::Display for ExecutionRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPlan { reason } => write!(f, "invalid execution plan: {reason}"),
+            Self::FragmentFailed { reason, .. } => {
+                write!(f, "fragment execution failed: {reason}")
+            }
+            Self::ReadFailed { reason, .. } => write!(f, "data read failed: {reason}"),
             Self::RuntimeInitFailed { reason } => {
                 write!(f, "runtime initialization failed: {reason}")
             }
@@ -173,6 +198,8 @@ impl DiagnosticError for ExecutionRuntimeError {
     fn error_code(&self) -> ErrorCode {
         match self {
             Self::InvalidPlan { .. } => EXECUTION_INVALID_PLAN,
+            Self::FragmentFailed { .. } => EXECUTION_FRAGMENT_FAILED,
+            Self::ReadFailed { .. } => EXECUTION_READ_FAILED,
             Self::RuntimeInitFailed { .. } => EXECUTION_RUNTIME_INIT_FAILED,
             Self::StorageError { .. } => EXECUTION_STORAGE_ERROR,
             Self::CatalogError { .. } => EXECUTION_CATALOG_ERROR,
@@ -184,17 +211,41 @@ impl DiagnosticError for ExecutionRuntimeError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl From<RpcError> for ExecutionRuntimeError {
+    fn from(value: RpcError) -> Self {
+        match value {
+            RpcError::ExecutionFailed { reason, cause }
+                if cause
+                    .as_ref()
+                    .map(datafusion_error_is_data_read)
+                    .unwrap_or_else(|| datafusion_error_message_is_data_read(&reason)) =>
+            {
+                Self::ReadFailed { reason, cause }
+            }
+            RpcError::ExecutionFailed { reason, cause } => Self::FragmentFailed { reason, cause },
+            RpcError::EndpointNotFound { endpoint } => Self::RuntimeInitFailed {
+                reason: format!("fragment transport endpoint not found: {endpoint}"),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum RpcError {
-    EndpointNotFound { endpoint: String },
-    ExecutionFailed { reason: String },
+    EndpointNotFound {
+        endpoint: String,
+    },
+    ExecutionFailed {
+        reason: String,
+        cause: Option<DataFusionError>,
+    },
 }
 
 impl fmt::Display for RpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EndpointNotFound { endpoint } => write!(f, "rpc endpoint not found: {endpoint}"),
-            Self::ExecutionFailed { reason } => write!(f, "rpc execution failed: {reason}"),
+            Self::ExecutionFailed { reason, .. } => write!(f, "rpc execution failed: {reason}"),
         }
     }
 }
@@ -290,6 +341,7 @@ mod tests {
     use crate::common::diagnostics::DiagnosticError;
     use crate::planner::distributed::PlanFragmentId;
     use crate::runtime::exchange::ExchangeId;
+    use datafusion_common::DataFusionError;
 
     use crate::parser::parser::ParserError;
 
@@ -351,6 +403,7 @@ mod tests {
         };
         let execution_failed = RpcError::ExecutionFailed {
             reason: "worker rejected fragment".to_owned(),
+            cause: None,
         };
 
         assert_eq!(
@@ -363,6 +416,22 @@ mod tests {
         );
         assert_eq!(missing_endpoint.log_target(), "brewdb.runtime");
         assert_eq!(execution_failed.log_target(), "brewdb.runtime");
+    }
+
+    #[test]
+    fn rpc_execution_failure_maps_to_fragment_runtime_error() {
+        let error = ExecutionRuntimeError::from(RpcError::ExecutionFailed {
+            reason: "Arrow error: Csv error: incorrect number of fields".to_owned(),
+            cause: Some(DataFusionError::Execution(
+                "Arrow error: Csv error: incorrect number of fields".to_owned(),
+            )),
+        });
+
+        assert!(matches!(error, ExecutionRuntimeError::ReadFailed { .. }));
+        assert_eq!(
+            error.error_code().as_str(),
+            "BREWDB_RUNTIME_EXECUTION_READ_FAILED"
+        );
     }
 
     #[test]
