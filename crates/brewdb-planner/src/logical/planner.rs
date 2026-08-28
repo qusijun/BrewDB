@@ -579,6 +579,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::planner::logical::plan::{CreateDatabase, Ddl, DropDatabase, LogicalPlanNode, Show};
+    use crate::planner::logical::table_source::DefaultTableSource;
     use crate::planner::logical::{LogicalOptimizer, LogicalPlanningContext};
 
     use super::LogicalPlanner;
@@ -667,23 +668,6 @@ mod tests {
                 catalog_service: &service,
             },
         )
-    }
-
-    fn normalized_file_name(path: &std::path::Path) -> String {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("file")
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' {
-                    ch.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_owned()
     }
 
     fn query_context() -> QueryContext {
@@ -918,10 +902,11 @@ mod tests {
                 let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
                     panic!("expected COPY FROM input to be a table scan");
                 };
-                assert_eq!(
-                    scan.table_name.table(),
-                    normalized_file_name(csv_path.path())
-                );
+                let source = scan
+                    .source
+                    .downcast_ref::<DefaultTableSource>()
+                    .expect("COPY FROM source should use DefaultTableSource");
+                assert_eq!(scan.table_name.table(), source.table().path.table());
                 assert_eq!(scan.source.schema().field(0).name(), "id");
                 assert_eq!(
                     scan.source.schema().field(0).data_type(),
