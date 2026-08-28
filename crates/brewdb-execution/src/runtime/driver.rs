@@ -117,7 +117,7 @@ mod tests {
     use super::{SqlDriver, sql_to_statement};
     use crate::runtime::coordinator::QueryCoordinator;
     use crate::runtime::execution_graph::QueryExecutionHandle;
-    use brewdb_common::test_util::TestDir;
+    use brewdb_common::test_util::{TestDir, write_parquet_file};
 
     #[test]
     fn sql_to_statement_accepts_brewdb_create_table_cluster_by_extension() {
@@ -173,6 +173,19 @@ mod tests {
             table,
             Arc::new(MemoryTableEngine::try_new(table, batches).unwrap()),
         );
+    }
+
+    fn parquet_test_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap()
     }
 
     fn test_query_context(query_id: Uuid) -> QueryContext {
@@ -555,6 +568,99 @@ mod tests {
             format!(
                 "copy from '{}' to orders with (format csv, header true)",
                 csv_path.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(handle.command_tag, "INSERT");
+        assert!(!handle.returns_rows);
+        assert!(handle.output.next_result().unwrap().is_none());
+
+        let select = execute_sql(&driver, "select count(id) from orders").unwrap();
+        let batch = select.output.next_result().unwrap().unwrap();
+        let count = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 3);
+        assert!(select.output.next_result().unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_driver_executes_copy_from_parquet_statement_without_format_option() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+        let storage = open_storage_engine().unwrap();
+        register_batches(&storage, &table, vec![vec![]]);
+        let parquet_path = warehouse.path().join("orders.parquet");
+        write_parquet_file(&parquet_path, parquet_test_batch());
+
+        let driver = SqlDriver::new(
+            catalog_service.clone(),
+            QueryCoordinator::with_storage(storage),
+        );
+        let handle = execute_sql(
+            &driver,
+            format!("copy from '{}' to orders", parquet_path.display()),
+        )
+        .unwrap();
+
+        assert_eq!(handle.command_tag, "INSERT");
+        assert!(!handle.returns_rows);
+        assert!(handle.output.next_result().unwrap().is_none());
+
+        let select = execute_sql(&driver, "select count(id) from orders").unwrap();
+        let batch = select.output.next_result().unwrap().unwrap();
+        let count = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 3);
+        assert!(select.output.next_result().unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_driver_executes_copy_from_parquet_statement_with_explicit_format() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+        let storage = open_storage_engine().unwrap();
+        register_batches(&storage, &table, vec![vec![]]);
+        let parquet_path = warehouse.path().join("orders.data");
+        write_parquet_file(&parquet_path, parquet_test_batch());
+
+        let driver = SqlDriver::new(
+            catalog_service.clone(),
+            QueryCoordinator::with_storage(storage),
+        );
+        let handle = execute_sql(
+            &driver,
+            format!(
+                "copy from '{}' to orders with (format parquet)",
+                parquet_path.display()
             ),
         )
         .unwrap();

@@ -727,6 +727,7 @@ dependencies = [
  "arrow",
  "datafusion-common",
  "inventory",
+ "parquet",
  "serde",
  "serde_json",
  "toml",
@@ -1280,6 +1281,7 @@ dependencies = [
  "datafusion-datasource-arrow",
  "datafusion-datasource-csv",
  "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-expr-common",
@@ -1302,6 +1304,7 @@ dependencies = [
  "log",
  "object_store",
  "parking_lot",
+ "parquet",
  "sqlparser",
  "tempfile",
  "tokio",
@@ -1375,6 +1378,7 @@ dependencies = [
  "libc",
  "log",
  "object_store",
+ "parquet",
  "sqlparser",
  "tokio",
  "uuid",
@@ -1490,6 +1494,37 @@ dependencies = [
  "object_store",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "datafusion-datasource-parquet"
+version = "54.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cc35b92cd560082155e80d9c826929c852d3c51543f4affd3a51c464a0aab3a"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "datafusion-common",
+ "datafusion-common-runtime",
+ "datafusion-datasource",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions",
+ "datafusion-functions-aggregate-common",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-adapter",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-pruning",
+ "datafusion-session",
+ "futures",
+ "itertools 0.14.0",
+ "log",
+ "object_store",
+ "parking_lot",
+ "parquet",
+ "tokio",
 ]
 
 [[package]]
@@ -3695,6 +3730,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "object_store",
  "paste",
  "seq-macro",
  "simdutf8",
