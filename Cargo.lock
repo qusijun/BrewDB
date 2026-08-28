@@ -818,6 +818,7 @@ dependencies = [
 name = "brewdb-sqllogictests"
 version = "0.1.0"
 dependencies = [
+ "brewdb-bin",
  "brewdb-common",
  "sqllogictest",
 ]
