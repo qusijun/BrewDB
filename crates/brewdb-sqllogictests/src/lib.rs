@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use brewdb_bin::client::PgWireSession;
 use brewdb_common::test_util::{TestDir, temp_root};
 use sqllogictest::{DBOutput, DefaultColumnType};
 
@@ -14,7 +15,6 @@ pub struct ServerHarness {
     config_path: PathBuf,
     port: u16,
     server: Child,
-    client_bin: PathBuf,
 }
 
 impl ServerHarness {
@@ -22,7 +22,6 @@ impl ServerHarness {
         build_brewdb_bins();
         let target_dir = target_debug_dir();
         let server_bin = binary_path(&target_dir, "brewdbd");
-        let client_bin = binary_path(&target_dir, "brewdb");
 
         let sandbox = TestDir::new("brewdb-sqllogic");
         let port = reserve_port();
@@ -55,7 +54,6 @@ brewdb.catalog.paimon.warehouse = "{}"
             config_path,
             port,
             server,
-            client_bin,
         }
     }
 
@@ -71,10 +69,7 @@ brewdb.catalog.paimon.warehouse = "{}"
     }
 
     fn client(&self) -> BrewDbClient {
-        BrewDbClient {
-            client_bin: self.client_bin.clone(),
-            port: self.port,
-        }
+        BrewDbClient { port: self.port }
     }
 }
 
@@ -88,7 +83,6 @@ impl Drop for ServerHarness {
 
 #[derive(Clone)]
 struct BrewDbClient {
-    client_bin: PathBuf,
     port: u16,
 }
 
@@ -97,12 +91,21 @@ impl sqllogictest::DB for BrewDbClient {
     type ColumnType = DefaultColumnType;
 
     fn run(&mut self, sql: &str) -> Result<DBOutput<Self::ColumnType>, Self::Error> {
-        let stdout = self.run_client(sql)?;
-        if let Some(rows) = parse_client_rows(&stdout) {
+        let result = self.run_client(sql)?;
+        let rows = result
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| value.unwrap_or_else(|| "NULL".to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if !result.headers.is_empty() {
             let types = rows
                 .first()
                 .map(|row| vec![DefaultColumnType::Any; row.len()])
-                .unwrap_or_default();
+                .unwrap_or_else(|| vec![DefaultColumnType::Any; result.headers.len()]);
             return Ok(DBOutput::Rows { types, rows });
         }
         Ok(DBOutput::StatementComplete(0))
@@ -110,28 +113,22 @@ impl sqllogictest::DB for BrewDbClient {
 }
 
 impl BrewDbClient {
-    fn run_client(&self, sql: &str) -> Result<String, ClientError> {
-        let output = Command::new(&self.client_bin)
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--database")
-            .arg("brewdb")
-            .arg("--execute")
-            .arg(sql)
-            .output()
-            .map_err(|error| ClientError(format!("failed to launch brewdb client: {error}")))?;
-        if output.status.success() {
-            return String::from_utf8(output.stdout)
-                .map_err(|error| ClientError(format!("client stdout was not utf8: {error}")));
-        }
-        Err(ClientError(format!(
-            "client exited with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )))
+    fn run_client(&self, sql: &str) -> Result<brewdb_bin::client::QueryResult, ClientError> {
+        let stream = TcpStream::connect(("127.0.0.1", self.port))
+            .map_err(|error| ClientError(format!("failed to connect to brewdbd: {error}")))?;
+        stream.set_nodelay(true).ok();
+        let mut session = PgWireSession::new(stream);
+        let user = std::env::var("USER").unwrap_or_else(|_| "brew".to_owned());
+        session
+            .startup(&user, Some("brewdb"))
+            .map_err(|error| ClientError(error.to_string()))?;
+        let result = session
+            .execute(sql)
+            .map_err(|error| ClientError(error.to_string()))?;
+        session
+            .terminate()
+            .map_err(|error| ClientError(error.to_string()))?;
+        Ok(result)
     }
 }
 
@@ -155,43 +152,20 @@ pub fn test_data_dir() -> String {
     data_dir.to_string_lossy().into_owned()
 }
 
-fn parse_client_rows(stdout: &str) -> Option<Vec<Vec<String>>> {
-    let table_rows = stdout
-        .lines()
-        .filter_map(parse_table_row)
-        .collect::<Vec<_>>();
-    if table_rows.is_empty() {
-        None
-    } else {
-        Some(table_rows.into_iter().skip(1).collect())
-    }
-}
-
-fn parse_table_row(line: &str) -> Option<Vec<String>> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
-        return None;
-    }
-    Some(
-        trimmed
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>(),
-    )
-}
-
 fn build_brewdb_bins() {
     let status = Command::new(env!("CARGO"))
         .arg("build")
         .arg("-p")
         .arg("brewdb-bin")
-        .arg("--bins")
+        .arg("--bin")
+        .arg("brewdbd")
         .stdin(Stdio::null())
         .status()
-        .expect("cargo build for brewdb binaries must start");
-    assert!(status.success(), "cargo build -p brewdb-bin --bins failed");
+        .expect("cargo build for brewdbd must start");
+    assert!(
+        status.success(),
+        "cargo build -p brewdb-bin --bin brewdbd failed"
+    );
 }
 
 fn target_debug_dir() -> PathBuf {
@@ -237,36 +211,7 @@ fn wait_for_server(port: u16) {
 mod tests {
     use std::path::Path;
 
-    use super::{ClientError, parse_client_rows, test_data_dir};
-
-    #[test]
-    fn client_table_output_rows_are_converted_to_sqllogictest_rows() {
-        let rows = parse_client_rows(
-            r#"
-+----+-------+
-| id | name  |
-+----+-------+
-| 1  | alice |
-| 2  | bob   |
-+----+-------+
-2 rows
-SELECT
-"#,
-        );
-
-        assert_eq!(
-            rows,
-            Some(vec![
-                vec!["1".to_owned(), "alice".to_owned()],
-                vec!["2".to_owned(), "bob".to_owned()]
-            ])
-        );
-    }
-
-    #[test]
-    fn client_without_table_output_is_a_statement() {
-        assert_eq!(parse_client_rows("CREATE TABLE\n"), None);
-    }
+    use super::{ClientError, test_data_dir};
 
     #[test]
     fn sqllogictest_error_regex_matches_client_error_code() {

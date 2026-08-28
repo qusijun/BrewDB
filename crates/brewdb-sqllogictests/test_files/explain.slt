@@ -1,0 +1,19 @@
+control substitution on
+
+statement ok
+create table explain_orders (id int, amount int);
+
+statement ok
+insert into explain_orders values (1, 10), (2, 20), (3, 30);
+
+query TT
+explain select count(id) from explain_orders;
+----
+logical_plan Aggregate:<slt:ignore>
+physical_plan AggregateExec:<slt:ignore>
+
+query TT
+explain copy from '$TEST_DATA_DIR/copy_orders.csv' to explain_orders with (format csv, header true);
+----
+logical_plan Dml: op=[Insert Into] table=[managed_paimon_catalog.brewdb.explain_orders]<slt:ignore>
+physical_plan PaimonCommitExec: table=brewdb.explain_orders<slt:ignore>
