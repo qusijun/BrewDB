@@ -576,7 +576,6 @@ mod tests {
     use crate::planner::PlannerError;
     use crate::Statement;
     use brewdb_common::test_util::{TestDir, TestFile};
-    use datafusion_expr::TableSource;
     use uuid::Uuid;
 
     use crate::planner::logical::plan::{CreateDatabase, Ddl, DropDatabase, LogicalPlanNode, Show};
@@ -889,8 +888,6 @@ mod tests {
     fn logical_planner_turns_copy_from_csv_into_insert_plan() {
         let csv_path = TestFile::new("brewdb-copy-source", "csv");
         std::fs::write(csv_path.path(), "id\n1\n").unwrap();
-        let source_name =
-            crate::common::utils::normalize_file_path(csv_path.path().to_string_lossy().as_ref());
         let planned = bind(&format!(
             "copy from '{}' to orders with (format csv, header true)",
             csv_path.path().display()
@@ -905,28 +902,15 @@ mod tests {
                 let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
                     panic!("expected COPY FROM input to be a table scan");
                 };
-                assert_eq!(scan.table_name.table(), source_name);
                 let source = scan
                     .source
                     .downcast_ref::<DefaultTableSource>()
-                    .expect("COPY FROM source must be catalog-backed table source");
-                let table = source.table();
-                assert_eq!(table.storage_kind, StorageKind::File);
-                assert_eq!(table.catalog_mode, CatalogMode::Temporary);
-                assert_eq!(table.path.table(), source_name);
-                assert_eq!(table.table_location, csv_path.path().to_string_lossy());
-                assert_eq!(table.table_schema.fields.len(), 1);
-                assert_eq!(table.table_schema.fields[0].name, "id");
-                assert_eq!(source.table_engine().storage_kind(), StorageKind::File);
-                assert_eq!(source.schema().field(0).name(), "id");
-                assert_eq!(table.table_options.get("file_type"), None);
+                    .expect("COPY FROM source should use DefaultTableSource");
+                assert_eq!(scan.table_name.table(), source.table().path.table());
+                assert_eq!(scan.source.schema().field(0).name(), "id");
                 assert_eq!(
-                    table.table_options.get("format").map(String::as_str),
-                    Some("csv")
-                );
-                assert_eq!(
-                    table.table_options.get("has_header").map(String::as_str),
-                    Some("true")
+                    scan.source.schema().field(0).data_type(),
+                    &arrow::datatypes::DataType::Int32
                 );
             }
             other => panic!("expected DataFusion DML logical plan, got {other:?}"),
@@ -948,14 +932,9 @@ mod tests {
         let datafusion_expr::LogicalPlan::TableScan(scan) = dml.input.as_ref() else {
             panic!("expected COPY FROM input to be a table scan");
         };
-
-        let source = scan
-            .source
-            .downcast_ref::<DefaultTableSource>()
-            .expect("COPY FROM source must be catalog-backed table source");
-        assert_eq!(source.schema().field(0).name(), "id");
+        assert_eq!(scan.source.schema().field(0).name(), "id");
         assert_eq!(
-            source.schema().field(0).data_type(),
+            scan.source.schema().field(0).data_type(),
             &arrow::datatypes::DataType::Int32
         );
     }

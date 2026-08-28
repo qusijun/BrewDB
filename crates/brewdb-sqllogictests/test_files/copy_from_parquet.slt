@@ -1,0 +1,26 @@
+control substitution on
+
+statement ok
+create table copy_parquet_orders (id int, amount int);
+
+statement ok
+copy from '$TEST_DATA_DIR/copy_orders.parquet' to copy_parquet_orders;
+
+query II
+select id, amount from copy_parquet_orders order by id;
+----
+30 700
+31 800
+32 900
+
+statement ok
+create table explicit_copy_parquet_orders (id int, amount int);
+
+statement ok
+copy from '$TEST_DATA_DIR/copy_orders.data' to explicit_copy_parquet_orders with (format parquet);
+
+query II
+select id, amount from explicit_copy_parquet_orders order by id;
+----
+40 1000
+41 1100

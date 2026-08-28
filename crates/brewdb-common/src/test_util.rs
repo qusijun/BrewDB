@@ -2,6 +2,8 @@ use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
 use uuid::Uuid;
 
 pub fn temp_root() -> PathBuf {
@@ -68,9 +70,27 @@ impl Drop for TestFile {
     }
 }
 
+pub fn write_parquet_file(path: &Path, batch: RecordBatch) {
+    let file = fs::File::create(path).expect("parquet test file must be created");
+    let mut writer =
+        ArrowWriter::try_new(file, batch.schema(), None).expect("parquet writer must be created");
+    writer
+        .write(&batch)
+        .expect("record batch must be written to parquet test file");
+    writer
+        .close()
+        .expect("parquet test file writer must be closed");
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TestDir, TestFile};
+    use std::sync::Arc;
+
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+
+    use super::{TestDir, TestFile, write_parquet_file};
 
     #[test]
     fn test_dir_removes_directory_when_dropped() {
@@ -96,5 +116,18 @@ mod tests {
         };
 
         assert!(!path.exists(), "{} should be cleaned up", path.display());
+    }
+
+    #[test]
+    fn write_parquet_file_creates_a_file() {
+        let file = TestFile::new("brewdb-common-test-parquet-file", "parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2]))]).unwrap();
+
+        write_parquet_file(file.path(), batch);
+
+        assert!(file.path().exists());
+        assert!(std::fs::metadata(file.path()).unwrap().len() > 0);
     }
 }

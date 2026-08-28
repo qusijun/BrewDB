@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
-use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
 use crate::catalog::{StorageKind, TableCatalogEntry};
+use crate::file::util::{file_extension, normalize_split_location, table_name};
 use crate::storage::{
     StorageError, TableEngine, TableEngineFactory, TableScanSplit, TableScanSplitGroup,
 };
@@ -23,6 +23,7 @@ use datafusion_expr::TableScan;
 
 #[derive(Clone, Debug)]
 pub struct FileTableEngine {
+    table_name: String,
     location: String,
     is_directory: bool,
     file_format: Arc<dyn FileFormat>,
@@ -33,6 +34,12 @@ pub struct FileTableEngine {
 
 #[derive(Clone, Debug, Default)]
 pub struct FileTableEngineFactory;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileTableLocationKind {
+    Directory,
+    File,
+}
 
 impl TableEngineFactory for FileTableEngineFactory {
     fn create_table_engine(
@@ -71,6 +78,18 @@ fn open_file_table_engine_factory() -> Arc<dyn TableEngineFactory> {
 crate::register_table_engine_factory!(StorageKind::File, open_file_table_engine_factory);
 
 impl FileTableEngine {
+    pub fn classify_location(location: &str) -> Result<FileTableLocationKind, StorageError> {
+        fs::metadata(location)
+            .map(|metadata| {
+                if metadata.is_dir() {
+                    FileTableLocationKind::Directory
+                } else {
+                    FileTableLocationKind::File
+                }
+            })
+            .map_err(storage_error)
+    }
+
     pub fn try_new(
         location: impl Into<String>,
         options: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -90,6 +109,7 @@ impl FileTableEngine {
         expected_table_schema: Option<SchemaRef>,
     ) -> Result<Self, StorageError> {
         let location = location.into();
+        let table_name = table_name(&location);
         let options = options
             .into_iter()
             .map(|(key, value)| (key.into(), value.into()))
@@ -113,6 +133,7 @@ impl FileTableEngine {
                 reason: "file schema was not initialized".to_string(),
             })?;
         Ok(Self {
+            table_name,
             location,
             is_directory,
             file_format: Arc::clone(&listing_options.format),
@@ -134,6 +155,18 @@ impl FileTableEngine {
 
     pub fn location(&self) -> &str {
         &self.location
+    }
+
+    pub fn location_kind(&self) -> FileTableLocationKind {
+        if self.is_directory {
+            FileTableLocationKind::Directory
+        } else {
+            FileTableLocationKind::File
+        }
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
     }
 
     pub fn file_format(&self) -> &Arc<dyn FileFormat> {
@@ -232,8 +265,20 @@ fn build_listing_config(
 ) -> Result<ListingTableConfig, StorageError> {
     let config = ListingTableConfig::new_with_multi_paths(vec![table_path]);
     block_on_storage_future(async move {
-        let config = config.infer_options(&state).await.map_err(storage_error)?;
-        let config = apply_format_options(config, &state, &options)?;
+        let config = match expected_file_type(&options) {
+            Some(file_type) => apply_format_options(config, &state, &options, file_type)?,
+            None => {
+                let config = config.infer_options(&state).await.map_err(storage_error)?;
+                let inferred_file_type = config
+                    .options
+                    .as_ref()
+                    .map(|options| options.format.get_ext())
+                    .ok_or_else(|| StorageError::TableScanFailed {
+                        reason: "file listing options were not initialized".to_string(),
+                    })?;
+                apply_format_options(config, &state, &options, &inferred_file_type)?
+            }
+        };
         match expected_table_schema {
             Some(expected_table_schema) => Ok(config.with_schema(expected_table_schema)),
             None => config.infer_schema(&state).await.map_err(storage_error),
@@ -241,43 +286,62 @@ fn build_listing_config(
     })
 }
 
+fn expected_file_type(options: &BTreeMap<String, String>) -> Option<&str> {
+    options
+        .get("format")
+        .or_else(|| options.get("file_type"))
+        .map(String::as_str)
+}
+
 fn apply_format_options(
     config: ListingTableConfig,
     state: &SessionState,
     options: &BTreeMap<String, String>,
+    file_type: &str,
 ) -> Result<ListingTableConfig, StorageError> {
     let format_options = options
         .iter()
         .filter_map(|(key, value)| match key.as_str() {
             "format" | "file_type" => None,
-            "has_header" => Some(("format.has_header".to_owned(), value.clone())),
+            "has_header" if file_type == "csv" => {
+                Some(("format.has_header".to_owned(), value.clone()))
+            }
+            "has_header" => None,
             key if key.starts_with("format.") => Some((key.to_owned(), value.clone())),
             key => Some((format!("format.{key}"), value.clone())),
         })
         .collect::<std::collections::HashMap<_, _>>();
-    if format_options.is_empty() {
+    if format_options.is_empty() && config.options.is_some() {
         return Ok(config);
     }
-    let Some(listing_options) = config.options.clone() else {
-        return Err(StorageError::TableScanFailed {
-            reason: "file listing options were not initialized".to_string(),
-        });
-    };
-    let inferred_file_type = listing_options.format.get_ext();
-    let factory = state
-        .get_file_format_factory(&inferred_file_type)
-        .ok_or_else(|| StorageError::TableScanFailed {
-            reason: format!("unsupported file format: {inferred_file_type}"),
-        })?;
+    let factory =
+        state
+            .get_file_format_factory(file_type)
+            .ok_or_else(|| StorageError::TableScanFailed {
+                reason: format!("unsupported file format: {file_type}"),
+            })?;
     let file_format = factory
         .create(state, &format_options)
         .map_err(storage_error)?;
-    let listing_options = ListingOptions::new(file_format)
-        .with_file_extension(listing_options.file_extension)
-        .with_target_partitions(listing_options.target_partitions)
-        .with_collect_stat(listing_options.collect_stat)
-        .with_table_partition_cols(listing_options.table_partition_cols)
-        .with_file_sort_order(listing_options.file_sort_order);
+    let listing_options = match config.options.clone() {
+        Some(listing_options) => ListingOptions::new(file_format)
+            .with_file_extension(listing_options.file_extension)
+            .with_target_partitions(listing_options.target_partitions)
+            .with_collect_stat(listing_options.collect_stat)
+            .with_table_partition_cols(listing_options.table_partition_cols)
+            .with_file_sort_order(listing_options.file_sort_order),
+        None => ListingOptions::new(file_format)
+            .with_file_extension(file_extension(
+                config
+                    .table_paths
+                    .first()
+                    .map(|table_path| table_path.as_str())
+                    .unwrap_or_default(),
+                file_type,
+            ))
+            .with_target_partitions(state.config().target_partitions())
+            .with_collect_stat(state.config().collect_statistics()),
+    };
     Ok(config.with_listing_options(listing_options))
 }
 
@@ -312,38 +376,38 @@ fn storage_error(error: impl ToString) -> StorageError {
     }
 }
 
-fn normalize_split_location(root_location: &str, is_directory: bool, path: String) -> String {
-    if Path::new(&path).is_absolute() || path.contains("://") {
-        return path;
-    }
-    let absolute_candidate = format!("/{path}");
-    if Path::new(&absolute_candidate).exists() {
-        return absolute_candidate;
-    }
-    if !is_directory {
-        if let Some(parent) = Path::new(root_location).parent() {
-            return parent.join(path).to_string_lossy().into_owned();
-        }
-    }
-    Path::new(root_location)
-        .join(path)
-        .to_string_lossy()
-        .into_owned()
-}
-
 #[cfg(test)]
 mod tests {
-    use brewdb_common::test_util::{TestDir, TestFile};
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use brewdb_common::test_util::{TestDir, TestFile, write_parquet_file};
     use brewdb_common::{column::ColumnField, datatype::DataType, table::TableSchema};
     use datafusion::datasource::{TableProvider, provider_as_source};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
     use std::fs;
+    use std::sync::Arc;
 
     use crate::catalog::TableCatalogEntry;
     use crate::storage::{TableEngine, TableEngineFactory, TableScanSplit};
 
-    use super::{FileTableEngine, FileTableEngineFactory};
+    use super::{FileTableEngine, FileTableEngineFactory, FileTableLocationKind};
+
+    fn parquet_test_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", ArrowDataType::Int32, false),
+            Field::new("name", ArrowDataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["apple", "banana"])),
+            ],
+        )
+        .unwrap()
+    }
 
     #[test]
     fn file_table_engine_initializes_listing_components_from_path_and_options() {
@@ -418,6 +482,95 @@ mod tests {
             assert_eq!(table.table_options.get("file_type"), None);
             assert_eq!(batches[0].num_rows(), 1);
             assert_eq!(batches[0].schema().field(0).name(), "id");
+        });
+    }
+
+    #[test]
+    fn file_table_engine_reports_single_file_locations() {
+        let path = TestFile::new("brewdb-file-single-location", "csv");
+        fs::write(path.path(), "id\n1\n").unwrap();
+
+        assert_eq!(
+            FileTableEngine::classify_location(path.path().to_string_lossy().as_ref()).unwrap(),
+            FileTableLocationKind::File
+        );
+    }
+
+    #[test]
+    fn file_table_engine_reports_directory_locations() {
+        let dir = TestDir::new("brewdb-file-directory-location");
+
+        assert_eq!(
+            FileTableEngine::classify_location(dir.path().to_string_lossy().as_ref()).unwrap(),
+            FileTableLocationKind::Directory
+        );
+    }
+
+    #[test]
+    fn file_table_engine_derives_table_name_from_file_location() {
+        let path = TestFile::new("brewdb-file-table-name", "csv");
+        fs::write(path.path(), "id\n1\n").unwrap();
+
+        let engine = FileTableEngine::try_new(
+            path.path().to_string_lossy().to_string(),
+            [("has_header", "true")],
+        )
+        .unwrap();
+
+        assert!(engine.table_name().starts_with("brewdb_file_table_name_"));
+        assert!(engine.table_name().ends_with("_csv"));
+    }
+
+    #[test]
+    fn file_table_engine_infers_parquet_format_from_file_location() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let path = TestFile::new("brewdb-file-infer-parquet", "parquet");
+            write_parquet_file(path.path(), parquet_test_batch());
+
+            let engine = FileTableEngine::try_new(
+                path.path().to_string_lossy().to_string(),
+                [] as [(&str, &str); 0],
+            )
+            .unwrap();
+            let provider = engine.table_provider().unwrap();
+            let exec = provider
+                .scan(&SessionContext::new().state(), None, &[], None)
+                .await
+                .unwrap();
+            let ctx = SessionContext::new();
+            let batches = collect(exec, ctx.task_ctx()).await.unwrap();
+
+            assert_eq!(engine.file_format.get_ext(), "parquet");
+            assert_eq!(engine.listing_options.file_extension, "parquet");
+            assert_eq!(batches[0].num_rows(), 2);
+            assert_eq!(batches[0].schema().field(0).name(), "id");
+        });
+    }
+
+    #[test]
+    fn file_table_engine_explicit_parquet_format_overrides_file_extension() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let path = TestFile::new("brewdb-file-explicit-parquet", "data");
+            write_parquet_file(path.path(), parquet_test_batch());
+
+            let engine = FileTableEngine::try_new(
+                path.path().to_string_lossy().to_string(),
+                [("format", "parquet")],
+            )
+            .unwrap();
+            let provider = engine.table_provider().unwrap();
+            let exec = provider
+                .scan(&SessionContext::new().state(), None, &[], None)
+                .await
+                .unwrap();
+            let ctx = SessionContext::new();
+            let batches = collect(exec, ctx.task_ctx()).await.unwrap();
+
+            assert_eq!(engine.file_format.get_ext(), "parquet");
+            assert_eq!(engine.listing_options.file_extension, "data");
+            assert_eq!(batches[0].num_rows(), 2);
         });
     }
 

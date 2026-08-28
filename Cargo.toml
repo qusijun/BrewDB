@@ -25,7 +25,7 @@ arrow-schema = "58.4.0"
 arrow = "58.4.0"
 arrow-select = "58.4.0"
 async-trait = "0.1.89"
-datafusion = { version = "54.1.0", default-features = false, features = ["sql"] }
+datafusion = { version = "54.1.0", default-features = false, features = ["parquet", "sql"] }
 datafusion-common = "54.1.0"
 datafusion-expr = "54.1.0"
 datafusion-functions = "54.1.0"

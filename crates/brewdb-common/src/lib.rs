@@ -12,12 +12,10 @@ pub mod profile;
 pub mod table;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_util;
-pub mod utils;
 
 pub mod common {
     pub use crate::{
         column, config, context, datatype, defaults, diagnostics, errors, logging, profile, table,
-        utils,
     };
 }
 

@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::sync::Arc;
 
 use crate::catalog::TableCatalogEntry;
-use crate::common::utils::normalize_file_path;
 use crate::parser::ast::{
     CopyLegacyOption, CopyOption, CopySource, CopyTarget, Delete, Insert, Merge, SetExpr,
     Statement as AstStatement, Update,
@@ -22,7 +20,9 @@ use crate::planner::logical::{
     resolve_query_tables, resolve_table, resolve_table_object, LogicalPlanningContext,
     LogicalPlanningSession,
 };
+use crate::storage::file::{FileTableEngine, FileTableLocationKind};
 use crate::storage::open_storage_engine;
+use crate::storage::TableEngine;
 
 pub(crate) fn bind_insert_statement(
     ast: AstStatement,
@@ -254,28 +254,43 @@ fn plan_copy_from_file_statement(
     filename: &str,
     file_options: BTreeMap<String, String>,
 ) -> Result<DataFusionLogicalPlan, PlannerError> {
-    ensure_copy_from_single_file(filename)?;
-    // COPY FROM is the file engine's expected-schema path. This mirrors
-    // DuckDB's COPY FROM bind flow: the target table provides expected names
-    // and types, and the file reader is responsible for reading/casting source
-    // rows into that contract. Ordinary file scans still infer file schema.
     let table_name = TableReference::full(
         target_table.path.catalog(),
         target_table.path.database(),
         target_table.path.table(),
     );
     let target = table_source_for_catalog(target_table.clone())?;
-    let source_name = normalize_file_path(filename);
+    let target_schema = target_table.table_schema.clone();
+
+    // Build the real file engine first so file-specific decisions stay inside
+    // storage: format inference, path handling, schema binding, and directory
+    // classification all happen while opening the file-backed engine.
+    let expected_source_schema =
+        target_schema
+            .to_arrow_schema_ref()
+            .map_err(|error| PlannerError::InvalidPlan {
+                reason: error.to_string(),
+            })?;
+    let source_engine =
+        file_engine_for_copy_from(filename, file_options.clone(), expected_source_schema)?;
+    let source_name = source_engine.table_name().to_owned();
+
+    // DataFusion still needs a TableSource carrying catalog schema metadata.
+    // The temporary entry is only the logical wrapper around the already-open
+    // file engine, so planner-side table naming follows FileTableEngine.
     let source_table = TableCatalogEntry::temporary_file_with_schema(
         source_name.clone(),
         filename.to_owned(),
-        target_table.table_schema.clone(),
+        target_schema,
         file_options,
     )
     .map_err(|error| PlannerError::InvalidPlan {
         reason: error.to_string(),
     })?;
-    let source = table_source_for_catalog(source_table)?;
+    let source = Arc::new(DefaultTableSource::new(
+        source_table,
+        source_engine as Arc<dyn TableEngine>,
+    )) as Arc<dyn TableSource>;
     let input = LogicalPlanBuilder::scan(source_name, source, None)
         .map_err(|error| PlannerError::InvalidPlan {
             reason: error.to_string(),
@@ -292,6 +307,29 @@ fn plan_copy_from_file_statement(
     )))
 }
 
+fn file_engine_for_copy_from(
+    filename: &str,
+    file_options: BTreeMap<String, String>,
+    expected_table_schema: arrow::datatypes::SchemaRef,
+) -> Result<Arc<FileTableEngine>, PlannerError> {
+    let file_engine = Arc::new(
+        FileTableEngine::try_new_with_expected_table_schema(
+            filename.to_owned(),
+            file_options,
+            Some(expected_table_schema),
+        )
+        .map_err(|error| PlannerError::InvalidPlan {
+            reason: error.to_string(),
+        })?,
+    );
+    if file_engine.location_kind() == FileTableLocationKind::File {
+        return Ok(file_engine);
+    }
+    Err(PlannerError::InvalidPlan {
+        reason: format!("COPY FROM expects a single file: {filename}"),
+    })
+}
+
 fn table_source_for_catalog(
     table: TableCatalogEntry,
 ) -> Result<Arc<dyn TableSource>, PlannerError> {
@@ -301,18 +339,6 @@ fn table_source_for_catalog(
             reason: error.to_string(),
         })?;
     Ok(Arc::new(DefaultTableSource::new(table, table_engine)))
-}
-
-fn ensure_copy_from_single_file(location: &str) -> Result<(), PlannerError> {
-    let metadata = fs::metadata(location).map_err(|error| PlannerError::InvalidPlan {
-        reason: error.to_string(),
-    })?;
-    if metadata.is_file() {
-        return Ok(());
-    }
-    Err(PlannerError::InvalidPlan {
-        reason: format!("COPY FROM expects a single file: {location}"),
-    })
 }
 
 fn bind_copy_from_file_options(
@@ -364,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_from_rejects_directory_source_before_file_engine_setup() {
+    fn copy_from_rejects_directory_source_through_file_engine_location_kind() {
         let dir = TestDir::new("brewdb-copy-from-dir");
         fs::write(dir.path().join("part-1.csv"), "id\n11\n").unwrap();
 
