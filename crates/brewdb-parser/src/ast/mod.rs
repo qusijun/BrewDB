@@ -8332,12 +8332,16 @@ impl fmt::Display for AnalyzeFormatKind {
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
 /// Output formats supported for `ANALYZE`/`EXPLAIN ANALYZE`.
 pub enum AnalyzeFormat {
+    /// DataFusion indented text format.
+    INDENT,
     /// Plain text format.
     TEXT,
     /// Graphviz DOT format.
     GRAPHVIZ,
     /// JSON format.
     JSON,
+    /// PostgreSQL JSON format.
+    PGJSON,
     /// Traditional explain output.
     TRADITIONAL,
     /// Tree-style explain output.
@@ -8347,9 +8351,11 @@ pub enum AnalyzeFormat {
 impl fmt::Display for AnalyzeFormat {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
+            AnalyzeFormat::INDENT => "INDENT",
             AnalyzeFormat::TEXT => "TEXT",
             AnalyzeFormat::GRAPHVIZ => "GRAPHVIZ",
             AnalyzeFormat::JSON => "JSON",
+            AnalyzeFormat::PGJSON => "PGJSON",
             AnalyzeFormat::TRADITIONAL => "TRADITIONAL",
             AnalyzeFormat::TREE => "TREE",
         })

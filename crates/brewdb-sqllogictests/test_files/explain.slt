@@ -13,6 +13,25 @@ logical_plan Aggregate:<slt:ignore>
 physical_plan AggregateExec:<slt:ignore>
 
 query TT
+explain format tree select count(id) from explain_orders;
+----
+physical_plan <slt:ignore>AggregateExec<slt:ignore>PaimonScanExec<slt:ignore>
+
+query TT
+explain format pgjson select count(id) from explain_orders;
+----
+logical_plan <slt:ignore>"Plan":<slt:ignore>"Node Type": "Aggregate"<slt:ignore>"Node Type": "TableScan"<slt:ignore>
+
+query TT
+explain analyze select count(id) from explain_orders;
+----
+Plan with Metrics AggregateExec:<slt:ignore>
+  CoalescePartitionsExec, metrics=[output_rows=8<slt:ignore>
+    AggregateExec:<slt:ignore>
+      RepartitionExec:<slt:ignore>
+        PaimonScanExec:<slt:ignore>metrics=[output_rows=3<slt:ignore>elapsed_compute=<slt:ignore>output_batches=1]
+
+query TT
 explain copy from '$TEST_DATA_DIR/copy_orders.csv' to explain_orders with (format csv, header true);
 ----
 logical_plan Dml: op=[Insert Into] table=[managed_paimon_catalog.brewdb.explain_orders]<slt:ignore>

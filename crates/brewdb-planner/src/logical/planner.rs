@@ -139,8 +139,12 @@ impl LogicalPlanner {
             AstStatement::Commit { .. } => bind_commit_statement(),
             AstStatement::Rollback { .. } => bind_rollback_statement(),
             AstStatement::Explain {
-                statement, format, ..
-            } => bind_explain_statement(self, statement, *format, ctx),
+                statement,
+                analyze,
+                verbose,
+                format,
+                ..
+            } => bind_explain_statement(self, statement, *analyze, *verbose, *format, ctx),
             _ => Err(PlannerError::UnsupportedPlan {
                 reason: statement.to_string(),
             }),
@@ -747,6 +751,103 @@ mod tests {
             }
             other => panic!("expected DataFusion values plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logical_planner_turns_explain_analyze_into_analyze_plan() {
+        let planned = bind("explain analyze select count(id) from orders");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Analyze(analyze) => {
+                assert!(!analyze.verbose);
+            }
+            other => panic!("expected DataFusion analyze plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_respects_explain_format() {
+        let planned = bind("explain format tree select count(id) from orders");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Explain(explain) => {
+                assert_eq!(
+                    explain.explain_format,
+                    datafusion_expr::logical_plan::ExplainFormat::Tree
+                );
+            }
+            other => panic!("expected DataFusion explain plan, got {other:?}"),
+        }
+
+        let planned = bind("explain format pgjson select count(id) from orders");
+
+        match planned {
+            datafusion_expr::LogicalPlan::Explain(explain) => {
+                assert_eq!(
+                    explain.explain_format,
+                    datafusion_expr::logical_plan::ExplainFormat::PostgresJSON
+                );
+            }
+            other => panic!("expected DataFusion explain plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_optimizer_keeps_explain_format_active() {
+        let planned = bind("explain format tree select count(id) from orders");
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+
+        match optimized {
+            datafusion_expr::LogicalPlan::Explain(explain) => {
+                assert_eq!(
+                    explain.explain_format,
+                    datafusion_expr::logical_plan::ExplainFormat::Tree
+                );
+                assert!(explain.logical_optimization_succeeded);
+            }
+            other => panic!("expected DataFusion explain plan, got {other:?}"),
+        }
+
+        let planned = bind("explain format pgjson select count(id) from orders");
+        let optimized = LogicalOptimizer::default().optimize(planned).unwrap();
+
+        match optimized {
+            datafusion_expr::LogicalPlan::Explain(explain) => {
+                assert_eq!(
+                    explain.explain_format,
+                    datafusion_expr::logical_plan::ExplainFormat::PostgresJSON
+                );
+                assert!(explain.logical_optimization_succeeded);
+            }
+            other => panic!("expected DataFusion explain plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_planner_rejects_explain_analyze_format() {
+        let error = bind_result("explain analyze format tree select count(id) from orders")
+            .expect_err("EXPLAIN ANALYZE FORMAT should not be silently ignored");
+
+        assert!(matches!(error, PlannerError::UnsupportedPlan { .. }));
+        assert!(error.to_string().contains("EXPLAIN ANALYZE with FORMAT"));
+    }
+
+    #[test]
+    fn logical_planner_rejects_explain_verbose_format() {
+        let error = bind_result("explain verbose format tree select count(id) from orders")
+            .expect_err("EXPLAIN VERBOSE FORMAT should follow DataFusion semantics");
+
+        assert!(matches!(error, PlannerError::UnsupportedPlan { .. }));
+        assert!(error.to_string().contains("EXPLAIN VERBOSE with FORMAT"));
+    }
+
+    #[test]
+    fn logical_planner_rejects_datafusion_invalid_explain_format() {
+        let error = bind_result("explain format json select count(id) from orders")
+            .expect_err("EXPLAIN FORMAT should use DataFusion format names");
+
+        assert!(matches!(error, PlannerError::Plan { .. }));
+        assert!(error.to_string().contains("Invalid explain format"));
     }
 
     #[test]
