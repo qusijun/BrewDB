@@ -6562,14 +6562,14 @@ impl<'a> Parser<'a> {
     pub fn parse_analyze_format(&mut self) -> Result<AnalyzeFormat, ParserError> {
         let next_token = self.next_token();
         match &next_token.token {
-            Token::Word(w) => match w.value.to_lowercase().as_str() {
-                "indent" => Ok(AnalyzeFormat::INDENT),
-                "text" => Ok(AnalyzeFormat::TEXT),
-                "graphviz" => Ok(AnalyzeFormat::GRAPHVIZ),
-                "json" => Ok(AnalyzeFormat::JSON),
-                "pgjson" => Ok(AnalyzeFormat::PGJSON),
-                "traditional" => Ok(AnalyzeFormat::TRADITIONAL),
-                "tree" => Ok(AnalyzeFormat::TREE),
+            Token::Word(w) => match w.keyword {
+                Keyword::INDENT => Ok(AnalyzeFormat::INDENT),
+                Keyword::TEXT => Ok(AnalyzeFormat::TEXT),
+                Keyword::GRAPHVIZ => Ok(AnalyzeFormat::GRAPHVIZ),
+                Keyword::JSON => Ok(AnalyzeFormat::JSON),
+                Keyword::PGJSON => Ok(AnalyzeFormat::PGJSON),
+                Keyword::TRADITIONAL => Ok(AnalyzeFormat::TRADITIONAL),
+                Keyword::TREE => Ok(AnalyzeFormat::TREE),
                 _ => self.expected("fileformat", next_token),
             },
             _ => self.expected("fileformat", next_token),
