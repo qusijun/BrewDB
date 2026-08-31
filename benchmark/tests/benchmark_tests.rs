@@ -229,7 +229,7 @@ fn tpch_schema_and_load_sql_are_file_backed() {
                 .exists()
         );
     }
-    for query in 1..=43 {
+    for query in 0..43 {
         assert!(
             benchmark_dir
                 .join(format!("clickbench/queries/q{query:02}.sql"))
@@ -304,9 +304,9 @@ fn clickbench_queries_are_loaded_from_builtin_directory() {
     let queries = load_queries(&config).unwrap();
 
     assert_eq!(queries.len(), 43);
-    assert_eq!(queries[0].name, "q01");
+    assert_eq!(queries[0].name, "q00");
     assert!(queries[0].sql.contains("COUNT(*) FROM hits"));
-    assert_eq!(queries[42].name, "q43");
+    assert_eq!(queries[42].name, "q42");
     assert!(queries[42].sql.contains("DATE_TRUNC('minute', EventTime)"));
 }
 
