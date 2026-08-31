@@ -114,6 +114,25 @@ impl LogicalOptimizer {
         O: FnMut(&DataFusionLogicalPlan, &dyn OptimizerRule),
     {
         let options = optimizer_context.options();
+        if let DataFusionLogicalPlan::Explain(explain) = plan {
+            let analyzed = self.analyzer.execute_and_check(
+                explain.plan.as_ref().clone(),
+                &options,
+                analyzer_observer,
+            )?;
+            let optimized =
+                self.optimizer
+                    .optimize(analyzed, &optimizer_context, optimizer_observer)?;
+            return Ok(DataFusionLogicalPlan::Explain(datafusion_expr::Explain {
+                verbose: explain.verbose,
+                explain_format: explain.explain_format,
+                plan: Arc::new(optimized),
+                stringified_plans: explain.stringified_plans,
+                schema: explain.schema,
+                logical_optimization_succeeded: true,
+            }));
+        }
+
         let analyzed = self
             .analyzer
             .execute_and_check(plan, &options, analyzer_observer)?;

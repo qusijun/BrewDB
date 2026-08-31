@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::Result as DataFusionResult;
@@ -6,22 +7,18 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
-};
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use futures::{StreamExt, stream};
+use futures::{Stream, StreamExt, stream};
 use paimon::spec::Predicate;
 use paimon::table::Table as PaimonTable;
 use paimon::{DataSplit, DataSplitBuilder};
 
 use super::table_provider::datafusion_scan_error;
-use brewdb_common::profile::MetricValue;
-
 #[derive(Debug)]
 pub(crate) struct PaimonScanExec {
     table: PaimonTable,
@@ -31,8 +28,6 @@ pub(crate) struct PaimonScanExec {
     filter: Option<Predicate>,
     limit: Option<usize>,
     metrics: ExecutionPlanMetricsSet,
-    storage_rows: Count,
-    storage_bytes: Count,
     properties: Arc<PlanProperties>,
 }
 
@@ -48,17 +43,6 @@ impl PaimonScanExec {
     ) -> Self {
         let metrics = ExecutionPlanMetricsSet::new();
         let partitions = scan_partitions(assigned_splits, target_partitions);
-        let storage_files = partitions
-            .iter()
-            .map(|partition| storage_files_count(partition))
-            .sum();
-        MetricBuilder::new(&metrics)
-            .global_counter(MetricValue::STORAGE_FILES_READ)
-            .add(storage_files);
-        let storage_rows =
-            MetricBuilder::new(&metrics).global_counter(MetricValue::STORAGE_ROWS_READ);
-        let storage_bytes =
-            MetricBuilder::new(&metrics).global_counter(MetricValue::STORAGE_BYTES_READ);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&projected_schema)),
             Partitioning::UnknownPartitioning(partitions.len()),
@@ -73,8 +57,6 @@ impl PaimonScanExec {
             filter,
             limit,
             metrics,
-            storage_rows,
-            storage_bytes,
             properties,
         }
     }
@@ -134,28 +116,62 @@ impl ExecutionPlan for PaimonScanExec {
 
         let schema = Arc::clone(&self.projected_schema);
         let mut remaining = self.limit;
-        let storage_rows = self.storage_rows.clone();
-        let storage_bytes = self.storage_bytes.clone();
+        let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
         match result {
-            Ok(batch_stream) => Ok(Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&schema),
-                batch_stream.map(move |batch| {
-                    let mut batch = batch.map_err(datafusion_scan_error)?;
-                    if let Some(remaining_rows) = remaining.as_mut() {
-                        let rows_to_take = (*remaining_rows).min(batch.num_rows());
-                        *remaining_rows -= rows_to_take;
-                        batch = batch.slice(0, rows_to_take);
-                    }
-                    storage_rows.add(batch.num_rows());
-                    storage_bytes.add(batch.get_array_memory_size());
-                    Ok(batch)
-                }),
-            ))),
-            Err(error) => Ok(Box::pin(RecordBatchStreamAdapter::new(
-                schema,
-                stream::once(async move { Err(error) }),
-            ))),
+            Ok(batch_stream) => {
+                let input = Box::pin(RecordBatchStreamAdapter::new(
+                    Arc::clone(&schema),
+                    batch_stream.map(move |batch| {
+                        let mut batch = batch.map_err(datafusion_scan_error)?;
+                        if let Some(remaining_rows) = remaining.as_mut() {
+                            let rows_to_take = (*remaining_rows).min(batch.num_rows());
+                            *remaining_rows -= rows_to_take;
+                            batch = batch.slice(0, rows_to_take);
+                        }
+                        Ok(batch)
+                    }),
+                ));
+                Ok(Box::pin(PaimonScanStream {
+                    input,
+                    baseline_metrics,
+                }))
+            }
+            Err(error) => {
+                let input = Box::pin(RecordBatchStreamAdapter::new(
+                    schema,
+                    stream::once(async move { Err(error) }),
+                ));
+                Ok(Box::pin(PaimonScanStream {
+                    input,
+                    baseline_metrics,
+                }))
+            }
         }
+    }
+}
+
+struct PaimonScanStream {
+    input: SendableRecordBatchStream,
+    baseline_metrics: BaselineMetrics,
+}
+
+impl RecordBatchStream for PaimonScanStream {
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+}
+
+impl Stream for PaimonScanStream {
+    type Item = DataFusionResult<datafusion::arrow::record_batch::RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let elapsed_compute = self.baseline_metrics.elapsed_compute().clone();
+        let _timer = elapsed_compute.timer();
+        let poll = self.input.as_mut().poll_next(cx);
+        self.baseline_metrics.record_poll(poll)
     }
 }
 

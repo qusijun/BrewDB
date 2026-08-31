@@ -14,6 +14,7 @@ pub enum CommandPlan {
 pub enum CommandTag {
     Select,
     Explain,
+    ExplainAnalyze,
     Insert,
     CreateTable,
     DropTable,
@@ -32,6 +33,7 @@ impl CommandTag {
         match self {
             Self::Select => "SELECT",
             Self::Explain => "EXPLAIN",
+            Self::ExplainAnalyze => "EXPLAIN ANALYZE",
             Self::Insert => "INSERT",
             Self::CreateTable => "CREATE TABLE",
             Self::DropTable => "DROP TABLE",
@@ -65,6 +67,7 @@ pub fn command_plan(root: &DataFusionLogicalPlan) -> Option<CommandPlan> {
 
 pub(crate) fn command_tag(root: &DataFusionLogicalPlan) -> CommandTag {
     match root {
+        DataFusionLogicalPlan::Analyze(_) => CommandTag::ExplainAnalyze,
         DataFusionLogicalPlan::Explain(_) => CommandTag::Explain,
         DataFusionLogicalPlan::Dml(_) => CommandTag::Insert,
         DataFusionLogicalPlan::Ddl(statement) => match statement {
@@ -121,4 +124,29 @@ fn returns_rows_for_extension(node: &crate::planner::logical::plan::LogicalPlanN
         node,
         crate::planner::logical::plan::LogicalPlanNode::Show(_)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion_common::DFSchema;
+    use datafusion_expr::{Analyze, EmptyRelation, LogicalPlan};
+
+    use super::{command_tag, CommandTag};
+
+    #[test]
+    fn command_tag_distinguishes_explain_analyze() {
+        let plan = LogicalPlan::Analyze(Analyze {
+            verbose: false,
+            input: Arc::new(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(DFSchema::empty()),
+            })),
+            schema: Arc::new(DFSchema::empty()),
+        });
+
+        assert_eq!(command_tag(&plan), CommandTag::ExplainAnalyze);
+        assert_eq!(command_tag(&plan).as_str(), "EXPLAIN ANALYZE");
+    }
 }

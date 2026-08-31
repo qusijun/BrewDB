@@ -6563,9 +6563,12 @@ impl<'a> Parser<'a> {
         let next_token = self.next_token();
         match &next_token.token {
             Token::Word(w) => match w.keyword {
+                Keyword::INDENT => Ok(AnalyzeFormat::INDENT),
                 Keyword::TEXT => Ok(AnalyzeFormat::TEXT),
                 Keyword::GRAPHVIZ => Ok(AnalyzeFormat::GRAPHVIZ),
                 Keyword::JSON => Ok(AnalyzeFormat::JSON),
+                Keyword::PGJSON => Ok(AnalyzeFormat::PGJSON),
+                Keyword::TRADITIONAL => Ok(AnalyzeFormat::TRADITIONAL),
                 Keyword::TREE => Ok(AnalyzeFormat::TREE),
                 _ => self.expected("fileformat", next_token),
             },

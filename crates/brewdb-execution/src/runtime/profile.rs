@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_profile_includes_paimon_scan_storage_metrics() {
+    fn operator_profile_includes_paimon_scan_baseline_metrics() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let table = make_file_table(StorageKind::Paimon);
@@ -419,31 +419,9 @@ mod tests {
                 .map(|metric| metric.name())
                 .collect();
 
-            assert!(metric_names.contains(&MetricValue::STORAGE_BYTES_READ));
-            assert!(metric_names.contains(&MetricValue::STORAGE_ROWS_READ));
-            assert!(metric_names.contains(&MetricValue::STORAGE_FILES_READ));
-
-            let storage_rows = operator
-                .metrics
-                .iter()
-                .find(|metric| metric.name() == MetricValue::STORAGE_ROWS_READ)
-                .map(|metric| &metric.value)
-                .unwrap();
-            assert!(matches!(
-                storage_rows,
-                MetricValue::StorageRowsRead(value) if *value >= 2
-            ));
-
-            let storage_bytes = operator
-                .metrics
-                .iter()
-                .find(|metric| metric.name() == MetricValue::STORAGE_BYTES_READ)
-                .map(|metric| &metric.value)
-                .unwrap();
-            assert!(matches!(
-                storage_bytes,
-                MetricValue::StorageBytesRead(value) if *value > 0
-            ));
+            assert!(metric_names.contains(&MetricValue::OUTPUT_ROWS));
+            assert!(metric_names.contains(&MetricValue::OUTPUT_BATCHES));
+            assert!(metric_names.contains(&MetricValue::ELAPSED_COMPUTE));
 
             let _ = fs::remove_dir_all(&table.table_location);
         });
