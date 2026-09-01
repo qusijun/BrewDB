@@ -15,7 +15,7 @@ use crate::runtime::exchange::{
 };
 use crate::runtime::exchange_service::{ExchangePageSink, ResultBatchSink};
 use crate::runtime::fragment::FragmentInstance;
-use crate::storage::{StorageEngine, TableScanSplitGroup};
+use crate::storage::{StorageEngine, TableScanSplitGroup, TableSourceId};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
@@ -102,13 +102,13 @@ pub struct FragmentExecutionEnvelope {
     ///
     /// Standalone keeps all table scans inside one root fragment and therefore
     /// prepares scan providers from the query-level split group. Distributed
-    /// execution prepares providers from the single split assigned to the
+    /// execution prepares providers from the split list assigned to the
     /// fragment instance.
     pub standalone: bool,
-    /// Query-level scan split candidates produced by the planner.
+    /// Scan split assignments passed to the worker.
     ///
     /// Workers use this only when `standalone` is true. Distributed workers use
-    /// `FragmentInstance::table_scan_split` instead.
+    /// `FragmentInstance::table_scan_splits` instead.
     pub table_scan_splits: TableScanSplitGroup,
     pub exchange_page_sink: Option<Arc<dyn ExchangePageSink>>,
     pub result_batch_sink: Option<Arc<dyn ResultBatchSink>>,
@@ -570,11 +570,13 @@ impl FragmentService for LocalFragmentExecutor {
         } = &envelope;
         let local_scan_assignment = if *standalone {
             Some(table_scan_splits.clone()).filter(|splits| !splits.is_empty())
+        } else if instance.table_scan_splits.is_empty() {
+            None
         } else {
-            instance
-                .table_scan_split
-                .clone()
-                .map(|split| TableScanSplitGroup::new(vec![split]))
+            Some(TableScanSplitGroup::from_table_source(
+                TableSourceId(instance.fragment_id().0),
+                instance.table_scan_splits.clone(),
+            ))
         };
         let prepared = LocalFragmentPlan::prepare(
             instance.query_context.clone(),

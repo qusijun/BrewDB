@@ -103,7 +103,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                 let Some(table) = table_from_source.or(table_from_catalog) else {
                     return Ok(Transformed::no(DataFusionLogicalPlan::TableScan(scan)));
                 };
-                let assigned_split = self.assigned_split(table_source_id, &scan.table_name);
+                let assigned_splits = self.assigned_splits(table_source_id, &scan.table_name);
                 let table_engine = if let Some(default_source) = default_source {
                     Arc::clone(default_source.table_engine())
                 } else {
@@ -112,7 +112,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                     })?
                 };
                 let provider = table_engine
-                    .get_table_provider(assigned_split)
+                    .get_table_provider(assigned_splits.as_deref())
                     .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)))?;
                 let rebuilt = datafusion_expr::TableScan::try_new(
                     scan.table_name.clone(),
@@ -136,24 +136,26 @@ impl LocalTableScanRewriteRule {
         TableSourceId(self.next_table_source_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn assigned_split(
+    fn assigned_splits(
         &self,
         table_source_id: TableSourceId,
         table_name: &datafusion_common::TableReference,
-    ) -> Option<&TableScanSplit> {
-        self.local_scan_assignment
-            .as_ref()
-            .and_then(|splits| {
-                splits
-                    .splits_for_table_source(table_source_id)
-                    .or_else(|| splits.only_table_source_splits())
-            })
-            .and_then(|splits| {
-                let [split] = splits else {
-                    return None;
-                };
-                (split.table_name == table_name.to_string()).then_some(split)
-            })
+    ) -> Option<Vec<TableScanSplit>> {
+        let splits = self
+            .local_scan_assignment
+            .as_ref()?
+            .splits_for_table_source(table_source_id)
+            .or_else(|| {
+                self.local_scan_assignment
+                    .as_ref()?
+                    .only_table_source_splits()
+            })?;
+
+        let table_name = table_name.to_string();
+        splits
+            .iter()
+            .all(|split| split.table_name == table_name)
+            .then_some(splits.to_vec())
     }
 }
 
@@ -211,8 +213,30 @@ impl OptimizerRule for LocalDmlTargetRewriteRule {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::catalog::{CatalogMode, StorageKind, TableCatalogEntry, TablePath};
+    use crate::common::datatype::DataType;
+    use crate::common::{column::ColumnField, table::TableSchema};
+    use crate::storage::DataFileDescriptor;
     use crate::storage::TableEngine;
     use brewdb_common::test_util::TestFile;
+    use datafusion_common::TableReference;
+
+    use super::{LocalTableScanRewriteRule, TableScanSplit, TableScanSplitGroup, TableSourceId};
+
+    fn test_table() -> TableCatalogEntry {
+        TableCatalogEntry::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            TablePath::new("prod", "sales", "orders").unwrap(),
+            TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            "memory:/brewdb-local-rewrite-test".to_owned(),
+            StorageKind::File,
+            CatalogMode::Managed,
+        )
+    }
 
     #[test]
     fn file_table_engine_is_backed_by_storage_file_provider() {
@@ -226,5 +250,31 @@ mod tests {
 
         let provider = engine.table_provider().unwrap();
         assert_eq!(provider.table_type(), datafusion_expr::TableType::Base);
+    }
+
+    #[test]
+    fn standalone_local_rewrite_keeps_native_scan_for_multiple_splits_on_one_table_source() {
+        let split_group = TableScanSplitGroup::from_table_source(
+            TableSourceId(0),
+            vec![
+                TableScanSplit::new("orders", 0)
+                    .with_data_files(vec![DataFileDescriptor::new("file:/tmp/a.parquet")]),
+                TableScanSplit::new("orders", 1)
+                    .with_data_files(vec![DataFileDescriptor::new("file:/tmp/b.parquet")]),
+            ],
+        );
+        let rule = LocalTableScanRewriteRule {
+            storage: Arc::new(crate::storage::StorageEngine::new(vec![]).unwrap()),
+            tables: vec![test_table()],
+            local_scan_assignment: Some(split_group),
+            next_table_source_id: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+
+        let splits = rule
+            .assigned_splits(TableSourceId(0), &TableReference::bare("orders"))
+            .expect("expected assigned split");
+
+        assert_eq!(splits.len(), 2);
+        assert!(splits.iter().all(|split| split.table_name == "orders"));
     }
 }

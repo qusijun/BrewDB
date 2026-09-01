@@ -246,16 +246,13 @@ impl QueryCoordinator {
                 let table_scan_splits = table_scan_splits.clone();
                 // ## Scan Split Dispatch
                 //
-                // - **Distributed/source fragments**: the scheduler assigns at
-                //   most one `TableScanSplit` to each `FragmentInstance`.
-                //   Workers prepare local table providers from that instance
-                //   split.
-                // - **Standalone root fragments**: the scheduler keeps the
-                //   root `FragmentInstance` split-free so the distributed
-                //   instance contract stays "one instance, at most one split".
-                //   The coordinator marks the envelope as standalone and sends
-                //   the query-level `TableScanSplitGroup`; the worker then
-                //   prepares local table providers from the full group.
+                // - **Distributed/source fragments**: each source fragment
+                //   gets one `FragmentInstance`, and that instance carries the
+                //   split list assigned to the source node.
+                // - **Standalone root fragments**: the root stays split-free
+                //   as an instance, and the coordinator passes the whole
+                //   `TableScanSplitGroup` so local planning can consume the
+                //   full assignment list.
                 let result_batch_sink = Arc::clone(&output)
                     as Arc<dyn crate::runtime::exchange_service::ResultBatchSink>;
                 joins.push(scope.spawn(move || {
@@ -544,7 +541,7 @@ mod tests {
         assert_eq!(graph.instances.len(), 1);
         assert_eq!(graph.instances[0].worker_id, worker_id);
         assert_eq!(graph.instances[0].endpoint, "rpc://worker-1");
-        assert_eq!(graph.instances[0].table_scan_split, Some(split));
+        assert_eq!(graph.instances[0].table_scan_splits, vec![split]);
     }
 
     #[test]
@@ -588,7 +585,7 @@ mod tests {
             .expect("captured envelope lock must not be poisoned")
             .clone()
             .expect("root fragment must be sent to local transport");
-        assert!(envelope.instance.table_scan_split.is_none());
+        assert!(envelope.instance.table_scan_splits.is_empty());
         assert!(envelope.standalone);
         assert_eq!(envelope.table_scan_splits, split_group);
     }
@@ -641,7 +638,7 @@ mod tests {
             .expect("captured envelope lock must not be poisoned")
             .clone()
             .expect("source fragment must be sent to transport");
-        assert_eq!(envelope.instance.table_scan_split, Some(split));
+        assert_eq!(envelope.instance.table_scan_splits, vec![split]);
         assert!(!envelope.standalone);
         assert!(envelope.table_scan_splits.is_empty());
     }

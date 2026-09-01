@@ -168,18 +168,33 @@ impl TableScanSplit {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Stable identifier for a table scan site within a query plan.
+///
+/// The planner uses this to attach scan candidates to the corresponding
+/// `TableScan` node, and the scheduler uses the same id to hand each source
+/// fragment its assigned work.
 pub struct TableSourceId(pub u32);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Scheduler-facing container for table scan split assignments.
+///
+/// The map key is the stable `TableSourceId` for a scan site. The value is the
+/// ordered set of splits assigned to that source. Each element in the `Vec`
+/// is expected to be scheduled to a different `FragmentInstance` in the
+/// distributed path, while standalone execution may keep the whole group and
+/// let local planning consume it directly.
 pub struct TableScanSplitGroup {
+    /// Splits grouped by the stable source id they belong to.
     pub table_sources: BTreeMap<TableSourceId, Vec<TableScanSplit>>,
 }
 
 impl TableScanSplitGroup {
+    /// Builds a single-source group using the default source id.
     pub fn new(splits: Vec<TableScanSplit>) -> Self {
         Self::from_table_source(TableSourceId::default(), splits)
     }
 
+    /// Builds a group for one table source.
     pub fn from_table_source(table_source_id: TableSourceId, splits: Vec<TableScanSplit>) -> Self {
         let mut table_sources = BTreeMap::new();
         if !splits.is_empty() {
@@ -188,14 +203,17 @@ impl TableScanSplitGroup {
         Self { table_sources }
     }
 
+    /// Returns true when no source has any assigned splits.
     pub fn is_empty(&self) -> bool {
         self.table_sources.values().all(Vec::is_empty)
     }
 
+    /// Returns the total number of splits across all table sources.
     pub fn len(&self) -> usize {
         self.table_sources.values().map(Vec::len).sum()
     }
 
+    /// Returns the splits assigned to a specific table source.
     pub fn splits_for_table_source(
         &self,
         table_source_id: TableSourceId,
@@ -203,6 +221,7 @@ impl TableScanSplitGroup {
         self.table_sources.get(&table_source_id).map(Vec::as_slice)
     }
 
+    /// Consumes the group when it contains exactly one table source.
     pub fn into_only_table_source_splits(mut self) -> Option<Vec<TableScanSplit>> {
         if self.table_sources.len() == 1 {
             self.table_sources.pop_first().map(|(_, splits)| splits)
@@ -211,6 +230,7 @@ impl TableScanSplitGroup {
         }
     }
 
+    /// Borrows the splits when the group contains exactly one table source.
     pub fn only_table_source_splits(&self) -> Option<&[TableScanSplit]> {
         if self.table_sources.len() == 1 {
             self.table_sources
@@ -221,6 +241,7 @@ impl TableScanSplitGroup {
         }
     }
 
+    /// Mutably borrows the splits when the group contains exactly one table source.
     pub fn only_table_source_splits_mut(&mut self) -> Option<&mut Vec<TableScanSplit>> {
         if self.table_sources.len() == 1 {
             self.table_sources
@@ -231,6 +252,7 @@ impl TableScanSplitGroup {
         }
     }
 
+    /// Appends more splits to a table source.
     pub fn extend_table_source(
         &mut self,
         table_source_id: TableSourceId,
