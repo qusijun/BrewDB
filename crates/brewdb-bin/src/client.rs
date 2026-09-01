@@ -4,10 +4,14 @@ use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use brewdb_common::defaults::DEFAULT_DATABASE_NAME;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+
+use crate::command::{Command, CommandAction};
+use crate::print_options::PrintOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientOptions {
@@ -16,6 +20,7 @@ pub struct ClientOptions {
     pub user: String,
     pub database: String,
     pub query: Option<String>,
+    pub print_options: PrintOptions,
 }
 
 impl ClientOptions {
@@ -33,6 +38,7 @@ impl ClientOptions {
         let mut user = env::var("USER").unwrap_or_else(|_| "brew".to_owned());
         let mut database = DEFAULT_DATABASE_NAME.to_owned();
         let mut query = None;
+        let mut print_options = PrintOptions::default();
 
         let mut iter = args.into_iter().map(Into::into).peekable();
         while let Some(arg) = iter.next() {
@@ -47,6 +53,13 @@ impl ClientOptions {
                 "-U" | "--user" => user = take_value("--user", &mut iter)?,
                 "-d" | "--database" => database = take_value("--database", &mut iter)?,
                 "-c" | "--execute" => query = Some(take_value("--execute", &mut iter)?),
+                "-q" | "--quiet" => print_options.quiet = true,
+                "--maxrows" => {
+                    let value = take_value("--maxrows", &mut iter)?;
+                    print_options.maxrows = value
+                        .parse()
+                        .map_err(|reason| ClientError::InvalidArgs { reason })?;
+                }
                 "-?" | "--help" => {
                     return Err(ClientError::Usage(usage()));
                 }
@@ -73,6 +86,7 @@ impl ClientOptions {
             user,
             database,
             query,
+            print_options,
         })
     }
 }
@@ -126,6 +140,7 @@ pub fn run() -> Result<(), ClientError> {
 }
 
 pub fn run_with_options(options: ClientOptions) -> Result<(), ClientError> {
+    let print_options = options.print_options.clone();
     let address = (options.host.as_str(), options.port)
         .to_socket_addrs()
         .map_err(ClientError::Io)?
@@ -140,20 +155,18 @@ pub fn run_with_options(options: ClientOptions) -> Result<(), ClientError> {
     session.startup(&options.user, Some(&options.database))?;
 
     if let Some(query) = options.query {
-        let result = session.execute(&query)?;
-        render_query_result(&mut io::stdout(), &result)?;
+        execute_and_render(&mut session, &query, &print_options)?;
         session.terminate()?;
         return Ok(());
     }
 
     if io::stdin().is_terminal() {
-        interactive_session(&mut session)?;
+        interactive_session(&mut session, print_options)?;
     } else {
         let mut sql = String::new();
         io::stdin().read_to_string(&mut sql)?;
         if !sql.trim().is_empty() {
-            let result = session.execute(sql.trim())?;
-            render_query_result(&mut io::stdout(), &result)?;
+            execute_and_render(&mut session, sql.trim(), &print_options)?;
         }
         session.terminate()?;
         return Ok(());
@@ -324,7 +337,10 @@ fn write_row(out: &mut impl Write, values: &[String], widths: &[usize]) -> Resul
     Ok(())
 }
 
-fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Result<(), ClientError> {
+fn interactive_session<S: Read + Write>(
+    session: &mut PgWireSession<S>,
+    mut print_options: PrintOptions,
+) -> Result<(), ClientError> {
     let mut line_editor = DefaultEditor::new().map_err(|error| ClientError::LineEditor {
         reason: format!("line editor failed to start: {error}"),
     })?;
@@ -357,9 +373,23 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
         if is_quit_command(trimmed) {
             break;
         }
+        if buffer.trim().is_empty() && trimmed.starts_with('\\') {
+            match trimmed.parse::<Command>() {
+                Ok(command) => {
+                    let mut stdout = io::stdout();
+                    match command.execute(session, &mut print_options, &mut stdout) {
+                        Ok(CommandAction::Continue) => {}
+                        Ok(CommandAction::Quit) => break,
+                        Err(error) => eprintln!("brewdb failed: {error}"),
+                    }
+                }
+                Err(error) => eprintln!("brewdb failed: {error}"),
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             if !buffer.trim().is_empty() {
-                if let Err(error) = execute_and_render(session, buffer.trim()) {
+                if let Err(error) = execute_and_render(session, buffer.trim(), &print_options) {
                     eprintln!("brewdb failed: {error}");
                 }
                 buffer.clear();
@@ -373,7 +403,7 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
         if trimmed.ends_with(';') {
             let sql = buffer.trim().trim_end_matches(';').trim().to_owned();
             if !sql.is_empty() {
-                if let Err(error) = execute_and_render(session, &sql) {
+                if let Err(error) = execute_and_render(session, &sql, &print_options) {
                     eprintln!("brewdb failed: {error}");
                 }
             }
@@ -382,7 +412,7 @@ fn interactive_session<S: Read + Write>(session: &mut PgWireSession<S>) -> Resul
     }
 
     if !buffer.trim().is_empty() {
-        if let Err(error) = execute_and_render(session, buffer.trim()) {
+        if let Err(error) = execute_and_render(session, buffer.trim(), &print_options) {
             eprintln!("brewdb failed: {error}");
         }
     }
@@ -401,9 +431,21 @@ fn history_path() -> Option<PathBuf> {
 fn execute_and_render<S: Read + Write>(
     session: &mut PgWireSession<S>,
     sql: &str,
+    print_options: &PrintOptions,
 ) -> Result<(), ClientError> {
+    let mut stdout = io::stdout();
+    execute_and_render_to(session, sql, print_options, &mut stdout)
+}
+
+pub(crate) fn execute_and_render_to<S: Read + Write>(
+    session: &mut PgWireSession<S>,
+    sql: &str,
+    print_options: &PrintOptions,
+    out: &mut impl Write,
+) -> Result<(), ClientError> {
+    let started_at = Instant::now();
     let result = session.execute(sql)?;
-    render_query_result(&mut io::stdout(), &result)
+    print_options.print_query_result(out, &result, started_at)
 }
 
 fn write_startup_message<S: Write>(
@@ -621,7 +663,7 @@ where
 }
 
 fn usage() -> String {
-    "usage: brewdb [--host HOST] [--port PORT] [--user USER] [--database DB] [-c SQL]".to_owned()
+    "usage: brewdb [--host HOST] [--port PORT] [--user USER] [--database DB] [--quiet] [--maxrows N] [-c SQL]".to_owned()
 }
 
 fn is_quit_command(command: &str) -> bool {
@@ -635,12 +677,23 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    use crate::print_options::MaxRows;
+
     use super::*;
 
     #[test]
     fn args_parse_supports_positional_sql() {
         let options = ClientOptions::from_args(["-h", "localhost", "select 1"]).unwrap();
         assert_eq!(options.host, "localhost");
+        assert_eq!(options.query.as_deref(), Some("select 1"));
+    }
+
+    #[test]
+    fn args_parse_print_options() {
+        let options = ClientOptions::from_args(["--quiet", "--maxrows", "10", "select 1"]).unwrap();
+
+        assert!(options.print_options.quiet);
+        assert_eq!(options.print_options.maxrows, MaxRows::Limited(10));
         assert_eq!(options.query.as_deref(), Some("select 1"));
     }
 
@@ -671,6 +724,44 @@ mod tests {
         assert_eq!(result.rows, vec![vec![Some("1".to_owned())]]);
         assert_eq!(result.command_tag, "SELECT 1");
         assert_eq!(rx.recv().unwrap(), "select 1");
+    }
+
+    #[test]
+    fn execute_and_render_uses_supplied_print_options() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut server = server;
+            let _ = handle_fake_server(&mut server, tx);
+        });
+
+        let mut session = PgWireSession::new(client);
+        session.startup("brew", Some("brewdb")).unwrap();
+        let mut out = Vec::new();
+        let print_options = PrintOptions {
+            quiet: true,
+            maxrows: MaxRows::Unlimited,
+        };
+
+        execute_and_render_to(&mut session, "select 1", &print_options, &mut out).unwrap();
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("SELECT 1"));
+        assert!(!output.contains("Elapsed"));
+        assert_eq!(rx.recv().unwrap(), "select 1");
+    }
+
+    #[test]
+    fn parses_repl_meta_commands() {
+        assert_eq!(
+            r"\q".parse::<crate::command::Command>().unwrap(),
+            crate::command::Command::Quit
+        );
+        assert_eq!(
+            r"\quiet true".parse::<crate::command::Command>().unwrap(),
+            crate::command::Command::QuietMode(Some(true))
+        );
+        assert!(r"\d hits".parse::<crate::command::Command>().is_err());
     }
 
     fn handle_fake_server(
