@@ -1,5 +1,6 @@
 //! Node-local fragment planning contracts.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::catalog::TableCatalogEntry;
@@ -13,7 +14,7 @@ use datafusion_optimizer::{ApplyOrder, Optimizer, OptimizerRule};
 use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 use crate::planner::errors::PlannerError;
 use crate::planner::logical::table_source::DefaultTableSource;
-use crate::storage::TableScanSplit;
+use crate::storage::{TableScanSplit, TableScanSplitGroup, TableSourceId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFragmentPlan {
@@ -21,7 +22,12 @@ pub struct LocalFragmentPlan {
     pub fragment_id: PlanFragmentId,
     pub fragment_kind: PlanFragmentKind,
     pub logical_plan: DataFusionLogicalPlan,
-    pub table_scan_split: Option<TableScanSplit>,
+    /// Local scan assignments used to rebuild this fragment's table providers.
+    ///
+    /// This is execution context, not a stable fragment plan description.
+    /// Distributed workers get a group containing the instance's single split;
+    /// standalone root execution can get the root fragment's whole scan group.
+    pub local_scan_assignment: Option<TableScanSplitGroup>,
 }
 
 impl LocalFragmentPlan {
@@ -29,7 +35,7 @@ impl LocalFragmentPlan {
         query_context: QueryContext,
         fragment: PlanFragment,
         table_catalogs: Vec<TableCatalogEntry>,
-        table_scan_split: Option<TableScanSplit>,
+        local_scan_assignment: Option<TableScanSplitGroup>,
         storage: Arc<StorageEngine>,
     ) -> Result<Self, PlannerError> {
         let logical_plan = fragment
@@ -44,7 +50,8 @@ impl LocalFragmentPlan {
             Arc::new(LocalTableScanRewriteRule {
                 storage: Arc::clone(&storage),
                 tables: table_catalogs.clone(),
-                table_scan_split: table_scan_split.clone(),
+                local_scan_assignment: local_scan_assignment.clone(),
+                next_table_source_id: Arc::new(AtomicU32::new(0)),
             }),
             Arc::new(LocalDmlTargetRewriteRule {
                 storage,
@@ -59,7 +66,7 @@ impl LocalFragmentPlan {
             fragment_id: fragment.fragment_id,
             fragment_kind: fragment.kind,
             logical_plan: optimized,
-            table_scan_split,
+            local_scan_assignment,
         })
     }
 }
@@ -68,7 +75,8 @@ impl LocalFragmentPlan {
 struct LocalTableScanRewriteRule {
     storage: Arc<StorageEngine>,
     tables: Vec<TableCatalogEntry>,
-    table_scan_split: Option<TableScanSplit>,
+    local_scan_assignment: Option<TableScanSplitGroup>,
+    next_table_source_id: Arc<AtomicU32>,
 }
 
 impl std::fmt::Debug for LocalTableScanRewriteRule {
@@ -93,6 +101,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
     ) -> Result<Transformed<DataFusionLogicalPlan>, datafusion_common::DataFusionError> {
         match plan {
             DataFusionLogicalPlan::TableScan(scan) => {
+                let table_source_id = self.next_table_source_id();
                 let default_source = scan.source.downcast_ref::<DefaultTableSource>();
                 let table_from_source = default_source.map(DefaultTableSource::table);
                 let table_from_catalog = self
@@ -102,10 +111,7 @@ impl OptimizerRule for LocalTableScanRewriteRule {
                 let Some(table) = table_from_source.or(table_from_catalog) else {
                     return Ok(Transformed::no(DataFusionLogicalPlan::TableScan(scan)));
                 };
-                let assigned_split = self
-                    .table_scan_split
-                    .as_ref()
-                    .filter(|split| split.table_name == scan.table_name.to_string());
+                let assigned_split = self.assigned_split(table_source_id, &scan.table_name);
                 let table_engine = if let Some(default_source) = default_source {
                     Arc::clone(default_source.table_engine())
                 } else {
@@ -127,6 +133,35 @@ impl OptimizerRule for LocalTableScanRewriteRule {
             }
             other => Ok(Transformed::no(other)),
         }
+    }
+}
+
+impl LocalTableScanRewriteRule {
+    fn next_table_source_id(&self) -> TableSourceId {
+        // Local rewrite visits table scans in the same bottom-up order used by
+        // distributed split planning. The current planner assigns dense ids
+        // from zero while walking the logical plan inputs.
+        TableSourceId(self.next_table_source_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn assigned_split(
+        &self,
+        table_source_id: TableSourceId,
+        table_name: &datafusion_common::TableReference,
+    ) -> Option<&TableScanSplit> {
+        self.local_scan_assignment
+            .as_ref()
+            .and_then(|splits| {
+                splits
+                    .splits_for_table_source(table_source_id)
+                    .or_else(|| splits.only_table_source_splits())
+            })
+            .and_then(|splits| {
+                let [split] = splits else {
+                    return None;
+                };
+                (split.table_name == table_name.to_string()).then_some(split)
+            })
     }
 }
 

@@ -110,7 +110,7 @@ impl QueryCoordinator {
         let execution_graph = ExecutionGraph::from_plan_fragments(query_context, plan.fragments);
         self.scheduler.schedule(
             execution_graph,
-            plan.fragment_scan_splits,
+            plan.table_scan_splits,
             self.resource_manager.as_ref(),
         )
     }
@@ -230,12 +230,32 @@ impl QueryCoordinator {
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         let output = Arc::new(QueryOutput::default());
         let (command_tag, returns_rows) = Self::execution_result_shape(&distributed_plan);
+        let table_scan_splits = distributed_plan.table_scan_splits.clone();
+        let standalone = distributed_plan.exchanges.is_empty()
+            && matches!(
+                distributed_plan.fragments.as_slice(),
+                [fragment]
+                    if fragment.kind == crate::planner::distributed::PlanFragmentKind::Root
+            );
         let mut profiler = QueryProfiler::new(query_context.clone(), command_tag);
         let execute_fragments_start = std::time::Instant::now();
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for instance in instances {
                 let transport_registry = Arc::clone(&self.transport_registry);
+                let table_scan_splits = table_scan_splits.clone();
+                // ## Scan Split Dispatch
+                //
+                // - **Distributed/source fragments**: the scheduler assigns at
+                //   most one `TableScanSplit` to each `FragmentInstance`.
+                //   Workers prepare local table providers from that instance
+                //   split.
+                // - **Standalone root fragments**: the scheduler keeps the
+                //   root `FragmentInstance` split-free so the distributed
+                //   instance contract stays "one instance, at most one split".
+                //   The coordinator marks the envelope as standalone and sends
+                //   the query-level `TableScanSplitGroup`; the worker then
+                //   prepares local table providers from the full group.
                 let result_batch_sink = Arc::clone(&output)
                     as Arc<dyn crate::runtime::exchange_service::ResultBatchSink>;
                 joins.push(scope.spawn(move || {
@@ -249,8 +269,12 @@ impl QueryCoordinator {
                     let client = transport_registry
                         .transport(&endpoint)
                         .map_err(ExecutionRuntimeError::from)?;
-                    let mut envelope =
-                        FragmentExecutionEnvelope::new(instance).with_exchange_page_sink(page_sink);
+                    let mut envelope = FragmentExecutionEnvelope::new(instance)
+                        .with_standalone(standalone)
+                        .with_exchange_page_sink(page_sink);
+                    if standalone {
+                        envelope = envelope.with_table_scan_splits(table_scan_splits.clone());
+                    }
                     if is_root_fragment && returns_rows {
                         envelope = envelope.with_result_batch_sink(result_batch_sink);
                     }
@@ -465,15 +489,20 @@ fn map_common_error(error: crate::common::errors::CommonError) -> ExecutionRunti
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use crate::common::context::QueryContext;
+    use crate::execution::executor::{FragmentExecutionEnvelope, FragmentExecutionStatus};
     use crate::planner::CommandTag;
     use crate::planner::distributed::{
-        DistributedFragmentPlan, DistributedPlanRoot, FragmentScanSplits, PlanFragment,
-        PlanFragmentId, PlanFragmentKind,
+        DistributedFragmentPlan, DistributedPlanRoot, PlanFragment, PlanFragmentId,
+        PlanFragmentKind,
     };
 
     use super::QueryCoordinator;
     use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo};
+    use crate::runtime::transport::FragmentTransport;
+    use crate::runtime::{ExchangeDataPage, ExchangeId, RpcError};
     use crate::storage::{TableScanSplit, TableScanSplitGroup};
 
     #[test]
@@ -494,10 +523,10 @@ mod tests {
                 root: None,
                 local_plan: None,
             }],
-            fragment_scan_splits: vec![FragmentScanSplits {
-                fragment_id,
-                table_scan_splits: TableScanSplitGroup::new(vec![split.clone()]),
-            }],
+            table_scan_splits: TableScanSplitGroup::from_table_source(
+                crate::storage::TableSourceId(fragment_id.0),
+                vec![split.clone()],
+            ),
             exchanges: vec![],
         };
 
@@ -516,5 +545,139 @@ mod tests {
         assert_eq!(graph.instances[0].worker_id, worker_id);
         assert_eq!(graph.instances[0].endpoint, "rpc://worker-1");
         assert_eq!(graph.instances[0].table_scan_split, Some(split));
+    }
+
+    #[test]
+    fn coordinator_sends_standalone_root_scan_splits_as_local_assignment() {
+        let fragment_id = PlanFragmentId(0);
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let captured = Arc::new(Mutex::new(None));
+        let transport = Arc::new(RecordingTransport {
+            captured: Arc::clone(&captured),
+        });
+        let transport_registry = TransportRegistryMap::from([(
+            "rpc://worker-0".to_owned(),
+            transport as Arc<dyn FragmentTransport>,
+        )]);
+        let coordinator =
+            QueryCoordinator::default().with_transport_registry(Arc::new(transport_registry));
+        let split_group = TableScanSplitGroup::new(vec![
+            TableScanSplit::new("hits", 0),
+            TableScanSplit::new("hits", 1),
+        ]);
+        let plan = DistributedFragmentPlan {
+            query_context: query_context.clone(),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: false,
+            fragments: vec![PlanFragment {
+                fragment_id,
+                kind: PlanFragmentKind::Root,
+                root: None,
+                local_plan: None,
+            }],
+            table_scan_splits: split_group.clone(),
+            exchanges: vec![],
+        };
+
+        coordinator.execute_query(query_context, plan).unwrap();
+
+        let envelope = captured
+            .lock()
+            .expect("captured envelope lock must not be poisoned")
+            .clone()
+            .expect("root fragment must be sent to local transport");
+        assert!(envelope.instance.table_scan_split.is_none());
+        assert!(envelope.standalone);
+        assert_eq!(envelope.table_scan_splits, split_group);
+    }
+
+    #[test]
+    fn coordinator_does_not_duplicate_distributed_scan_splits_in_envelope() {
+        let worker_id = uuid::Uuid::new_v4();
+        let fragment_id = PlanFragmentId(7);
+        let query_context = QueryContext::for_test(uuid::Uuid::new_v4());
+        let captured = Arc::new(Mutex::new(None));
+        let transport = Arc::new(RecordingTransport {
+            captured: Arc::clone(&captured),
+        });
+        let transport_registry = TransportRegistryMap::from([(
+            "rpc://worker-1".to_owned(),
+            transport as Arc<dyn FragmentTransport>,
+        )]);
+        let coordinator = QueryCoordinator::default()
+            .with_resource_manager(std::sync::Arc::new(StaticResourceManager::new(vec![
+                WorkerInfo {
+                    worker_id,
+                    endpoint: "rpc://worker-1".to_owned(),
+                },
+            ])))
+            .with_transport_registry(Arc::new(transport_registry));
+        let split = TableScanSplit::new("hits", 0);
+        let plan = DistributedFragmentPlan {
+            query_context: query_context.clone(),
+            root: DistributedPlanRoot::Fragments,
+            table_catalogs: vec![],
+            command_tag: CommandTag::Select,
+            returns_rows: false,
+            fragments: vec![PlanFragment {
+                fragment_id,
+                kind: PlanFragmentKind::Source,
+                root: None,
+                local_plan: None,
+            }],
+            table_scan_splits: TableScanSplitGroup::from_table_source(
+                crate::storage::TableSourceId(fragment_id.0),
+                vec![split.clone()],
+            ),
+            exchanges: vec![],
+        };
+
+        coordinator.execute_query(query_context, plan).unwrap();
+
+        let envelope = captured
+            .lock()
+            .expect("captured envelope lock must not be poisoned")
+            .clone()
+            .expect("source fragment must be sent to transport");
+        assert_eq!(envelope.instance.table_scan_split, Some(split));
+        assert!(!envelope.standalone);
+        assert!(envelope.table_scan_splits.is_empty());
+    }
+
+    type TransportRegistryMap = std::collections::BTreeMap<String, Arc<dyn FragmentTransport>>;
+
+    struct RecordingTransport {
+        captured: Arc<Mutex<Option<FragmentExecutionEnvelope>>>,
+    }
+
+    impl FragmentTransport for RecordingTransport {
+        fn execute_fragment(
+            &self,
+            _worker_id: uuid::Uuid,
+            envelope: FragmentExecutionEnvelope,
+        ) -> Result<FragmentExecutionStatus, RpcError> {
+            let query_context = envelope.instance.query_context.clone();
+            *self
+                .captured
+                .lock()
+                .expect("captured envelope lock must not be poisoned") = Some(envelope);
+            Ok(FragmentExecutionStatus {
+                query_context,
+                profile: None,
+            })
+        }
+
+        fn send_exchange_page(&self, _page: ExchangeDataPage) -> Result<(), RpcError> {
+            Ok(())
+        }
+
+        fn drain_exchange_pages(
+            &self,
+            _exchange_id: ExchangeId,
+        ) -> Result<Vec<ExchangeDataPage>, RpcError> {
+            Ok(vec![])
+        }
     }
 }

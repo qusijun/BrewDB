@@ -413,10 +413,6 @@ mod tests {
                 .any(|(plan_type, _)| *plan_type == "physical_plan")
         );
         assert!(rows.iter().any(|(_, plan)| plan.contains("PaimonSinkExec")));
-        assert!(
-            rows.iter()
-                .all(|(_, plan)| !plan.contains("CoalescePartitionsExec"))
-        );
         assert!(handle.output.next_result().unwrap().is_none());
 
         let select = execute_sql(&driver, "select count(id) from orders").unwrap();

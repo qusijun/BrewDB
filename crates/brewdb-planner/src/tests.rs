@@ -306,7 +306,7 @@ mod tests {
         };
         assert_eq!(scan.table_name.table(), "orders");
         assert_eq!(
-            plan.fragment_scan_splits[0].table_scan_splits,
+            plan.table_scan_splits,
             TableScanSplitGroup::new(vec![TableScanSplit::new("orders", 0)])
         );
     }
@@ -416,15 +416,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            plan.fragment_scan_splits[0].fragment_id,
-            plan.fragments[0].fragment_id
-        );
-        assert_eq!(plan.fragment_scan_splits[0].table_scan_splits.len(), 1);
-        let splits = plan.fragment_scan_splits[0]
-            .table_scan_splits
-            .only_table_source_splits()
-            .unwrap();
+        assert_eq!(plan.table_scan_splits.len(), 1);
+        let splits = plan.table_scan_splits.only_table_source_splits().unwrap();
         assert_eq!(splits[0].table_name, "__copy_from_orders");
         assert!(
             splits[0].locations[0].ends_with(path.path().file_name().unwrap().to_str().unwrap())
@@ -909,7 +902,7 @@ mod tests {
 
         assert_eq!(plan.fragments.len(), 1);
         assert!(plan.exchanges.is_empty());
-        assert_eq!(plan.fragment_scan_splits.len(), 1);
+        assert_eq!(plan.table_scan_splits.len(), 1);
         assert!(matches!(
             plan.fragments[0].root,
             Some(DataFusionLogicalPlan::Aggregate(_)) | Some(DataFusionLogicalPlan::Projection(_))

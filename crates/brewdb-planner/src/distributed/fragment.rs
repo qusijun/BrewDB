@@ -33,12 +33,6 @@ pub struct PlanFragment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FragmentScanSplits {
-    pub fragment_id: PlanFragmentId,
-    pub table_scan_splits: TableScanSplitGroup,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DistributedPlanRoot {
     Fragments,
     Command(CommandPlan),
@@ -58,7 +52,17 @@ pub struct DistributedFragmentPlan {
     pub command_tag: CommandTag,
     pub returns_rows: bool,
     pub fragments: Vec<PlanFragment>,
-    pub fragment_scan_splits: Vec<FragmentScanSplits>,
+    /// Planner-produced scan split candidates for the whole query.
+    ///
+    /// The group is keyed by the stable table-scan/source id used while local
+    /// table scans are rewritten:
+    ///
+    /// - Distributed source fragments store their scan split candidates under
+    ///   `TableSourceId(fragment_id)`, so the scheduler can assign one split
+    ///   to each source `FragmentInstance`.
+    /// - Standalone root fragments keep their table scan ids local to the root
+    ///   plan and pass the whole group directly to local planning.
+    pub table_scan_splits: TableScanSplitGroup,
     pub exchanges: Vec<ExchangeNode>,
 }
 
@@ -90,7 +94,7 @@ impl DistributedFragmentPlanner {
                 command_tag: command_tag(&optimized),
                 returns_rows: returns_rows(&optimized),
                 fragments: Vec::new(),
-                fragment_scan_splits: Vec::new(),
+                table_scan_splits: TableScanSplitGroup::default(),
                 exchanges: Vec::new(),
             });
         }
@@ -136,17 +140,7 @@ impl FragmentPlanner for StandaloneFragmentPlanner {
     ) -> Result<DistributedFragmentPlan, PlannerError> {
         let root_fragment_id = PlanFragmentId(0);
         let table_catalogs = collect_table_catalogs(&logical_plan);
-        let fragment_scan_splits = {
-            let table_scan_splits = collect_table_scan_splits(&logical_plan, storage.as_ref())?;
-            if table_scan_splits.is_empty() {
-                Vec::new()
-            } else {
-                vec![FragmentScanSplits {
-                    fragment_id: root_fragment_id,
-                    table_scan_splits,
-                }]
-            }
-        };
+        let table_scan_splits = collect_table_scan_splits(&logical_plan, storage.as_ref())?;
 
         Ok(DistributedFragmentPlan {
             query_context,
@@ -160,7 +154,7 @@ impl FragmentPlanner for StandaloneFragmentPlanner {
                 root: Some(logical_plan.clone()),
                 local_plan: Some(logical_plan),
             }],
-            fragment_scan_splits,
+            table_scan_splits,
             exchanges: Vec::new(),
         })
     }
@@ -248,7 +242,7 @@ struct DistributedPlanBuilder {
     returns_rows: bool,
     next_fragment_id: u32,
     fragments: Vec<PlanFragment>,
-    fragment_scan_splits: Vec<FragmentScanSplits>,
+    table_scan_splits: TableScanSplitGroup,
     exchanges: Vec<ExchangeNode>,
 }
 
@@ -275,7 +269,7 @@ impl DistributedPlanBuilder {
                 root: None,
                 local_plan: None,
             }],
-            fragment_scan_splits: Vec::new(),
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: Vec::new(),
         }
     }
@@ -286,7 +280,7 @@ impl DistributedPlanBuilder {
     ) -> Result<DistributedFragmentPlan, PlannerError> {
         self.fragments[0].root = Some(root.clone());
         let rewritten = self.rewrite_plan(&root, self.root_fragment_id)?;
-        self.push_fragment_scan_splits(self.root_fragment_id, &rewritten)?;
+        self.push_table_scan_splits(self.root_fragment_id, &rewritten)?;
         self.fragments[0].local_plan = Some(rewritten.clone());
         self.fragments[0].root = Some(rewritten);
         Ok(DistributedFragmentPlan {
@@ -296,7 +290,7 @@ impl DistributedPlanBuilder {
             command_tag: self.command_tag,
             returns_rows: self.returns_rows,
             fragments: self.fragments,
-            fragment_scan_splits: self.fragment_scan_splits,
+            table_scan_splits: self.table_scan_splits,
             exchanges: self.exchanges,
         })
     }
@@ -456,7 +450,7 @@ impl DistributedPlanBuilder {
         original_plan: &DataFusionLogicalPlan,
         local_plan: DataFusionLogicalPlan,
     ) -> Result<(), PlannerError> {
-        self.push_fragment_scan_splits(fragment_id, &local_plan)?;
+        self.push_table_scan_splits(fragment_id, &local_plan)?;
         self.fragments.push(PlanFragment {
             fragment_id,
             kind: fragment_kind_for_plan(original_plan),
@@ -466,18 +460,19 @@ impl DistributedPlanBuilder {
         Ok(())
     }
 
-    fn push_fragment_scan_splits(
+    fn push_table_scan_splits(
         &mut self,
         fragment_id: PlanFragmentId,
         local_plan: &DataFusionLogicalPlan,
     ) -> Result<(), PlannerError> {
-        let table_scan_splits = collect_table_scan_splits(local_plan, self.storage.as_ref())?;
-        if !table_scan_splits.is_empty() {
-            self.fragment_scan_splits.push(FragmentScanSplits {
-                fragment_id,
-                table_scan_splits,
-            });
-        }
+        let mut table_scan_splits = collect_table_scan_splits_from(
+            local_plan,
+            self.storage.as_ref(),
+            TableSourceId(fragment_id.0),
+        )?;
+        self.table_scan_splits
+            .table_sources
+            .append(&mut table_scan_splits.table_sources);
         Ok(())
     }
 
@@ -533,8 +528,16 @@ fn collect_table_scan_splits(
     plan: &DataFusionLogicalPlan,
     storage: &StorageEngine,
 ) -> Result<TableScanSplitGroup, PlannerError> {
+    collect_table_scan_splits_from(plan, storage, TableSourceId(0))
+}
+
+fn collect_table_scan_splits_from(
+    plan: &DataFusionLogicalPlan,
+    storage: &StorageEngine,
+    first_table_source_id: TableSourceId,
+) -> Result<TableScanSplitGroup, PlannerError> {
     let mut splits = TableScanSplitGroup::default();
-    let mut next_table_source_id = 0u32;
+    let mut next_table_source_id = first_table_source_id.0;
     collect_table_scan_splits_into(plan, storage, &mut splits, &mut next_table_source_id)?;
     Ok(splits)
 }

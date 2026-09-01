@@ -28,6 +28,12 @@ pub struct FragmentInstance {
     pub execution_fragment: Box<ExecutionFragment>,
     pub worker_id: Uuid,
     pub endpoint: String,
+    /// Runtime assignment for distributed/source execution.
+    ///
+    /// A fragment instance is scheduled as one executable unit and may receive
+    /// at most one scan split. Standalone root execution that needs a full
+    /// `TableScanSplitGroup` passes it through the local planning boundary
+    /// instead of storing it here.
     pub table_scan_split: Option<TableScanSplit>,
     pub query_context: QueryContext,
     pub table_catalogs: Vec<TableCatalogEntry>,

@@ -120,13 +120,12 @@ mod tests {
     use crate::planner::distributed::exchange::ExchangeNode;
     use crate::planner::distributed::exchange::RemoteSourceNode;
     use crate::planner::distributed::{
-        DistributedFragmentPlan, DistributedPlanRoot, FragmentScanSplits, PlanFragmentId,
-        PlanFragmentKind,
+        DistributedFragmentPlan, DistributedPlanRoot, PlanFragmentId, PlanFragmentKind,
     };
     use crate::planner::{LocalFragmentPlan, LogicalPlanner, LogicalPlanningContext};
     use crate::runtime::driver::sql_to_statement;
     use crate::storage::memory::MemoryTableEngine;
-    use crate::storage::{TableScanSplit, TableScanSplitGroup, open_storage_engine};
+    use crate::storage::{TableScanSplit, TableScanSplitGroup, TableSourceId, open_storage_engine};
     use arrow::array::{ArrayRef, Int32Array, Int64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -382,7 +381,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![fragment],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -412,13 +411,13 @@ mod tests {
                 root: None,
                 local_plan: Some(build_fragment().local_plan.unwrap()),
             }],
-            fragment_scan_splits: vec![FragmentScanSplits {
-                fragment_id,
-                table_scan_splits: TableScanSplitGroup::new(vec![
+            table_scan_splits: TableScanSplitGroup::from_table_source(
+                TableSourceId(fragment_id.0),
+                vec![
                     TableScanSplit::new("orders", 0).with_locations(["worker-local-0".to_owned()]),
                     TableScanSplit::new("orders", 1).with_locations(["worker-local-1".to_owned()]),
-                ]),
-            }],
+                ],
+            ),
             exchanges: vec![],
         };
 
@@ -457,7 +456,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![root, source],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![ExchangeNode::gather(source_fragment_id, root_fragment_id)],
         };
 
@@ -496,13 +495,13 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![source_fragment, target_fragment],
-            fragment_scan_splits: vec![FragmentScanSplits {
-                fragment_id: source_fragment_id,
-                table_scan_splits: TableScanSplitGroup::new(vec![
+            table_scan_splits: TableScanSplitGroup::from_table_source(
+                TableSourceId(source_fragment_id.0),
+                vec![
                     TableScanSplit::new("orders", 0),
                     TableScanSplit::new("orders", 1),
-                ]),
-            }],
+                ],
+            ),
             exchanges: vec![ExchangeNode::gather(source_fragment_id, target_fragment_id)],
         };
 
@@ -540,7 +539,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![fragment],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -561,7 +560,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![fragment],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -583,7 +582,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![fragment],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -629,7 +628,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![build_fragment()],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -653,7 +652,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![build_table_scan_fragment(&table)],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -677,7 +676,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![build_table_scan_fragment(&table)],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![],
         };
 
@@ -881,7 +880,7 @@ mod tests {
             command_tag: CommandTag::Select,
             returns_rows: true,
             fragments: vec![source_fragment, target_fragment],
-            fragment_scan_splits: vec![],
+            table_scan_splits: TableScanSplitGroup::default(),
             exchanges: vec![ExchangeNode::gather(source_fragment_id, PlanFragmentId(1))],
         };
 
