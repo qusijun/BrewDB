@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 
-use brewdb_benchmark::benchmark::{BenchmarkReport, QueryRunResult, render_report};
+use brewdb_benchmark::benchmark::{
+    BenchmarkReport, QueryRunResult, SqlExecutionOutput, SqlExecutor, render_report,
+};
 use brewdb_benchmark::benchmark::{
     BenchmarkRunConfig, PaimonFileFormat, Workload, load_queries, load_queries_from_dir,
-    split_sql_statements,
+    run_benchmark_with_executor, split_sql_statements,
 };
 use brewdb_benchmark::cli::{Command, parse_args};
 use brewdb_benchmark::clickbench::{
@@ -82,7 +83,6 @@ fn parse_run_tpch_command() {
             query_file: None,
             iterations: 3,
             setup: true,
-            brewdb_bin: default_brewdb_bin(),
             config_path: None,
             paimon_file_format: PaimonFileFormat::Parquet,
         })
@@ -114,7 +114,6 @@ fn parse_run_accepts_paimon_file_format() {
             query_file: None,
             iterations: 1,
             setup: true,
-            brewdb_bin: default_brewdb_bin(),
             config_path: None,
             paimon_file_format: PaimonFileFormat::Vortex,
         })
@@ -153,7 +152,6 @@ fn parse_run_tpch_query_file_command() {
             query_file: Some(PathBuf::from("/tmp/q01.sql")),
             iterations: 1,
             setup: false,
-            brewdb_bin: default_brewdb_bin(),
             config_path: None,
             paimon_file_format: PaimonFileFormat::Parquet,
         })
@@ -166,6 +164,14 @@ fn parse_run_rejects_brewdbd_bin_command() {
         parse_args(["benchmark", "run", "tpch", "--brewdbd-bin", "/tmp/brewdbd"]).unwrap_err();
 
     assert!(error.contains("unknown run flag `--brewdbd-bin`"));
+}
+
+#[test]
+fn parse_run_rejects_obsolete_brewdb_bin_command() {
+    let error =
+        parse_args(["benchmark", "run", "tpch", "--brewdb-bin", "/tmp/brewdb"]).unwrap_err();
+
+    assert!(error.contains("unknown run flag `--brewdb-bin`"));
 }
 
 #[test]
@@ -250,7 +256,6 @@ fn tpch_queries_are_loaded_with_deterministic_parameters() {
         query_file: None,
         iterations: 1,
         setup: false,
-        brewdb_bin: default_brewdb_bin(),
         config_path: None,
         paimon_file_format: PaimonFileFormat::Parquet,
     };
@@ -296,7 +301,6 @@ fn clickbench_queries_are_loaded_from_builtin_directory() {
         query_file: None,
         iterations: 1,
         setup: false,
-        brewdb_bin: default_brewdb_bin(),
         config_path: None,
         paimon_file_format: PaimonFileFormat::Parquet,
     };
@@ -384,28 +388,61 @@ fn split_sql_statements_splits_file_backed_setup_sql() {
 
 #[test]
 fn run_benchmark_fails_when_setup_statement_fails() {
-    let bin_dir = fresh_dir("failing_brewdb_bin");
-    let brewdb_bin = bin_dir.join("brewdb");
-    write_fake_brewdb_script(&brewdb_bin, 1, "setup failed");
+    let mut executor = RecordingSqlExecutor::failing_on("drop table", "setup failed");
 
-    let error = brewdb_benchmark::benchmark::run_benchmark(&BenchmarkRunConfig {
-        workload: Workload::Tpch,
-        host: "127.0.0.1".to_owned(),
-        port: 5432,
-        database: "brewdb".to_owned(),
-        data_dir: Some(PathBuf::from("/tmp/tpch")),
-        queries_dir: None,
-        query_file: Some(PathBuf::from("benchmark/tpch/queries/q01.sql")),
-        iterations: 1,
-        setup: true,
-        brewdb_bin,
-        config_path: None,
-        paimon_file_format: PaimonFileFormat::Parquet,
-    })
+    let error = run_benchmark_with_executor(
+        &BenchmarkRunConfig {
+            workload: Workload::Tpch,
+            host: "127.0.0.1".to_owned(),
+            port: 5432,
+            database: "brewdb".to_owned(),
+            data_dir: Some(PathBuf::from("/tmp/tpch")),
+            queries_dir: None,
+            query_file: Some(PathBuf::from("benchmark/tpch/queries/q01.sql")),
+            iterations: 1,
+            setup: true,
+            config_path: None,
+            paimon_file_format: PaimonFileFormat::Parquet,
+        },
+        &mut executor,
+    )
     .unwrap_err();
 
     assert!(error.to_string().contains("setup statement 1 failed"));
     assert!(error.to_string().contains("setup failed"));
+}
+
+#[test]
+fn run_benchmark_executes_queries_through_one_executor() {
+    let query_dir = fresh_dir("single_executor_queries");
+    fs::write(query_dir.join("q01.sql"), "select 1").unwrap();
+    fs::write(query_dir.join("q02.sql"), "select 2").unwrap();
+    let mut executor = RecordingSqlExecutor::new();
+
+    let report = run_benchmark_with_executor(
+        &BenchmarkRunConfig {
+            workload: Workload::ClickBench,
+            host: "127.0.0.1".to_owned(),
+            port: 5432,
+            database: "brewdb".to_owned(),
+            data_dir: None,
+            queries_dir: Some(query_dir.to_path_buf()),
+            query_file: None,
+            iterations: 2,
+            setup: false,
+            config_path: None,
+            paimon_file_format: PaimonFileFormat::Parquet,
+        },
+        &mut executor,
+    )
+    .unwrap();
+
+    assert_eq!(
+        executor.sql,
+        ["select 1", "select 2", "select 1", "select 2"]
+    );
+    assert_eq!(report.results.len(), 4);
+    assert!(report.results.iter().all(|result| result.success));
 }
 
 #[test]
@@ -487,23 +524,45 @@ fn fresh_dir(name: &str) -> TestDir {
     TestDir::new(&format!("brewdb-benchmark-{name}"))
 }
 
-fn default_brewdb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("brewdb")
+#[derive(Default)]
+struct RecordingSqlExecutor {
+    sql: Vec<String>,
+    fail_on: Option<String>,
+    fail_message: String,
 }
 
-fn write_fake_brewdb_script(path: &Path, exit_code: i32, stderr: &str) {
-    fs::write(
-        path,
-        format!("#!/bin/sh\necho {stderr:?} >&2\nexit {exit_code}\n"),
-    )
-    .unwrap();
-    ProcessCommand::new("chmod")
-        .arg("+x")
-        .arg(path)
-        .status()
-        .unwrap();
+impl RecordingSqlExecutor {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn failing_on(prefix: &str, message: &str) -> Self {
+        Self {
+            sql: Vec::new(),
+            fail_on: Some(prefix.to_owned()),
+            fail_message: message.to_owned(),
+        }
+    }
+}
+
+impl SqlExecutor for RecordingSqlExecutor {
+    fn execute(&mut self, sql: &str) -> std::io::Result<SqlExecutionOutput> {
+        self.sql.push(sql.to_owned());
+        if self
+            .fail_on
+            .as_ref()
+            .is_some_and(|prefix| sql.starts_with(prefix))
+        {
+            return Ok(SqlExecutionOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: self.fail_message.clone(),
+            });
+        }
+        Ok(SqlExecutionOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
 }
