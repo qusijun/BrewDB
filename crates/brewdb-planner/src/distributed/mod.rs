@@ -5,5 +5,5 @@ pub mod fragment;
 
 pub use fragment::{
     DistributedFragmentPlan, DistributedFragmentPlanner, DistributedPlanRoot, FragmentPlanner,
-    FragmentScanSplits, PlanFragment, PlanFragmentId, PlanFragmentKind, StandaloneFragmentPlanner,
+    PlanFragment, PlanFragmentId, PlanFragmentKind, StandaloneFragmentPlanner,
 };

@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use crate::planner::distributed::{FragmentScanSplits, PlanFragment, PlanFragmentKind};
+use crate::planner::distributed::{PlanFragment, PlanFragmentKind};
 use uuid::Uuid;
 
 use crate::runtime::FragmentInstance;
 use crate::runtime::errors::FragmentSchedulerError;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::storage::{TableScanSplitGroup, TableSourceId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerInfo {
@@ -64,7 +65,7 @@ pub trait FragmentScheduler {
     fn schedule(
         &self,
         execution_graph: ExecutionGraph,
-        fragment_scan_splits: Vec<FragmentScanSplits>,
+        table_scan_splits: TableScanSplitGroup,
         resource_manager: &dyn ResourceManager,
     ) -> Result<ExecutionGraph, FragmentSchedulerError>;
 }
@@ -86,17 +87,13 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
     fn schedule(
         &self,
         mut execution_graph: ExecutionGraph,
-        fragment_scan_splits: Vec<FragmentScanSplits>,
+        table_scan_splits: TableScanSplitGroup,
         resource_manager: &dyn ResourceManager,
     ) -> Result<ExecutionGraph, FragmentSchedulerError> {
         if execution_graph.fragments.is_empty() {
             return Err(FragmentSchedulerError::EmptyPlan);
         }
         let workers = resource_manager.workers();
-        let split_assignments = fragment_scan_splits
-            .into_iter()
-            .map(|splits| (splits.fragment_id, splits.table_scan_splits))
-            .collect::<std::collections::HashMap<_, _>>();
         execution_graph.fragments.sort_by_key(|execution_fragment| {
             match execution_fragment.fragment.kind {
                 PlanFragmentKind::Source => 0u8,
@@ -108,19 +105,17 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
         let mut instances = Vec::new();
         for execution_fragment in &execution_graph.fragments {
             let fragment_id = execution_fragment.fragment_id();
-            let assigned_splits = split_assignments
-                .get(&fragment_id)
-                .cloned()
+            let assigned_splits = table_scan_splits
+                .splits_for_table_source(TableSourceId(fragment_id.0))
                 .unwrap_or_default();
             let assigned_instances = if execution_fragment.fragment.kind == PlanFragmentKind::Source
                 && !assigned_splits.is_empty()
             {
                 assigned_splits
-                    .into_only_table_source_splits()
-                    .unwrap_or_default()
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(Some)
-                    .collect()
+                    .collect::<Vec<_>>()
             } else {
                 vec![None]
             };
@@ -147,12 +142,10 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
 mod tests {
     use std::sync::Arc;
 
-    use crate::planner::distributed::{
-        FragmentScanSplits, PlanFragment, PlanFragmentId, PlanFragmentKind,
-    };
+    use crate::planner::distributed::{PlanFragment, PlanFragmentId, PlanFragmentKind};
 
     use crate::common::context::QueryContext;
-    use crate::storage::{TableScanSplit, TableScanSplitGroup};
+    use crate::storage::{TableScanSplit, TableScanSplitGroup, TableSourceId};
 
     use crate::runtime::execution_graph::ExecutionGraph;
 
@@ -171,7 +164,7 @@ mod tests {
                     fragments: vec![],
                     instances: vec![],
                 },
-                vec![],
+                TableScanSplitGroup::default(),
                 &StaticResourceManager::new(vec![WorkerInfo {
                     worker_id: uuid::Uuid::new_v4(),
                     endpoint: "rpc://worker-1".to_owned(),
@@ -200,7 +193,7 @@ mod tests {
         let scheduled = scheduler
             .schedule(
                 execution_graph,
-                vec![],
+                TableScanSplitGroup::default(),
                 &StaticResourceManager::new(vec![WorkerInfo {
                     worker_id,
                     endpoint: "rpc://worker-1".to_owned(),
@@ -215,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_splits_source_fragment_scan_splits_into_pipeline_instances() {
+    fn scheduler_splits_source_table_scan_splits_into_pipeline_instances() {
         let fragment_id = PlanFragmentId(7);
         let scheduler = AllAtOnceFragmentScheduler {
             worker_selector: Arc::new(FirstWorkerSelector),
@@ -233,14 +226,14 @@ mod tests {
         let scheduled = scheduler
             .schedule(
                 execution_graph,
-                vec![FragmentScanSplits {
-                    fragment_id,
-                    table_scan_splits: TableScanSplitGroup::new(vec![
+                TableScanSplitGroup::from_table_source(
+                    TableSourceId(fragment_id.0),
+                    vec![
                         TableScanSplit::new("orders", 0),
                         TableScanSplit::new("orders", 1),
                         TableScanSplit::new("orders", 2),
-                    ]),
-                }],
+                    ],
+                ),
                 &StaticResourceManager::new(vec![WorkerInfo {
                     worker_id: uuid::Uuid::new_v4(),
                     endpoint: "rpc://worker-1".to_owned(),

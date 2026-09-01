@@ -15,7 +15,7 @@ use crate::runtime::exchange::{
 };
 use crate::runtime::exchange_service::{ExchangePageSink, ResultBatchSink};
 use crate::runtime::fragment::FragmentInstance;
-use crate::storage::StorageEngine;
+use crate::storage::{StorageEngine, TableScanSplitGroup};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
@@ -98,6 +98,18 @@ impl FragmentExecutorError {
 #[derive(Clone)]
 pub struct FragmentExecutionEnvelope {
     pub instance: FragmentInstance,
+    /// True when this envelope executes the single-fragment standalone path.
+    ///
+    /// Standalone keeps all table scans inside one root fragment and therefore
+    /// prepares scan providers from the query-level split group. Distributed
+    /// execution prepares providers from the single split assigned to the
+    /// fragment instance.
+    pub standalone: bool,
+    /// Query-level scan split candidates produced by the planner.
+    ///
+    /// Workers use this only when `standalone` is true. Distributed workers use
+    /// `FragmentInstance::table_scan_split` instead.
+    pub table_scan_splits: TableScanSplitGroup,
     pub exchange_page_sink: Option<Arc<dyn ExchangePageSink>>,
     pub result_batch_sink: Option<Arc<dyn ResultBatchSink>>,
 }
@@ -106,9 +118,21 @@ impl FragmentExecutionEnvelope {
     pub fn new(instance: FragmentInstance) -> Self {
         Self {
             instance,
+            standalone: false,
+            table_scan_splits: TableScanSplitGroup::default(),
             exchange_page_sink: None,
             result_batch_sink: None,
         }
+    }
+
+    pub fn with_standalone(mut self, standalone: bool) -> Self {
+        self.standalone = standalone;
+        self
+    }
+
+    pub fn with_table_scan_splits(mut self, table_scan_splits: TableScanSplitGroup) -> Self {
+        self.table_scan_splits = table_scan_splits;
+        self
     }
 
     pub fn with_exchange_page_sink(
@@ -538,12 +562,25 @@ impl FragmentService for LocalFragmentExecutor {
         _worker_id: Uuid,
         envelope: FragmentExecutionEnvelope,
     ) -> Result<FragmentExecutionStatus, crate::runtime::RpcError> {
-        let FragmentExecutionEnvelope { instance, .. } = &envelope;
+        let FragmentExecutionEnvelope {
+            instance,
+            standalone,
+            table_scan_splits,
+            ..
+        } = &envelope;
+        let local_scan_assignment = if *standalone {
+            Some(table_scan_splits.clone()).filter(|splits| !splits.is_empty())
+        } else {
+            instance
+                .table_scan_split
+                .clone()
+                .map(|split| TableScanSplitGroup::new(vec![split]))
+        };
         let prepared = LocalFragmentPlan::prepare(
             instance.query_context.clone(),
             instance.execution_fragment.fragment.clone(),
             instance.table_catalogs.clone(),
-            instance.table_scan_split.clone(),
+            local_scan_assignment,
             Arc::clone(&self.storage),
         )
         .map_err(|err| {
