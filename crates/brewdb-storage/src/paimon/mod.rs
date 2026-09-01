@@ -379,7 +379,7 @@ mod tests {
             }
 
             let assigned_provider = engine
-                .get_table_provider(splits.only_table_source_splits().unwrap().first())
+                .get_table_provider(splits.only_table_source_splits())
                 .unwrap();
             let assigned_ctx = SessionContext::new();
             assigned_ctx
@@ -435,26 +435,11 @@ mod tests {
                 .collect()
                 .await
                 .unwrap();
-            let scan = datafusion_expr::TableScan::try_new(
-                datafusion_common::TableReference::bare("orders"),
-                datafusion::datasource::provider_as_source(provider),
-                None,
-                vec![],
-                None,
-            )
-            .unwrap();
-            let splits = engine.plan_scan(&scan).unwrap();
-            let assigned_provider = engine
-                .get_table_provider(splits.only_table_source_splits().unwrap().first())
-                .unwrap();
-            let predicate = Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(col("id")),
-                Operator::Eq,
-                Box::new(lit(2_i32)),
-            ));
-
-            let exec = assigned_provider
-                .scan(&ctx.state(), None, &[predicate], None)
+            let exec = ctx
+                .sql("select * from orders where id = 2")
+                .await
+                .unwrap()
+                .create_physical_plan()
                 .await
                 .unwrap();
             let batches = collect(exec, ctx.task_ctx()).await.unwrap();
@@ -517,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn paimon_table_provider_scan_uses_paimon_scan_exec() {
+    fn paimon_assigned_split_provider_uses_paimon_native_scan_exec() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let factory = PaimonTableEngineFactory;
@@ -546,9 +531,28 @@ mod tests {
                 .collect()
                 .await
                 .unwrap();
-            let exec = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+            let scan = datafusion_expr::TableScan::try_new(
+                datafusion_common::TableReference::bare("orders"),
+                datafusion::datasource::provider_as_source(provider),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+            let splits = engine.plan_scan(&scan).unwrap();
+            let splits = splits.only_table_source_splits().unwrap();
+            let assigned_provider = engine.get_table_provider(Some(splits)).unwrap();
+            let exec = assigned_provider
+                .scan(&ctx.state(), None, &[], None)
+                .await
+                .unwrap();
+            let display = format!(
+                "{}",
+                datafusion::physical_plan::displayable(exec.as_ref()).indent(false)
+            );
 
-            assert_eq!(exec.name(), "PaimonScanExec");
+            assert_eq!(exec.name(), "PaimonNativeScanExec");
+            assert!(display.contains("DataSourceExec:"));
             assert_eq!(exec.output_partitioning().partition_count(), 1);
 
             let _ = fs::remove_dir_all(&table.table_location);

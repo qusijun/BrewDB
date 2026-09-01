@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::storage::StorageError;
+use crate::storage::{StorageError, TableScanSplit};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::SchemaExt;
@@ -10,32 +10,31 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp}
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::empty::EmptyExec;
-use paimon::DataSplit;
 use paimon::spec::{Predicate, TableSchema as PaimonTableSchema};
 use paimon::table::Table as PaimonTable;
 
 use super::engine::storage_scan_error;
 use super::predicate::{filter_predicates, filter_pushdown_status};
-use super::reader::PaimonScanExec;
+use super::reader::{PaimonNativeScanExec, PaimonScanExec};
 use super::writer::{PaimonCommitExec, PaimonSinkExec};
 
 #[derive(Debug)]
 pub struct PaimonTableProvider {
     table: PaimonTable,
     schema: SchemaRef,
-    planned_splits: Option<Vec<DataSplit>>,
+    scan_splits: Option<Vec<TableScanSplit>>,
 }
 
 impl PaimonTableProvider {
     pub fn try_new(
         table: PaimonTable,
-        planned_splits: Option<Vec<DataSplit>>,
+        scan_splits: Option<Vec<TableScanSplit>>,
     ) -> Result<Self, StorageError> {
         let schema = paimon_arrow_schema(table.schema()).map_err(storage_scan_error)?;
         Ok(Self {
             table,
             schema,
-            planned_splits,
+            scan_splits,
         })
     }
 }
@@ -57,31 +56,43 @@ impl TableProvider for PaimonTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let splits = match &self.planned_splits {
-            Some(splits) => splits.clone(),
-            None => {
-                let mut read_builder = self.table.new_read_builder();
-                if let Some(projection) = projection {
-                    let projection = projection
-                        .iter()
-                        .map(|index| self.schema.field(*index).name().as_str())
-                        .collect::<Vec<_>>();
-                    read_builder.with_projection(&projection);
-                }
-                let translated_filters = filter_predicates(self.table.schema().fields(), filters);
-                if !translated_filters.is_empty() {
-                    read_builder.with_filter(Predicate::and(translated_filters));
-                }
-                if let Some(limit) = limit {
-                    read_builder.with_limit(limit);
-                }
-                let plan = read_builder
-                    .new_scan()
-                    .plan()
-                    .await
-                    .map_err(datafusion_scan_error)?;
-                plan.splits().to_vec()
+        if let Some(scan_splits) = &self.scan_splits {
+            if scan_splits.is_empty() || scan_splits.iter().all(|split| split.data_files.is_empty())
+            {
+                let schema = project_schema(&self.schema, projection)?;
+                return Ok(Arc::new(EmptyExec::new(schema)));
             }
+            return PaimonNativeScanExec::try_new(
+                Arc::clone(&self.schema),
+                scan_splits,
+                projection,
+                state.config_options().execution.target_partitions,
+                limit,
+            );
+        }
+
+        let splits = {
+            let mut read_builder = self.table.new_read_builder();
+            if let Some(projection) = projection {
+                let projection = projection
+                    .iter()
+                    .map(|index| self.schema.field(*index).name().as_str())
+                    .collect::<Vec<_>>();
+                read_builder.with_projection(&projection);
+            }
+            let translated_filters = filter_predicates(self.table.schema().fields(), filters);
+            if !translated_filters.is_empty() {
+                read_builder.with_filter(Predicate::and(translated_filters));
+            }
+            if let Some(limit) = limit {
+                read_builder.with_limit(limit);
+            }
+            let plan = read_builder
+                .new_scan()
+                .plan()
+                .await
+                .map_err(datafusion_scan_error)?;
+            plan.splits().to_vec()
         };
         if splits.is_empty() {
             let schema = project_schema(&self.schema, projection)?;

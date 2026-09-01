@@ -40,7 +40,7 @@ pub enum DistributedPlanRoot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Planner output that describes fragment boundaries, exchange topology, and
-/// scan split candidates.
+/// scan split assignment inputs.
 ///
 /// Runtime scheduling state such as worker placement, fragment instances, and
 /// concrete scan split assignment belongs to the runtime execution graph, not
@@ -52,16 +52,16 @@ pub struct DistributedFragmentPlan {
     pub command_tag: CommandTag,
     pub returns_rows: bool,
     pub fragments: Vec<PlanFragment>,
-    /// Planner-produced scan split candidates for the whole query.
+    /// Scan split assignment inputs for the whole query.
     ///
     /// The group is keyed by the stable table-scan/source id used while local
-    /// table scans are rewritten:
+    /// table scans are rewritten. The scheduler consumes each table-source
+    /// entry as the ordered assignment list for that source:
     ///
-    /// - Distributed source fragments store their scan split candidates under
-    ///   `TableSourceId(fragment_id)`, so the scheduler can assign one split
-    ///   to each source `FragmentInstance`.
-    /// - Standalone root fragments keep their table scan ids local to the root
-    ///   plan and pass the whole group directly to local planning.
+    /// - Distributed source fragments fan the assigned splits out to
+    ///   individual source `FragmentInstance`s.
+    /// - Standalone root fragments keep the whole group local and pass it to
+    ///   local planning.
     pub table_scan_splits: TableScanSplitGroup,
     pub exchanges: Vec<ExchangeNode>,
 }

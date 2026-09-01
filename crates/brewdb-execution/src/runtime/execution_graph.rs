@@ -425,12 +425,10 @@ mod tests {
             .build_fragment_instances(distributed_plan)
             .unwrap();
 
-        assert_eq!(instances.len(), 2);
-        assert_eq!(
-            instances[0].table_scan_split.as_ref().unwrap().table_name,
-            "orders"
-        );
-        assert_eq!(instances[1].table_scan_split.as_ref().unwrap().ordinal, 1);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].table_scan_splits.len(), 2);
+        assert_eq!(instances[0].table_scan_splits[0].table_name, "orders");
+        assert_eq!(instances[0].table_scan_splits[1].ordinal, 1);
     }
 
     #[test]
@@ -517,15 +515,10 @@ mod tests {
             .find(|instance| instance.fragment_id() == target_fragment_id)
             .expect("root instance must exist");
 
-        assert_eq!(source_instances.len(), 2);
-        assert!(source_instances.iter().all(|instance| {
-            instance.table_scan_split.is_some() && instance.exchange_outputs.len() == 1
-        }));
-        assert_eq!(root_instance.exchange_inputs.len(), 2);
-        assert_ne!(
-            root_instance.exchange_inputs[0].exchange_id,
-            root_instance.exchange_inputs[1].exchange_id
-        );
+        assert_eq!(source_instances.len(), 1);
+        assert_eq!(source_instances[0].table_scan_splits.len(), 2);
+        assert_eq!(source_instances[0].exchange_outputs.len(), 1);
+        assert_eq!(root_instance.exchange_inputs.len(), 1);
     }
 
     #[test]

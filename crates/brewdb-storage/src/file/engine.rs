@@ -213,11 +213,12 @@ impl TableEngine for FileTableEngine {
 
     fn get_table_provider(
         &self,
-        split: Option<&TableScanSplit>,
+        splits: Option<&[TableScanSplit]>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider_for_paths(
-            split
+            splits
                 .into_iter()
+                .flat_map(|splits| splits.iter())
                 .flat_map(|split| split.locations.iter().cloned())
                 .collect(),
         )
@@ -673,13 +674,8 @@ mod tests {
             )
             .unwrap();
             let provider = engine
-                .get_table_provider(Some(
-                    &TableScanSplit::new("source", 0).with_locations([dir
-                        .path()
-                        .join("part-2.csv")
-                        .display()
-                        .to_string()]),
-                ))
+                .get_table_provider(Some(&[TableScanSplit::new("source", 0)
+                    .with_locations([dir.path().join("part-2.csv").display().to_string()])]))
                 .unwrap();
             let exec = provider
                 .scan(&SessionContext::new().state(), None, &[], None)
@@ -714,7 +710,7 @@ mod tests {
             let splits = engine.plan_scan(&scan).unwrap();
             let only_splits = splits.only_table_source_splits().unwrap();
             assert_eq!(only_splits.len(), 1);
-            let provider = engine.get_table_provider(only_splits.first()).unwrap();
+            let provider = engine.get_table_provider(Some(only_splits)).unwrap();
             let exec = provider
                 .scan(&SessionContext::new().state(), None, &[], None)
                 .await

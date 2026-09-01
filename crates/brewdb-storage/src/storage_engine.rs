@@ -28,7 +28,7 @@ pub trait TableEngine: Send + Sync {
     /// Coarse-grained pruning and split generation belong to [`Self::plan_scan`].
     fn get_table_provider(
         &self,
-        _split: Option<&TableScanSplit>,
+        _splits: Option<&[TableScanSplit]>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
         self.table_provider()
     }

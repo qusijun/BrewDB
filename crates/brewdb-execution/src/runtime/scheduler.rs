@@ -108,30 +108,22 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
             let assigned_splits = table_scan_splits
                 .splits_for_table_source(TableSourceId(fragment_id.0))
                 .unwrap_or_default();
-            let assigned_instances = if execution_fragment.fragment.kind == PlanFragmentKind::Source
-                && !assigned_splits.is_empty()
+            let worker = self
+                .worker_selector
+                .select_worker(&workers, &execution_fragment.fragment)?;
+            let table_scan_splits = if execution_fragment.fragment.kind == PlanFragmentKind::Source
             {
-                assigned_splits
-                    .iter()
-                    .cloned()
-                    .map(Some)
-                    .collect::<Vec<_>>()
+                assigned_splits.to_vec()
             } else {
-                vec![None]
+                Vec::new()
             };
-
-            for table_scan_split in assigned_instances {
-                let worker = self
-                    .worker_selector
-                    .select_worker(&workers, &execution_fragment.fragment)?;
-                instances.push(FragmentInstance::scheduled(
-                    Uuid::new_v4(),
-                    execution_fragment.clone(),
-                    worker.worker_id,
-                    worker.endpoint,
-                    table_scan_split,
-                ));
-            }
+            instances.push(FragmentInstance::scheduled(
+                Uuid::new_v4(),
+                execution_fragment.clone(),
+                worker.worker_id,
+                worker.endpoint,
+                table_scan_splits,
+            ));
         }
         execution_graph.instances = instances;
         Ok(execution_graph)
@@ -241,12 +233,13 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(scheduled.instances.len(), 3);
+        assert_eq!(scheduled.instances.len(), 1);
+        assert_eq!(scheduled.instances[0].table_scan_splits.len(), 3);
         assert_eq!(
-            scheduled
-                .instances
+            scheduled.instances[0]
+                .table_scan_splits
                 .iter()
-                .map(|instance| instance.table_scan_split.as_ref().unwrap().ordinal)
+                .map(|split| split.ordinal)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );

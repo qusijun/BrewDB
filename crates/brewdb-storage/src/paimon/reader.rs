@@ -1,12 +1,20 @@
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use crate::storage::TableScanSplit;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::Result as DataFusionResult;
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, ParquetSource};
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -19,6 +27,131 @@ use paimon::table::Table as PaimonTable;
 use paimon::{DataSplit, DataSplitBuilder};
 
 use super::table_provider::datafusion_scan_error;
+
+#[derive(Debug)]
+pub(crate) struct PaimonNativeScanExec {
+    inner: Arc<dyn ExecutionPlan>,
+}
+
+impl PaimonNativeScanExec {
+    pub(crate) fn try_new(
+        schema: SchemaRef,
+        scan_splits: &[TableScanSplit],
+        projection: Option<&Vec<usize>>,
+        target_partitions: usize,
+        limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let inner =
+            Self::build_parquet_exec(schema, scan_splits, projection, target_partitions, limit)?;
+        Ok(Arc::new(Self { inner }) as Arc<dyn ExecutionPlan>)
+    }
+
+    fn build_parquet_exec(
+        schema: SchemaRef,
+        scan_splits: &[TableScanSplit],
+        projection: Option<&Vec<usize>>,
+        target_partitions: usize,
+        limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let mut source = ParquetSource::new(Arc::clone(&schema));
+        source = source
+            .with_pushdown_filters(true)
+            .with_reorder_filters(true);
+
+        let file_groups = build_file_groups(scan_splits, target_partitions);
+        let mut builder =
+            FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), Arc::new(source))
+                .with_file_groups(file_groups)
+                .with_limit(limit);
+        if let Some(projection) = projection.cloned() {
+            builder = builder.with_projection_indices(Some(projection))?;
+        }
+        Ok(DataSourceExec::from_data_source(builder.build()))
+    }
+}
+
+impl ExecutionPlan for PaimonNativeScanExec {
+    fn name(&self) -> &str {
+        "PaimonNativeScanExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.inner.properties()
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.inner.metrics()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        self.inner.children()
+    }
+
+    fn try_swapping_with_projection(
+        &self,
+        projection: &datafusion::physical_plan::projection::ProjectionExec,
+    ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+        self.inner
+            .clone()
+            .try_swapping_with_projection(projection)
+            .map(|maybe_plan| {
+                maybe_plan.map(|inner| Arc::new(Self { inner }) as Arc<dyn ExecutionPlan>)
+            })
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        config: &datafusion_common::config::ConfigOptions,
+    ) -> DataFusionResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        self.inner
+            .handle_child_pushdown_result(phase, child_pushdown_result, config)
+            .map(|mut propagation| {
+                propagation.updated_node = propagation
+                    .updated_node
+                    .map(|inner| Arc::new(Self { inner }) as Arc<dyn ExecutionPlan>);
+                propagation
+            })
+    }
+
+    fn try_pushdown_sort(
+        &self,
+        order: &[datafusion::physical_expr_common::sort_expr::PhysicalSortExpr],
+    ) -> DataFusionResult<datafusion::physical_plan::SortOrderPushdownResult<Arc<dyn ExecutionPlan>>>
+    {
+        self.inner.clone().try_pushdown_sort(order).map(|result| {
+            result.try_map(|inner| {
+                Ok::<_, datafusion_common::DataFusionError>(
+                    Arc::new(Self { inner }) as Arc<dyn ExecutionPlan>
+                )
+            })
+        })?
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let inner = self.inner.clone().with_new_children(children)?;
+        Ok(Arc::new(Self { inner }) as Arc<dyn ExecutionPlan>)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        self.inner.execute(partition, context)
+    }
+}
+
+impl DisplayAs for PaimonNativeScanExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PaimonNativeScanExec: ")?;
+        self.inner.fmt_as(t, f)
+    }
+}
 #[derive(Debug)]
 pub(crate) struct PaimonScanExec {
     table: PaimonTable,
@@ -231,6 +364,15 @@ fn split_scan_work_units(split: DataSplit) -> Vec<DataSplit> {
                 .expect("single-file DataSplit must preserve source split invariants")
         })
         .collect()
+}
+
+fn build_file_groups(scan_splits: &[TableScanSplit], target_partitions: usize) -> Vec<FileGroup> {
+    let files = scan_splits
+        .iter()
+        .flat_map(|scan_split| scan_split.data_files.iter())
+        .map(|file| PartitionedFile::new(file.path.clone(), file.file_size.unwrap_or_default()))
+        .collect::<Vec<_>>();
+    FileGroup::new(files).split_files(target_partitions.max(1))
 }
 
 impl DisplayAs for PaimonScanExec {

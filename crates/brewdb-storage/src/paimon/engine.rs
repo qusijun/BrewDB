@@ -13,12 +13,12 @@ use crate::storage::{
 use datafusion::datasource::TableProvider;
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableScan};
+use paimon::DataSplit;
 use paimon::catalog::Identifier as PaimonIdentifier;
 use paimon::io::FileIO;
 use paimon::spec::Predicate;
-use paimon::spec::{BinaryRow, DataFileMeta, TableSchema as PaimonTableSchema};
+use paimon::spec::TableSchema as PaimonTableSchema;
 use paimon::table::Table as PaimonTable;
-use paimon::{DataSplit, DataSplitBuilder, DeletionFile, RowRange};
 
 use super::predicate::{filter_predicates, filter_pushdown_status};
 use super::table_provider::PaimonTableProvider;
@@ -114,15 +114,11 @@ impl TableEngine for PaimonTableEngine {
 
     fn get_table_provider(
         &self,
-        split: Option<&TableScanSplit>,
+        splits: Option<&[TableScanSplit]>,
     ) -> Result<Arc<dyn TableProvider>, StorageError> {
-        let planned_splits = split
-            .map(paimon_split_from_table_scan_split)
-            .transpose()?
-            .map(|split| vec![split]);
         Ok(Arc::new(PaimonTableProvider::try_new(
             self.build_table()?,
-            planned_splits,
+            splits.map(|splits| splits.to_vec()),
         )?))
     }
 
@@ -303,89 +299,6 @@ fn table_scan_split_from_paimon_split(
                 })
                 .collect(),
         ))
-}
-
-fn paimon_split_from_table_scan_split(split: &TableScanSplit) -> Result<DataSplit, StorageError> {
-    let snapshot_id = split
-        .snapshot_id
-        .ok_or_else(|| StorageError::TableScanFailed {
-            reason: format!("Paimon scan split {} misses snapshot id", split.split_id),
-        })?;
-    let partition = split
-        .partition
-        .as_ref()
-        .ok_or_else(|| StorageError::TableScanFailed {
-            reason: format!("Paimon scan split {} misses partition", split.split_id),
-        })
-        .and_then(|partition| {
-            BinaryRow::from_serialized_bytes(&partition.serialized_binary_row)
-                .map_err(storage_scan_error)
-        })?;
-    let bucket = split
-        .bucket
-        .as_ref()
-        .ok_or_else(|| StorageError::TableScanFailed {
-            reason: format!("Paimon scan split {} misses bucket", split.split_id),
-        })?;
-    let bucket_path = bucket
-        .path
-        .clone()
-        .ok_or_else(|| StorageError::TableScanFailed {
-            reason: format!("Paimon scan split {} misses bucket path", split.split_id),
-        })?;
-    let data_files = split
-        .data_files
-        .iter()
-        .map(data_file_meta_from_descriptor)
-        .collect::<Result<Vec<_>, StorageError>>()?;
-
-    let mut builder = DataSplitBuilder::new()
-        .with_snapshot(snapshot_id)
-        .with_partition(partition)
-        .with_bucket(bucket.bucket)
-        .with_bucket_path(bucket_path)
-        .with_total_buckets(bucket.total_buckets.unwrap_or(1))
-        .with_data_files(data_files);
-
-    if !split.deletion_files.is_empty() {
-        let mut deletion_files = vec![None; split.data_files.len()];
-        for deletion_file in &split.deletion_files {
-            let index = deletion_file.data_file_ordinal as usize;
-            if index < deletion_files.len() {
-                deletion_files[index] = Some(DeletionFile::new(
-                    deletion_file.path.clone(),
-                    deletion_file.offset,
-                    deletion_file.length,
-                    deletion_file
-                        .row_count
-                        .and_then(|value| i64::try_from(value).ok()),
-                ));
-            }
-        }
-        builder = builder.with_data_deletion_files(deletion_files);
-    }
-
-    if !split.row_ranges.is_empty() {
-        builder = builder.with_row_ranges(
-            split
-                .row_ranges
-                .iter()
-                .map(|range| RowRange::new(range.from, range.to))
-                .collect(),
-        );
-    }
-
-    builder.build().map_err(storage_scan_error)
-}
-
-fn data_file_meta_from_descriptor(file: &DataFileDescriptor) -> Result<DataFileMeta, StorageError> {
-    let metadata =
-        file.serialized_metadata
-            .as_deref()
-            .ok_or_else(|| StorageError::TableScanFailed {
-                reason: format!("Paimon data file {} misses serialized metadata", file.path),
-            })?;
-    serde_json::from_slice(metadata).map_err(storage_scan_error)
 }
 
 fn data_file_path(bucket_path: &str, file_name: &str) -> String {
