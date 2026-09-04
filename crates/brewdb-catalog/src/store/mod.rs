@@ -7,6 +7,7 @@ use crate::catalog::config::{CatalogConfig, CatalogStoreBackendKind};
 
 pub mod fdb;
 pub mod memory;
+pub mod rocksdb;
 
 pub fn open_catalog_store(config: &CatalogConfig) -> CatalogStore {
     match config.store_backend {
@@ -16,6 +17,10 @@ pub fn open_catalog_store(config: &CatalogConfig) -> CatalogStore {
         CatalogStoreBackendKind::Memory => {
             CatalogStore::new(Arc::new(memory::MemoryCatalogStoreBackend::default()))
         }
+        CatalogStoreBackendKind::Rocksdb => CatalogStore::new(Arc::new(
+            rocksdb::RocksdbCatalogStoreBackend::new(config.rocksdb_options())
+                .expect("rocksdb catalog store should open from catalog config"),
+        )),
     }
 }
 
@@ -32,6 +37,8 @@ mod tests {
         let store = open_catalog_store(&CatalogConfig {
             store_backend: CatalogStoreBackendKind::Memory,
             paimon_warehouse: String::new(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         });
 
         assert!(
@@ -47,6 +54,8 @@ mod tests {
         let store = open_catalog_store(&CatalogConfig {
             store_backend: CatalogStoreBackendKind::Fdb,
             paimon_warehouse: String::new(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         });
 
         let error = store
@@ -56,6 +65,23 @@ mod tests {
         assert_eq!(
             error,
             CatalogError::BackendNotImplemented { backend: "fdb" }
+        );
+    }
+
+    #[test]
+    fn store_factory_opens_rocksdb_backend() {
+        let store = open_catalog_store(&CatalogConfig {
+            store_backend: CatalogStoreBackendKind::Rocksdb,
+            paimon_warehouse: String::new(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
+        });
+
+        assert!(
+            store
+                .get_catalog(&CatalogPath::new("prod").unwrap())
+                .unwrap()
+                .is_none()
         );
     }
 }

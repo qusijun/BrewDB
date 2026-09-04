@@ -11,18 +11,19 @@ use std::collections::BTreeMap;
 use crate::common::table::TableSchema;
 use datafusion_common::Statistics;
 use datafusion_common::stats::Precision;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::catalog::path::{CatalogPath, DatabasePath, TablePath};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogMode {
     Managed,
     Mounted,
     Temporary,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum StorageKind {
     Paimon,
     Iceberg,
@@ -41,7 +42,7 @@ impl StorageKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CatalogRef {
     catalog_id: Uuid,
 }
@@ -56,7 +57,7 @@ impl CatalogRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DatabaseRef {
     database_id: Uuid,
 }
@@ -71,17 +72,17 @@ impl DatabaseRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TableRef {
     table_id: Uuid,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TableStatsHandle {
     table_id: Uuid,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TableSummary {
     pub row_count: Option<u64>,
     pub total_size_bytes: Option<u64>,
@@ -107,7 +108,7 @@ impl TableStatsHandle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub catalog_id: Uuid,
     pub path: CatalogPath,
@@ -148,7 +149,7 @@ impl CatalogEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseCatalogEntry {
     pub database_id: Uuid,
     pub catalog_id: Uuid,
@@ -182,7 +183,7 @@ impl DatabaseCatalogEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableCatalogEntry {
     pub table_id: Uuid,
     pub catalog_id: Uuid,

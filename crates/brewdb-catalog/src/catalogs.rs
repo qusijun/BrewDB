@@ -761,6 +761,8 @@ mod tests {
         let config = CatalogConfig {
             store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
             paimon_warehouse: "memory:/warehouse".to_owned(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         };
 
         let catalog = ManagedPaimonCatalog::new(entry, store, &config);

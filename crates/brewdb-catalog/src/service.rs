@@ -394,6 +394,8 @@ mod tests {
             crate::catalog::config::CatalogConfig {
                 store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
                 paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+                rocksdb_datadir: String::new(),
+                rocksdb_root: String::new(),
             },
             "prod",
         )
@@ -422,6 +424,8 @@ mod tests {
         let catalog_config = crate::catalog::config::CatalogConfig {
             store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
             paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         };
 
         CatalogService::with_config_and_default_managed_paimon_catalog(
@@ -463,6 +467,8 @@ mod tests {
         let catalog_config = crate::catalog::config::CatalogConfig {
             store_backend: crate::catalog::config::CatalogStoreBackendKind::Memory,
             paimon_warehouse: warehouse.path().to_string_lossy().into_owned(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         };
         let schema = TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]);
 

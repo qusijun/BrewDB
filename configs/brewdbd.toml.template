@@ -1,0 +1,30 @@
+# BrewDB server system config template.
+# Copy this file, fill in the values you need, then pass it to `brewdbd --config`.
+
+[brewdb.logging]
+level = "info"
+filter = ""
+path = ""
+rolling_policy = "never"
+format = "compact"
+include_target = true
+include_thread_names = true
+
+[brewdb.frontend]
+default_catalog = "prod"
+pgwire.listen_addr = "127.0.0.1:5432"
+
+[brewdb.catalog]
+store.backend = "memory"
+paimon.warehouse = ""
+
+[brewdb.catalog.rocksdb]
+datadir = ""
+root = "/brewdb/catalog"
+
+[brewdb.execution]
+max_threads = 8
+enable_spill = false
+
+# Statement-scoped option. Can be overridden per statement, not in the system file.
+# exchange_codec = "arrow_ipc"

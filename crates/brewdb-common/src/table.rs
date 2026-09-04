@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use datafusion_common::{Constraint, Constraints, TableReference};
+use serde::{Deserialize, Serialize};
 
 use crate::common::{column::ColumnField, errors::CommonError};
 
@@ -14,7 +15,7 @@ const BUCKET_COUNT_METADATA_KEY: &str = "brewdb.table.bucket_count";
 const BUCKET_FUNCTION_METADATA_KEY: &str = "brewdb.table.bucket_function";
 const CLUSTER_KEYS_METADATA_KEY: &str = "brewdb.table.cluster_keys";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableSchema {
     pub fields: Vec<ColumnField>,
     pub primary_keys: Vec<String>,

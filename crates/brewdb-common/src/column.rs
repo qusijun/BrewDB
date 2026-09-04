@@ -1,10 +1,11 @@
 //! Shared column metadata types.
 
 use arrow::datatypes::Field as ArrowField;
+use serde::{Deserialize, Serialize};
 
 use crate::common::{datatype::DataType, errors::CommonError};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnField {
     pub name: String,
     pub data_type: DataType,

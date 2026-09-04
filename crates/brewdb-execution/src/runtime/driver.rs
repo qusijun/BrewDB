@@ -15,7 +15,7 @@ use crate::runtime::coordinator::QueryCoordinator;
 use crate::runtime::errors::SqlDriverError;
 use crate::runtime::execution_graph::QueryExecutionHandle;
 use crate::runtime::profile::QueryProfiler;
-use tracing::{debug, info};
+use tracing::debug;
 
 pub(crate) fn sql_to_statement(sql: &str) -> Result<Statement, SqlDriverError> {
     let dialect = PostgreSqlDialect {};

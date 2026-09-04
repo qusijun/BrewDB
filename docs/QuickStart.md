@@ -35,6 +35,13 @@ cargo run -p brewdb-bin --bin brewdbd
 
 By default, the server listens on `127.0.0.1:5432`.
 
+To start with a config file, copy `configs/brewdbd.toml.template`, fill in the
+values you need, then run:
+
+```bash
+cargo run -p brewdb-bin --bin brewdbd -- --config configs/brewdbd.toml.template
+```
+
 ## Run SQL
 
 From another terminal, execute one query:

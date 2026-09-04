@@ -1,10 +1,11 @@
 //! Shared logical data types used across catalog, planning, and execution.
 
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use serde::{Deserialize, Serialize};
 
 use crate::common::errors::CommonError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
     Boolean,
     Int8,

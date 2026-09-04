@@ -48,4 +48,5 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json", "tracing-log"] }
 sqllogictest = "0.29.1"
 url = "2.5.8"
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+opendal = { version = "0.55.0", default-features = false, features = ["blocking", "services-rocksdb"] }

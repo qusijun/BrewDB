@@ -2,9 +2,11 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::catalog::errors::CatalogError;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CatalogPath {
     catalog: String,
 }
@@ -26,7 +28,7 @@ impl fmt::Display for CatalogPath {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DatabasePath {
     catalog: String,
     database: String,
@@ -64,7 +66,7 @@ impl fmt::Display for DatabasePath {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TablePath {
     catalog: String,
     database: String,
