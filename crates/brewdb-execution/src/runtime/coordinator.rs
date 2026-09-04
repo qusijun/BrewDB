@@ -1,5 +1,6 @@
 //! Query coordination for distributed execution.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::catalog::{
@@ -9,7 +10,7 @@ use crate::common::context::QueryContext;
 use crate::common::table::TableSchema;
 use crate::common::table::{primary_key_names, table_reference_parts};
 use crate::planner::CommandPlan;
-use crate::planner::distributed::{DistributedFragmentPlan, DistributedPlanRoot};
+use crate::planner::distributed::{DistributedFragmentPlan, DistributedPlanRoot, PlanFragmentId};
 use crate::planner::{Ddl, DropDatabase, LogicalPlanNode, Show};
 use crate::storage::StorageEngine;
 use arrow::array::{ArrayRef, StringArray};
@@ -18,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion_expr::{CreateExternalTable, DdlStatement, DropTable};
 
 use crate::execution::executor::FragmentExecutionEnvelope;
-use crate::runtime::FragmentInstance;
+use crate::planner::distributed::FragmentInstance;
 use crate::runtime::exchange_service::TransportExchangePageSink;
 use crate::runtime::execution_graph::{ExecutionGraph, QueryExecutionHandle, QueryOutput};
 use crate::runtime::profile::QueryProfiler;
@@ -227,20 +228,36 @@ impl QueryCoordinator {
         query_context: QueryContext,
         distributed_plan: DistributedFragmentPlan,
         instances: Vec<FragmentInstance>,
+        profiler: &mut QueryProfiler,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         let output = Arc::new(QueryOutput::default());
         let (command_tag, returns_rows) = Self::execution_result_shape(&distributed_plan);
         let table_scan_splits = distributed_plan.table_scan_splits.clone();
+        let fragment_topology_root = distributed_plan
+            .fragments
+            .iter()
+            .find(|fragment| fragment.kind == crate::planner::distributed::PlanFragmentKind::Root)
+            .map(|fragment| fragment.fragment_id);
+        let fragment_children = distributed_plan.exchanges.iter().fold(
+            BTreeMap::<PlanFragmentId, Vec<PlanFragmentId>>::new(),
+            |mut children, exchange| {
+                children
+                    .entry(exchange.target_fragment_id)
+                    .or_default()
+                    .push(exchange.source_fragment_id);
+                children
+            },
+        );
         let standalone = distributed_plan.exchanges.is_empty()
             && matches!(
                 distributed_plan.fragments.as_slice(),
                 [fragment]
                     if fragment.kind == crate::planner::distributed::PlanFragmentKind::Root
             );
-        let mut profiler = QueryProfiler::new(query_context.clone(), command_tag);
-        let execute_fragments_start = std::time::Instant::now();
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
+            let mut fragment_profiles =
+                BTreeMap::<PlanFragmentId, crate::runtime::profile::FragmentProfiler>::new();
             for instance in instances {
                 let transport_registry = Arc::clone(&self.transport_registry);
                 let table_scan_splits = table_scan_splits.clone();
@@ -283,24 +300,28 @@ impl QueryCoordinator {
             }
 
             for join in joins {
-                if let Some(profile) =
+                if let Some(fragment_profiler) =
                     join.join()
                         .map_err(|_| ExecutionRuntimeError::RuntimeInitFailed {
                             reason: "fragment instance execution thread panicked".to_owned(),
                         })??
                 {
-                    profiler.record_fragment(profile);
+                    fragment_profiles.insert(fragment_profiler.fragment_id, fragment_profiler);
                 }
+            }
+            if let Some(root_fragment_id) = fragment_topology_root {
+                if let Some(fragment_root) = build_fragment_tree(
+                    root_fragment_id,
+                    &fragment_children,
+                    &mut fragment_profiles,
+                ) {
+                    profiler.set_fragment_root(fragment_root);
+                }
+            } else if fragment_profiles.len() == 1 {
+                profiler.set_fragment_root(fragment_profiles.into_values().next().unwrap());
             }
             Ok::<_, ExecutionRuntimeError>(())
         })?;
-        profiler.record_phase(
-            "execute_fragments",
-            execute_fragments_start.elapsed().as_millis() as u64,
-        );
-
-        let profile = profiler.finish_success();
-        QueryProfiler::emit_json_profile(&profile);
 
         Ok(QueryExecutionHandle {
             query_context,
@@ -314,13 +335,31 @@ impl QueryCoordinator {
         &self,
         query_context: QueryContext,
         distributed_plan: DistributedFragmentPlan,
+        profiler: &mut QueryProfiler,
     ) -> Result<QueryExecutionHandle, ExecutionRuntimeError> {
         if let DistributedPlanRoot::Command(command) = distributed_plan.root.clone() {
             return self.execute_command(query_context, command);
         }
         let instances = self.build_fragment_instances(distributed_plan.clone())?;
-        self.execute_fragment_instances(query_context, distributed_plan, instances)
+        self.execute_fragment_instances(query_context, distributed_plan, instances, profiler)
     }
+}
+
+fn build_fragment_tree(
+    fragment_id: PlanFragmentId,
+    fragment_children: &BTreeMap<PlanFragmentId, Vec<PlanFragmentId>>,
+    fragment_profiles: &mut BTreeMap<PlanFragmentId, crate::runtime::profile::FragmentProfiler>,
+) -> Option<crate::runtime::profile::FragmentProfiler> {
+    let mut fragment = fragment_profiles.remove(&fragment_id)?;
+    let children = fragment_children
+        .get(&fragment_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|child_id| build_fragment_tree(child_id, fragment_children, fragment_profiles))
+        .collect::<Vec<_>>();
+    fragment.children = children;
+    Some(fragment)
 }
 
 fn execute_ddl(
@@ -497,10 +536,23 @@ mod tests {
     };
 
     use super::QueryCoordinator;
+    use crate::runtime::QueryProfiler;
     use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo};
     use crate::runtime::transport::FragmentTransport;
     use crate::runtime::{ExchangeDataPage, ExchangeId, RpcError};
     use crate::storage::{TableScanSplit, TableScanSplitGroup};
+
+    fn execute_query(
+        coordinator: &QueryCoordinator,
+        query_context: QueryContext,
+        plan: DistributedFragmentPlan,
+    ) -> Result<
+        crate::runtime::execution_graph::QueryExecutionHandle,
+        crate::runtime::ExecutionRuntimeError,
+    > {
+        let mut profiler = QueryProfiler::new(query_context.clone());
+        coordinator.execute_query(query_context, plan, &mut profiler)
+    }
 
     #[test]
     fn coordinator_builds_execution_graph_with_worker_and_scan_splits() {
@@ -578,7 +630,7 @@ mod tests {
             exchanges: vec![],
         };
 
-        coordinator.execute_query(query_context, plan).unwrap();
+        execute_query(&coordinator, query_context, plan).unwrap();
 
         let envelope = captured
             .lock()
@@ -631,7 +683,7 @@ mod tests {
             exchanges: vec![],
         };
 
-        coordinator.execute_query(query_context, plan).unwrap();
+        execute_query(&coordinator, query_context, plan).unwrap();
 
         let envelope = captured
             .lock()
@@ -655,15 +707,11 @@ mod tests {
             _worker_id: uuid::Uuid,
             envelope: FragmentExecutionEnvelope,
         ) -> Result<FragmentExecutionStatus, RpcError> {
-            let query_context = envelope.instance.query_context.clone();
             *self
                 .captured
                 .lock()
                 .expect("captured envelope lock must not be poisoned") = Some(envelope);
-            Ok(FragmentExecutionStatus {
-                query_context,
-                profile: None,
-            })
+            Ok(FragmentExecutionStatus { profile: None })
         }
 
         fn send_exchange_page(&self, _page: ExchangeDataPage) -> Result<(), RpcError> {

@@ -6,21 +6,22 @@ use std::sync::OnceLock;
 
 use crate::common::context::QueryContext;
 use crate::common::diagnostics::{DiagnosticContext, DiagnosticError, ErrorCode};
-use crate::common::profile::FragmentProfile;
 use crate::execution::exchange::WorkerExchangeService;
 use crate::planner::LocalFragmentPlan;
+use crate::planner::distributed::{FragmentInstance, PlanFragmentId};
 use crate::runtime::RpcError;
 use crate::runtime::exchange::{
     ExchangeBufferManager, ExchangeDataPage, ExchangeId, route_exchange_batch,
 };
 use crate::runtime::exchange_service::{ExchangePageSink, ResultBatchSink};
-use crate::runtime::fragment::FragmentInstance;
+use crate::runtime::profile::{FragmentMetricSet, FragmentMetrics, FragmentProfiler};
 use crate::storage::{StorageEngine, TableScanSplitGroup, TableSourceId};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
@@ -37,10 +38,39 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FragmentExecutionStatus {
+    pub profile: Option<FragmentProfiler>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FragmentExecutionContext {
     pub query_context: QueryContext,
-    pub profile: Option<FragmentProfile>,
+    pub profiler: FragmentProfiler,
+}
+
+impl FragmentExecutionContext {
+    pub fn new(
+        query_context: QueryContext,
+        fragment_instance_id: u32,
+        fragment_id: PlanFragmentId,
+        worker_id: Option<Uuid>,
+    ) -> Self {
+        let summary_metrics_view = FragmentMetricSet::new(MetricsSet::new());
+        let summary_metrics = FragmentMetrics::new(0, &summary_metrics_view);
+        Self {
+            query_context,
+            profiler: FragmentProfiler {
+                fragment_instance_id,
+                fragment_id,
+                worker_id: worker_id.map(|worker_id| worker_id.to_string()),
+                summary_metrics_view,
+                summary_metrics,
+                root_execution_plan: None,
+                children: vec![],
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -447,31 +477,28 @@ impl LocalFragmentExecutor {
 
     fn execute_streaming(
         &self,
-        query_context: QueryContext,
+        execution_context: &mut FragmentExecutionContext,
         logical_plan: DataFusionLogicalPlan,
         envelope: &FragmentExecutionEnvelope,
-    ) -> Result<FragmentProfile, crate::runtime::RpcError> {
-        let start = std::time::Instant::now();
-        let physical_plan = self.create_physical_plan(&query_context, logical_plan)?;
+    ) -> Result<(), crate::runtime::RpcError> {
+        let physical_plan =
+            self.create_physical_plan(&execution_context.query_context, logical_plan)?;
         let output = FragmentOutputSinks {
             exchange_outputs: envelope.instance.exchange_outputs.clone(),
             exchange_page_sink: envelope.exchange_page_sink.clone(),
             result_batch_sink: envelope.result_batch_sink.clone(),
             exchange_buffers: Arc::clone(&self.exchange_buffers),
         };
+        let fragment_elapsed = execution_context
+            .profiler
+            .summary_metrics
+            .fragment_elapsed
+            .timer();
         let physical_plan = self.execute_physical_plan_streaming(physical_plan, output)?;
-        Ok(FragmentProfile {
-            fragment_id: format!("{:?}", envelope.instance.fragment_id()),
-            worker_id: Some(envelope.instance.worker_id.to_string()),
-            kind: format!("{:?}", envelope.instance.fragment().kind),
-            elapsed_ms: start.elapsed().as_millis() as u64,
-            metrics: vec![],
-            operators: vec![
-                crate::runtime::profile::operator_profile_from_execution_plan(
-                    physical_plan.as_ref(),
-                ),
-            ],
-        })
+        drop(fragment_elapsed);
+        execution_context.profiler.summary_metrics.finish();
+        execution_context.profiler.root_execution_plan = Some(physical_plan);
+        Ok(())
     }
 
     fn send_exchange_page_inner(
@@ -568,6 +595,12 @@ impl FragmentService for LocalFragmentExecutor {
             table_scan_splits,
             ..
         } = &envelope;
+        let mut execution_context = FragmentExecutionContext::new(
+            instance.query_context.clone(),
+            instance.instance_id,
+            instance.fragment_id(),
+            Some(instance.worker_id),
+        );
         let local_scan_assignment = if *standalone {
             Some(table_scan_splits.clone()).filter(|splits| !splits.is_empty())
         } else if instance.table_scan_splits.is_empty() {
@@ -579,8 +612,8 @@ impl FragmentService for LocalFragmentExecutor {
             ))
         };
         let prepared = LocalFragmentPlan::prepare(
-            instance.query_context.clone(),
-            instance.execution_fragment.fragment.clone(),
+            execution_context.query_context.clone(),
+            instance.fragment.clone(),
             instance.table_catalogs.clone(),
             local_scan_assignment,
             Arc::clone(&self.storage),
@@ -596,11 +629,9 @@ impl FragmentService for LocalFragmentExecutor {
             prepared.logical_plan.clone(),
             instance.exchange_inputs.as_slice(),
         )?;
-        let profile =
-            self.execute_streaming(prepared.query_context.clone(), logical_plan, &envelope)?;
+        self.execute_streaming(&mut execution_context, logical_plan, &envelope)?;
         Ok(FragmentExecutionStatus {
-            query_context: prepared.query_context,
-            profile: Some(profile),
+            profile: Some(execution_context.profiler),
         })
     }
 

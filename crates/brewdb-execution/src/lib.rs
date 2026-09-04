@@ -28,7 +28,6 @@ pub mod runtime {
     pub mod exchange;
     pub mod exchange_service;
     pub mod execution_graph;
-    pub mod fragment;
     pub mod function;
     pub mod profile;
     pub mod scheduler;
@@ -44,13 +43,12 @@ pub mod runtime {
         SqlDriverError,
     };
     pub use exchange::{
-        ExchangeBufferManager, ExchangeChannelDescriptor, ExchangeDataEncoding, ExchangeDataPage,
-        ExchangeId, build_exchange_channels,
+        ExchangeBufferManager, ExchangeDataEncoding, ExchangeDataPage, ExchangeId,
+        build_exchange_channels,
     };
     pub use exchange_service::{ExchangePageSink, ResultBatchSink, TransportExchangePageSink};
     pub use execution_graph::{ExecutionGraph, QueryExecutionHandle, QueryOutput};
-    pub use fragment::{ExecutionFragment, FragmentInstance};
-    pub use profile::QueryProfiler;
+    pub use profile::*;
     pub use scheduler::{
         AllAtOnceFragmentScheduler, FirstWorkerSelector, FragmentScheduler, ResourceManager,
         StaticResourceManager, WorkerInfo, WorkerSelector,

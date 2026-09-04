@@ -14,6 +14,8 @@ use std::sync::Arc;
 use crate::runtime::coordinator::QueryCoordinator;
 use crate::runtime::errors::SqlDriverError;
 use crate::runtime::execution_graph::QueryExecutionHandle;
+use crate::runtime::profile::QueryProfiler;
+use tracing::{debug, info};
 
 pub(crate) fn sql_to_statement(sql: &str) -> Result<Statement, SqlDriverError> {
     let dialect = PostgreSqlDialect {};
@@ -61,42 +63,61 @@ impl SqlDriver {
         sql: impl AsRef<str>,
         query_context: QueryContext,
     ) -> Result<QueryExecutionHandle, SqlDriverError> {
-        let parsed = sql_to_statement(sql.as_ref())?;
-        let planned = self.logical_planner.plan(
-            parsed,
-            &LogicalPlanningContext {
-                query_context: &query_context,
-                catalog_service: &self.catalog_service,
-            },
-        )?;
+        let mut profiler = QueryProfiler::new(query_context.clone());
+        let query_elapsed = profiler.summary_metrics.query_elapsed.clone();
+        let mut query_elapsed_timer = query_elapsed.timer();
+        let result = (|| -> Result<QueryExecutionHandle, SqlDriverError> {
+            let parsed = sql_to_statement(sql.as_ref())?;
+            let planned = self.logical_planner.plan(
+                parsed,
+                &LogicalPlanningContext {
+                    query_context: &query_context,
+                    catalog_service: &self.catalog_service,
+                },
+            )?;
 
-        if let Some(command) = crate::planner::logical::command::command_plan(&planned) {
-            return self
-                .coordinator
-                .execute_command_plan(query_context, command)
-                .map_err(SqlDriverError::Runtime);
+            if let Some(command) = crate::planner::logical::command::command_plan(&planned) {
+                return self
+                    .coordinator
+                    .execute_command_plan(query_context.clone(), command)
+                    .map_err(SqlDriverError::Runtime);
+            }
+
+            let optimized = self
+                .logical_optimizer
+                .optimize_with_query_context(planned, &query_context)
+                .map_err(|err| PlannerError::InvalidPlan {
+                    reason: err.to_string(),
+                })?;
+            let storage = Arc::clone(&self.coordinator.storage);
+            let distributed_plan =
+                self.fragment_planner
+                    .plan_fragments(query_context.clone(), optimized, storage)?;
+            self.coordinator
+                .execute_query(query_context.clone(), distributed_plan, &mut profiler)
+                .map_err(SqlDriverError::Runtime)
+        })();
+        query_elapsed_timer.stop();
+        match result {
+            Ok(handle) => {
+                let profile = profiler.finish_success();
+                debug!(target: "brewdb.profile", profile = %profile);
+                Ok(handle)
+            }
+            Err(error) => {
+                let profile = profiler.finish_error(error.to_string());
+                debug!(target: "brewdb.profile", profile = %profile);
+                Err(error)
+            }
         }
-
-        let optimized = self
-            .logical_optimizer
-            .optimize_with_query_context(planned, &query_context)
-            .map_err(|err| PlannerError::InvalidPlan {
-                reason: err.to_string(),
-            })?;
-        let storage = Arc::clone(&self.coordinator.storage);
-        let distributed_plan =
-            self.fragment_planner
-                .plan_fragments(query_context.clone(), optimized, storage)?;
-        self.coordinator
-            .execute_query(query_context, distributed_plan)
-            .map_err(SqlDriverError::Runtime)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::Arc;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
 
     use crate::catalog::{
         CatalogConfig, CatalogEntry, CatalogMode, CatalogPath, CatalogService,
@@ -206,6 +227,20 @@ mod tests {
         driver.execute(sql.into(), test_query_context(Uuid::new_v4()))
     }
 
+    #[derive(Clone, Default)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn sql_driver_executes_query_context_through_planner_and_runtime() {
         let warehouse = TestDir::new("brewdb-driver");
@@ -250,6 +285,59 @@ mod tests {
             .unwrap();
         assert_eq!(count.value(0), 3);
         assert!(handle.output.next_result().unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_driver_emits_readable_profile() {
+        let warehouse = TestDir::new("brewdb-driver");
+        let catalog_service = catalog_service(warehouse.path());
+        let catalog = catalog_service.open_catalog("prod").unwrap();
+        catalog
+            .create_database(CreateDatabaseRequest::new("sales"))
+            .unwrap();
+        let table = catalog
+            .create_table(CreateTableRequest::new(
+                "sales",
+                "orders",
+                TableSchema::new(vec![ColumnField::new("id", DataType::Int32)]),
+            ))
+            .unwrap();
+
+        let storage = open_storage_engine().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            true,
+        )]));
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        register_batches(
+            &storage,
+            &table,
+            vec![vec![RecordBatch::try_new(schema, vec![values]).unwrap()]],
+        );
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer({
+                let buffer = buffer.clone();
+                move || BufferWriter(buffer.clone())
+            })
+            .finish();
+
+        let driver = SqlDriver::new(catalog_service, QueryCoordinator::with_storage(storage));
+        let query_context = test_query_context(Uuid::new_v4());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = driver.execute("select count(id) from orders", query_context);
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("QueryProfiler"));
+        assert!(output.contains("summary_metrics=["));
+        assert!(output.contains("query_elapsed="));
+        assert!(!output.contains("profile=\\\"{"));
     }
 
     #[test]

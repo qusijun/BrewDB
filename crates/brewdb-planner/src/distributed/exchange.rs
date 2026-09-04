@@ -7,6 +7,7 @@ use std::sync::Arc;
 use datafusion_common::DFSchemaRef;
 use datafusion_expr::UserDefinedLogicalNodeCore;
 use datafusion_expr::{Expr as DataFusionExpr, Extension, LogicalPlan as DataFusionLogicalPlan};
+use uuid::Uuid;
 
 use super::fragment::PlanFragmentId;
 use datafusion_common::Column;
@@ -118,6 +119,25 @@ impl ExchangeNode {
         self.partitioning_scheme = partitioning_scheme;
         self
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExchangeId(pub u32);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExchangeChannelDescriptor {
+    pub exchange_id: ExchangeId,
+    pub source_fragment_id: PlanFragmentId,
+    pub target_fragment_id: PlanFragmentId,
+    pub source_instance_id: u32,
+    pub target_instance_id: u32,
+    pub source_worker_id: Uuid,
+    pub source_endpoint: String,
+    pub target_worker_id: Uuid,
+    pub target_endpoint: String,
+    pub scope: ExchangeScope,
+    pub exchange_type: ExchangeType,
+    pub partitioning_scheme: PartitioningScheme,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

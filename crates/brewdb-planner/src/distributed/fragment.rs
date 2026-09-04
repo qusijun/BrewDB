@@ -5,7 +5,9 @@ use datafusion_expr::{Expr as DataFusionExpr, LogicalPlan as DataFusionLogicalPl
 
 use crate::catalog::TableCatalogEntry;
 use crate::common::context::QueryContext;
-use crate::planner::distributed::exchange::{ExchangeNode, PartitioningScheme, RemoteSourceNode};
+use crate::planner::distributed::exchange::{
+    ExchangeChannelDescriptor, ExchangeNode, PartitioningScheme, RemoteSourceNode,
+};
 use crate::planner::errors::{map_df_plan_error, PlannerError};
 use crate::planner::logical::command::{
     command_plan, command_tag, returns_rows, CommandPlan, CommandTag,
@@ -13,8 +15,7 @@ use crate::planner::logical::command::{
 use crate::planner::logical::table_source::DefaultTableSource;
 use crate::planner::logical::LogicalOptimizer;
 use crate::storage::{StorageEngine, TableScanSplit, TableScanSplitGroup, TableSourceId};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlanFragmentId(pub u32);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,53 @@ pub struct PlanFragment {
     pub kind: PlanFragmentKind,
     pub root: Option<DataFusionLogicalPlan>,
     pub local_plan: Option<DataFusionLogicalPlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentInstance {
+    pub instance_id: u32,
+    pub fragment: PlanFragment,
+    pub worker_id: uuid::Uuid,
+    pub endpoint: String,
+    /// Runtime assignment for distributed/source execution.
+    ///
+    /// A fragment instance is scheduled around one source node and can carry
+    /// multiple assigned scan splits for that source.
+    pub table_scan_splits: Vec<TableScanSplit>,
+    pub query_context: QueryContext,
+    pub table_catalogs: Vec<TableCatalogEntry>,
+    pub exchange_inputs: Vec<ExchangeChannelDescriptor>,
+    pub exchange_outputs: Vec<ExchangeChannelDescriptor>,
+}
+
+impl FragmentInstance {
+    pub fn scheduled(
+        instance_id: u32,
+        fragment: PlanFragment,
+        worker_id: uuid::Uuid,
+        endpoint: impl Into<String>,
+        table_scan_splits: Vec<TableScanSplit>,
+    ) -> Self {
+        Self {
+            instance_id,
+            fragment,
+            worker_id,
+            endpoint: endpoint.into(),
+            table_scan_splits,
+            query_context: QueryContext::for_test(uuid::Uuid::nil()),
+            table_catalogs: vec![],
+            exchange_inputs: vec![],
+            exchange_outputs: vec![],
+        }
+    }
+
+    pub fn fragment(&self) -> &PlanFragment {
+        &self.fragment
+    }
+
+    pub fn fragment_id(&self) -> PlanFragmentId {
+        self.fragment.fragment_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
