@@ -5,9 +5,8 @@ use std::io::Cursor;
 use std::sync::Mutex;
 
 use crate::planner::distributed::PlanFragmentId;
-use crate::planner::distributed::exchange::{
-    ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme,
-};
+pub use crate::planner::distributed::exchange::{ExchangeChannelDescriptor, ExchangeId};
+use crate::planner::distributed::exchange::{ExchangeNode, ExchangeType};
 use arrow::array::{ArrayRef, BooleanArray};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -17,29 +16,9 @@ use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use uuid::Uuid;
 
 use crate::runtime::errors::ExchangeRuntimeError;
 use crate::runtime::execution_graph::ExecutionGraph;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExchangeId(pub u32);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExchangeChannelDescriptor {
-    pub exchange_id: ExchangeId,
-    pub source_fragment_id: PlanFragmentId,
-    pub target_fragment_id: PlanFragmentId,
-    pub source_instance_id: Uuid,
-    pub target_instance_id: Uuid,
-    pub source_worker_id: Uuid,
-    pub source_endpoint: String,
-    pub target_worker_id: Uuid,
-    pub target_endpoint: String,
-    pub scope: ExchangeScope,
-    pub exchange_type: ExchangeType,
-    pub partitioning_scheme: PartitioningScheme,
-}
 
 pub fn build_exchange_channels(
     exchanges: &[ExchangeNode],
@@ -348,13 +327,13 @@ impl ExchangeBufferManager {
 mod tests {
     use std::sync::Arc;
 
-    use crate::planner::distributed::PlanFragmentId;
     use crate::planner::distributed::exchange::{
         ExchangeNode, ExchangeScope, ExchangeType, PartitioningScheme,
     };
-    use crate::planner::distributed::{PlanFragment, PlanFragmentKind};
+    use crate::planner::distributed::{
+        FragmentInstance, PlanFragment, PlanFragmentId, PlanFragmentKind,
+    };
     use crate::runtime::execution_graph::ExecutionGraph;
-    use crate::runtime::{ExecutionFragment, FragmentInstance};
     use arrow::array::{ArrayRef, Int32Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -368,13 +347,13 @@ mod tests {
         PlanFragmentId(fragment_id)
     }
 
-    fn fragment(fragment_id: PlanFragmentId, kind: PlanFragmentKind) -> ExecutionFragment {
-        ExecutionFragment::new(PlanFragment {
+    fn fragment(fragment_id: PlanFragmentId, kind: PlanFragmentKind) -> PlanFragment {
+        PlanFragment {
             fragment_id,
             kind,
             root: None,
             local_plan: None,
-        })
+        }
     }
 
     fn channel(exchange_id: ExchangeId, exchange_type: ExchangeType) -> ExchangeChannelDescriptor {
@@ -382,8 +361,8 @@ mod tests {
             exchange_id,
             source_fragment_id: fragment_id(1),
             target_fragment_id: fragment_id(0),
-            source_instance_id: uuid::Uuid::new_v4(),
-            target_instance_id: uuid::Uuid::new_v4(),
+            source_instance_id: 1,
+            target_instance_id: 0,
             source_worker_id: uuid::Uuid::new_v4(),
             source_endpoint: "rpc://worker-1".to_owned(),
             target_worker_id: uuid::Uuid::new_v4(),
@@ -467,21 +446,21 @@ mod tests {
             fragments: vec![source.clone(), target.clone()],
             instances: vec![
                 FragmentInstance::scheduled(
-                    uuid::Uuid::new_v4(),
+                    0,
                     source.clone(),
                     uuid::Uuid::new_v4(),
                     "rpc://worker-1",
                     Vec::new(),
                 ),
                 FragmentInstance::scheduled(
-                    uuid::Uuid::new_v4(),
+                    1,
                     source,
                     uuid::Uuid::new_v4(),
                     "rpc://worker-2",
                     Vec::new(),
                 ),
                 FragmentInstance::scheduled(
-                    uuid::Uuid::new_v4(),
+                    2,
                     target,
                     target_worker_id,
                     "rpc://worker-0",

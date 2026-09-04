@@ -1,10 +1,11 @@
 //! Runtime-facing shared contracts.
 
 use crate::common::config::ConfigSet;
+use std::fmt;
 use tracing::Span;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct QueryContext {
     pub query_id: Uuid,
     pub session_id: Uuid,
@@ -64,6 +65,32 @@ impl QueryContext {
         Self::system(query_id)
     }
 }
+
+impl fmt::Debug for QueryContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryContext")
+            .field("query_id", &self.query_id)
+            .field("session_id", &self.session_id)
+            .field("user_name", &self.user_name)
+            .field("database_name", &self.database_name)
+            .field("catalog_name", &self.catalog_name)
+            .field("settings", &self.settings)
+            .finish()
+    }
+}
+
+impl PartialEq for QueryContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.query_id == other.query_id
+            && self.session_id == other.session_id
+            && self.user_name == other.user_name
+            && self.database_name == other.database_name
+            && self.catalog_name == other.catalog_name
+            && self.settings == other.settings
+    }
+}
+
+impl Eq for QueryContext {}
 
 #[cfg(test)]
 mod tests {

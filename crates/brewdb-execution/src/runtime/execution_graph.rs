@@ -5,8 +5,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::common::context::QueryContext;
-use crate::planner::distributed::PlanFragment;
-use crate::runtime::{ExecutionFragment, FragmentInstance};
+use crate::planner::distributed::{FragmentInstance, PlanFragment};
 use arrow::record_batch::RecordBatch;
 
 use crate::runtime::errors::ExecutionRuntimeError;
@@ -14,7 +13,7 @@ use crate::runtime::errors::ExecutionRuntimeError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionGraph {
     pub query_context: QueryContext,
-    pub fragments: Vec<ExecutionFragment>,
+    pub fragments: Vec<PlanFragment>,
     pub instances: Vec<FragmentInstance>,
 }
 
@@ -22,7 +21,7 @@ impl ExecutionGraph {
     pub fn from_plan_fragments(query_context: QueryContext, fragments: Vec<PlanFragment>) -> Self {
         Self {
             query_context,
-            fragments: fragments.into_iter().map(ExecutionFragment::new).collect(),
+            fragments,
             instances: vec![],
         }
     }
@@ -139,6 +138,7 @@ mod tests {
     use crate::execution::executor::FragmentExecutionEnvelope;
     use crate::runtime::FragmentSchedulerError;
     use crate::runtime::coordinator::QueryCoordinator;
+    use crate::runtime::profile::QueryProfiler;
     use crate::runtime::scheduler::{StaticResourceManager, WorkerInfo, WorkerSelector};
     use crate::runtime::transport::{FragmentTransport, LocalFragmentTransport, TransportRegistry};
 
@@ -318,6 +318,15 @@ mod tests {
             batches.push(batch);
         }
         batches
+    }
+
+    fn execute_query(
+        runtime: &QueryCoordinator,
+        query_context: QueryContext,
+        plan: DistributedFragmentPlan,
+    ) -> Result<super::QueryExecutionHandle, crate::runtime::ExecutionRuntimeError> {
+        let mut profiler = QueryProfiler::new(query_context.clone());
+        runtime.execute_query(query_context, plan, &mut profiler)
     }
 
     fn build_table_scan_fragment(table: &TableCatalogEntry) -> PlanFragment {
@@ -536,9 +545,12 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = QueryCoordinator::default()
-            .execute_query(query_context.clone(), distributed_plan)
-            .unwrap();
+        let handle = execute_query(
+            &QueryCoordinator::default(),
+            query_context.clone(),
+            distributed_plan,
+        )
+        .unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
@@ -557,9 +569,12 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = QueryCoordinator::default()
-            .execute_query(query_context.clone(), distributed_plan)
-            .unwrap();
+        let handle = execute_query(
+            &QueryCoordinator::default(),
+            query_context.clone(),
+            distributed_plan,
+        )
+        .unwrap();
 
         assert_eq!(handle.query_context, query_context);
     }
@@ -579,9 +594,12 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = QueryCoordinator::default()
-            .execute_query(query_context, distributed_plan)
-            .unwrap();
+        let handle = execute_query(
+            &QueryCoordinator::default(),
+            query_context,
+            distributed_plan,
+        )
+        .unwrap();
 
         assert_eq!(handle.command_tag, "SELECT");
         assert!(handle.returns_rows);
@@ -625,9 +643,7 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = runtime
-            .execute_query(query_context.clone(), distributed_plan)
-            .unwrap();
+        let handle = execute_query(&runtime, query_context.clone(), distributed_plan).unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
@@ -649,9 +665,7 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = runtime
-            .execute_query(query_context.clone(), distributed_plan)
-            .unwrap();
+        let handle = execute_query(&runtime, query_context.clone(), distributed_plan).unwrap();
         assert_eq!(handle.query_context, query_context);
     }
 
@@ -673,9 +687,7 @@ mod tests {
             exchanges: vec![],
         };
 
-        let handle = runtime
-            .execute_query(query_context, distributed_plan)
-            .unwrap();
+        let handle = execute_query(&runtime, query_context, distributed_plan).unwrap();
         let batches = drain_query_results(&handle);
 
         assert_eq!(batches.len(), 1);
@@ -765,9 +777,12 @@ mod tests {
         assert_eq!(plan.fragments.len(), 2);
         assert_eq!(plan.exchanges.len(), 1);
 
-        let handle = QueryCoordinator::with_storage(storage)
-            .execute_query(query_context, plan)
-            .unwrap();
+        let handle = execute_query(
+            &QueryCoordinator::with_storage(storage),
+            query_context,
+            plan,
+        )
+        .unwrap();
         let batches = drain_query_results(&handle);
 
         assert_eq!(batches.len(), 1);
@@ -856,7 +871,7 @@ mod tests {
             .unwrap();
 
         let runtime = QueryCoordinator::with_storage(storage);
-        let result = runtime.execute_query(query_context.clone(), plan).unwrap();
+        let result = execute_query(&runtime, query_context.clone(), plan).unwrap();
 
         assert_eq!(result.query_context, query_context);
     }
@@ -921,12 +936,12 @@ mod tests {
             ])))
             .with_transport_registry(transport_registry);
 
-        let handle = runtime
-            .execute_query(
-                distributed_plan.query_context.clone(),
-                distributed_plan.clone(),
-            )
-            .unwrap();
+        let handle = execute_query(
+            &runtime,
+            distributed_plan.query_context.clone(),
+            distributed_plan.clone(),
+        )
+        .unwrap();
         assert_eq!(
             handle.query_context.query_id,
             distributed_plan.query_context.query_id

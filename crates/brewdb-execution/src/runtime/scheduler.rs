@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::planner::distributed::{PlanFragment, PlanFragmentKind};
+use crate::planner::distributed::{FragmentInstance, PlanFragment, PlanFragmentKind};
 use uuid::Uuid;
 
-use crate::runtime::FragmentInstance;
 use crate::runtime::errors::FragmentSchedulerError;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::storage::{TableScanSplitGroup, TableSourceId};
@@ -94,32 +93,29 @@ impl FragmentScheduler for AllAtOnceFragmentScheduler {
             return Err(FragmentSchedulerError::EmptyPlan);
         }
         let workers = resource_manager.workers();
-        execution_graph.fragments.sort_by_key(|execution_fragment| {
-            match execution_fragment.fragment.kind {
+        execution_graph
+            .fragments
+            .sort_by_key(|fragment| match fragment.kind {
                 PlanFragmentKind::Source => 0u8,
                 PlanFragmentKind::Intermediate => 1,
                 PlanFragmentKind::Root => 2,
-            }
-        });
+            });
         execution_graph.instances.clear();
         let mut instances = Vec::new();
-        for execution_fragment in &execution_graph.fragments {
-            let fragment_id = execution_fragment.fragment_id();
+        for fragment in &execution_graph.fragments {
+            let fragment_id = fragment.fragment_id;
             let assigned_splits = table_scan_splits
                 .splits_for_table_source(TableSourceId(fragment_id.0))
                 .unwrap_or_default();
-            let worker = self
-                .worker_selector
-                .select_worker(&workers, &execution_fragment.fragment)?;
-            let table_scan_splits = if execution_fragment.fragment.kind == PlanFragmentKind::Source
-            {
+            let worker = self.worker_selector.select_worker(&workers, fragment)?;
+            let table_scan_splits = if fragment.kind == PlanFragmentKind::Source {
                 assigned_splits.to_vec()
             } else {
                 Vec::new()
             };
             instances.push(FragmentInstance::scheduled(
-                Uuid::new_v4(),
-                execution_fragment.clone(),
+                instances.len() as u32,
+                fragment.clone(),
                 worker.worker_id,
                 worker.endpoint,
                 table_scan_splits,
