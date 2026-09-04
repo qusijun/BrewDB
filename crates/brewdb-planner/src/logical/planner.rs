@@ -592,6 +592,8 @@ mod tests {
         let store = open_catalog_store(&CatalogConfig {
             store_backend: CatalogStoreBackendKind::Memory,
             paimon_warehouse: String::new(),
+            rocksdb_datadir: String::new(),
+            rocksdb_root: String::new(),
         });
         let warehouse = TestDir::new("brewdb-logical-planner-tests");
         let registry = global_config_registry().unwrap();

@@ -726,6 +726,8 @@ mod tests {
             open_catalog_store(&CatalogConfig {
                 store_backend: CatalogStoreBackendKind::Memory,
                 paimon_warehouse: warehouse.path().to_string_lossy().to_string(),
+                rocksdb_datadir: String::new(),
+                rocksdb_root: String::new(),
             }),
             config,
         );
@@ -817,6 +819,8 @@ mod tests {
             open_catalog_store(&CatalogConfig {
                 store_backend: CatalogStoreBackendKind::Memory,
                 paimon_warehouse: warehouse.path().to_string_lossy().to_string(),
+                rocksdb_datadir: String::new(),
+                rocksdb_root: String::new(),
             }),
             config,
         );

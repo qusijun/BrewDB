@@ -127,7 +127,8 @@ mod tests {
 
     #[test]
     fn query_context_carries_session_settings() {
-        let session_settings = ConfigSet::new().with_entry("brewdb.execution.max_threads", 8_u64);
+        let session_settings =
+            ConfigSet::new().with_entry("datafusion.execution.batch_size", 128_u64);
         let context = QueryContext::new(
             Uuid::new_v4(),
             Uuid::nil(),
@@ -142,8 +143,10 @@ mod tests {
 
     #[test]
     fn query_context_settings_override_session_settings() {
-        let session_settings = ConfigSet::new().with_entry("brewdb.execution.max_threads", 8_u64);
-        let query_settings = ConfigSet::new().with_entry("brewdb.execution.max_threads", 4_u64);
+        let session_settings =
+            ConfigSet::new().with_entry("datafusion.execution.batch_size", 128_u64);
+        let query_settings =
+            ConfigSet::new().with_entry("datafusion.execution.batch_size", 256_u64);
         let context = QueryContext::new(
             Uuid::new_v4(),
             Uuid::nil(),
@@ -157,9 +160,9 @@ mod tests {
         assert_eq!(
             context
                 .settings
-                .get_u64("brewdb.execution.max_threads")
+                .get_u64("datafusion.execution.batch_size")
                 .unwrap(),
-            Some(4)
+            Some(256)
         );
     }
 

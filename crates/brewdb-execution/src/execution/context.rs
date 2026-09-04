@@ -1,12 +1,11 @@
 //! DataFusion execution context adapters for BrewDB query context.
 
-use crate::common::config::datafusion_settings;
 use crate::common::context::QueryContext;
 use datafusion::prelude::{SessionConfig, SessionContext as DataFusionSessionContext};
 use datafusion_common::Result as DataFusionResult;
 
 pub fn session_config(query_context: &QueryContext) -> DataFusionResult<SessionConfig> {
-    SessionConfig::from_string_hash_map(&datafusion_settings(&query_context.settings))
+    SessionConfig::from_string_hash_map(&query_context.settings.string_hash_map())
 }
 
 pub fn session_context(query_context: &QueryContext) -> DataFusionResult<DataFusionSessionContext> {

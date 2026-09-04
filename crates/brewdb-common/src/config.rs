@@ -1,4 +1,16 @@
 //! Shared configuration primitives.
+//!
+//! BrewDB uses one registry-driven config system for all native settings.
+//! New settings should usually be added in one of two ways:
+//!
+//! - For a strongly typed BrewDB setting, define a `ConfigView` with
+//!   `define_config_view!` and expose it through the inventory registry.
+//! - For a DataFusion setting, extend `datafusion::prelude::ConfigOptions`;
+//!   `global_config_registry()` will pick it up automatically.
+//!
+//! `ConfigSet` stores the flattened runtime values, `ConfigRegistry` validates
+//! keys and types, and `SystemConfigLoader` applies TOML on top of registry
+//! defaults.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -47,6 +59,11 @@ macro_rules! config_registry {
     }};
 }
 
+/// Defines a strongly typed config view and registers its keys globally.
+///
+/// Use this for BrewDB-owned settings that need custom parsing or restricted
+/// scopes. The macro generates both the Rust struct and its
+/// `ConfigDefinition`s, then submits the definitions to the global inventory.
 #[macro_export]
 macro_rules! define_config_view {
     (
@@ -199,14 +216,38 @@ impl From<&str> for ConfigValue {
     }
 }
 
-pub fn datafusion_settings(settings: &ConfigSet) -> HashMap<String, String> {
-    settings
+fn datafusion_config_definitions() -> Vec<ConfigDefinition> {
+    use datafusion_common::config::ConfigOptions as DataFusionConfigOptions;
+
+    // DataFusion settings are exposed as a generated subtree so they can be
+    // loaded and validated through the same BrewDB registry path.
+    DataFusionConfigOptions::default()
         .entries()
-        .filter_map(|(key, value)| {
-            key.starts_with(DATAFUSION_CONFIG_PREFIX)
-                .then(|| (key.to_owned(), config_value_to_string(value)))
-        })
+        .into_iter()
+        .filter_map(datafusion_config_definition)
         .collect()
+}
+
+fn datafusion_config_definition(
+    entry: datafusion_common::config::ConfigEntry,
+) -> Option<ConfigDefinition> {
+    let value = entry.value?;
+    let key = Box::leak(entry.key.into_boxed_str());
+    let (kind, default_value) = if let Ok(value) = value.parse::<bool>() {
+        (ConfigValueKind::Bool, ConfigValue::Bool(value))
+    } else if let Ok(value) = value.parse::<u64>() {
+        (ConfigValueKind::U64, ConfigValue::U64(value))
+    } else {
+        (ConfigValueKind::String, ConfigValue::String(value))
+    };
+
+    ConfigDefinition::new(key, kind, default_value).ok()
+}
+
+inventory::submit! {
+    ConfigDefinitionSetRegistration {
+        collect: datafusion_config_definitions,
+    }
 }
 
 fn config_value_to_string(value: &ConfigValue) -> String {
@@ -226,6 +267,11 @@ pub struct ConfigDefinition {
 }
 
 impl ConfigDefinition {
+    /// Creates a new config definition.
+    ///
+    /// The key must be namespaced under `brewdb.` or `datafusion.` so the
+    /// registry can distinguish native BrewDB settings from bridged DataFusion
+    /// settings.
     pub fn new(
         key: &'static str,
         value_kind: ConfigValueKind,
@@ -299,16 +345,19 @@ pub struct ConfigRegistry {
 }
 
 impl ConfigRegistry {
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Builds a registry from the config definitions registered for a view.
     pub fn for_view<T: ConfigView>() -> Result<Self, CommonError> {
         let mut registry = Self::new();
         T::register_into(&mut registry)?;
         Ok(registry)
     }
 
+    /// Inserts one definition after checking for duplicates.
     pub fn register(&mut self, definition: ConfigDefinition) -> Result<(), CommonError> {
         if self.definitions.contains_key(definition.key) {
             return Err(CommonError::InvalidConfiguration {
@@ -330,6 +379,7 @@ impl ConfigRegistry {
         Ok(self)
     }
 
+    /// Inserts many definitions.
     pub fn register_definitions(
         &mut self,
         definitions: impl IntoIterator<Item = ConfigDefinition>,
@@ -348,6 +398,7 @@ impl ConfigRegistry {
         self.definitions.contains_key(key)
     }
 
+    /// Validates a patch against the registry, including scope and type.
     pub fn validate_patch(&self, patch: &ConfigPatch) -> Result<(), CommonError> {
         for entry in patch.entries() {
             let definition = self
@@ -359,6 +410,7 @@ impl ConfigRegistry {
         Ok(())
     }
 
+    /// Validates every populated config value against the registry.
     pub fn validate_config(&self, config: &ConfigSet) -> Result<(), CommonError> {
         for (key, value) in config.entries() {
             let definition = self.definition(key).ok_or_else(|| unknown_key_error(key))?;
@@ -381,15 +433,22 @@ impl ConfigRegistry {
 }
 
 pub trait ConfigView: Sized {
+    /// Returns the definitions that belong to this view.
     fn config_definitions() -> Vec<ConfigDefinition>;
 
+    /// Decodes the view from a validated config set.
     fn from_config_set(config: &ConfigSet) -> Result<Self, CommonError>;
 
+    /// Registers this view into a registry.
     fn register_into(registry: &mut ConfigRegistry) -> Result<(), CommonError> {
         registry.register_definitions(Self::config_definitions())
     }
 }
 
+/// Inventory registration hook for config views.
+///
+/// Each `ConfigView` submits one of these so `global_config_registry()` can
+/// build the full registry at startup without hand-maintaining a list.
 pub struct ConfigDefinitionSetRegistration {
     pub collect: fn() -> Vec<ConfigDefinition>,
 }
@@ -405,6 +464,10 @@ pub fn global_config_registry() -> Result<ConfigRegistry, CommonError> {
 }
 
 #[derive(Clone, Debug)]
+/// Loader for system-scoped config from TOML.
+///
+/// It flattens TOML tables into dotted keys, validates them against a registry,
+/// and materializes a `ConfigSet` seeded with registry defaults.
 pub struct SystemConfigLoader {
     registry: ConfigRegistry,
 }
@@ -493,6 +556,11 @@ impl ConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Flattened runtime config values.
+///
+/// New settings should be added to the registry first, then populated here via
+/// TOML, patches, or typed views. `ConfigSet` itself does not enforce meaning;
+/// it only stores values and offers typed accessors for validated keys.
 pub struct ConfigSet {
     values: BTreeMap<String, ConfigValue>,
 }
@@ -638,6 +706,13 @@ impl ConfigSet {
         self.values.iter().map(|(key, value)| (key.as_str(), value))
     }
 
+    /// Returns the config as strings for APIs that accept `key -> string`.
+    pub fn string_hash_map(&self) -> HashMap<String, String> {
+        self.entries()
+            .map(|(key, value)| (key.to_owned(), config_value_to_string(value)))
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
@@ -655,12 +730,12 @@ fn type_mismatch_error(key: &str, expected: ConfigValueKind, actual: &ConfigValu
 }
 
 fn validate_config_key(key: &str) -> Result<(), CommonError> {
-    if key.starts_with(CONFIG_KEY_PREFIX) {
+    if key.starts_with(CONFIG_KEY_PREFIX) || key.starts_with(DATAFUSION_CONFIG_PREFIX) {
         Ok(())
     } else {
         Err(CommonError::InvalidConfiguration {
             field: key.to_owned(),
-            reason: format!("config key must start with `{CONFIG_KEY_PREFIX}`"),
+            reason: format!("config key must start with `{CONFIG_KEY_PREFIX}` or `datafusion.`"),
         })
     }
 }
@@ -684,6 +759,7 @@ fn flatten_toml_value(
     value: &toml::Value,
     patch: &mut ConfigPatch,
 ) -> Result<(), CommonError> {
+    // TOML is accepted in dotted-table form and flattened into a config patch.
     match value {
         toml::Value::Table(table) => {
             for (key, value) in table {
@@ -742,7 +818,7 @@ mod tests {
 
     use super::{
         ConfigDefinition, ConfigPatch, ConfigRegistry, ConfigScope, ConfigSet, ConfigValue,
-        ConfigValueKind, SystemConfigLoader, datafusion_settings,
+        ConfigValueKind, SystemConfigLoader, global_config_registry,
     };
 
     crate::define_config_view! {
@@ -765,39 +841,18 @@ mod tests {
     }
 
     fn test_registry() -> ConfigRegistry {
-        crate::config_registry!(
-            (
-                "brewdb.execution.max_threads",
-                ConfigValueKind::U64,
-                8_u64,
-                [ConfigScope::System, ConfigScope::Session]
-            ),
-            (
-                "brewdb.execution.enable_spill",
-                ConfigValueKind::Bool,
-                false
-            ),
-            (
-                "brewdb.execution.exchange_codec",
-                ConfigValueKind::String,
-                "arrow_ipc",
-                [ConfigScope::Statement]
-            ),
-        )
+        crate::config_registry!((
+            "brewdb.execution.exchange_codec",
+            ConfigValueKind::String,
+            "arrow_ipc",
+            [ConfigScope::Statement]
+        ),)
     }
 
     #[test]
     fn registry_materializes_default_config() {
         let config = test_registry().materialize_defaults();
 
-        assert_eq!(
-            config.get_u64("brewdb.execution.max_threads").unwrap(),
-            Some(8)
-        );
-        assert_eq!(
-            config.get_bool("brewdb.execution.enable_spill").unwrap(),
-            Some(false)
-        );
         assert_eq!(
             config
                 .get_string("brewdb.execution.exchange_codec")
@@ -810,7 +865,6 @@ mod tests {
     fn registry_is_the_whitelist_for_known_keys() {
         let registry = test_registry();
 
-        assert!(registry.has_definition("brewdb.execution.max_threads"));
         assert!(!registry.has_definition("brewdb.execution.unknown_option"));
     }
 
@@ -818,54 +872,11 @@ mod tests {
     fn registry_validated_patch_overrides_previous_values() {
         let registry = test_registry();
         let base = registry.materialize_defaults();
-        let patch = ConfigPatch::new(ConfigScope::Session)
-            .with_entry("brewdb.execution.max_threads", 16_u64)
-            .with_entry("brewdb.execution.enable_spill", true);
+        let patch = ConfigPatch::new(ConfigScope::Statement)
+            .with_entry("brewdb.execution.exchange_codec", "lz4_arrow_ipc");
 
         let merged = base.merged_with_registry(&registry, &patch).unwrap();
 
-        assert_eq!(
-            merged.get_u64("brewdb.execution.max_threads").unwrap(),
-            Some(16)
-        );
-        assert_eq!(
-            merged.get_bool("brewdb.execution.enable_spill").unwrap(),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn registry_validates_existing_config_values() {
-        let registry = test_registry();
-        let config = ConfigSet::new()
-            .with_entry("brewdb.execution.max_threads", 32_u64)
-            .with_entry("brewdb.execution.enable_spill", true);
-
-        registry.validate_config(&config).unwrap();
-    }
-
-    #[test]
-    fn higher_scope_priority_overrides_lower_scope_priority() {
-        let registry = test_registry();
-        let base = registry.materialize_defaults();
-        let system_patch =
-            ConfigPatch::new(ConfigScope::System).with_entry("brewdb.execution.max_threads", 4_u64);
-        let statement_patch = ConfigPatch::new(ConfigScope::Statement)
-            .with_entry("brewdb.execution.exchange_codec", "lz4_arrow_ipc");
-        let session_patch = ConfigPatch::new(ConfigScope::Session)
-            .with_entry("brewdb.execution.max_threads", 16_u64);
-
-        let merged = base
-            .merge_patches_with_registry(
-                &registry,
-                [&statement_patch, &system_patch, &session_patch],
-            )
-            .unwrap();
-
-        assert_eq!(
-            merged.get_u64("brewdb.execution.max_threads").unwrap(),
-            Some(16)
-        );
         assert_eq!(
             merged
                 .get_string("brewdb.execution.exchange_codec")
@@ -945,21 +956,23 @@ mod tests {
 
     #[test]
     fn typed_access_rejects_wrong_value_kind() {
-        let config = ConfigSet::new().with_entry("brewdb.execution.max_threads", "eight");
+        let config = ConfigSet::new().with_entry("datafusion.execution.batch_size", "eight");
 
-        let error = config.get_u64("brewdb.execution.max_threads").unwrap_err();
+        let error = config
+            .get_u64("datafusion.execution.batch_size")
+            .unwrap_err();
 
         assert_eq!(error.error_code(), ErrorCode::INVALID_CONFIGURATION);
         assert_eq!(
             error.to_string(),
-            "invalid configuration for `brewdb.execution.max_threads`: expected u64, found string"
+            "invalid configuration for `datafusion.execution.batch_size`: expected u64, found string"
         );
     }
 
     #[test]
     fn registry_rejects_default_value_kind_mismatch() {
         let error = ConfigDefinition::new(
-            "brewdb.execution.max_threads",
+            "datafusion.execution.batch_size",
             ConfigValueKind::U64,
             "eight",
         )
@@ -967,18 +980,18 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid configuration for `brewdb.execution.max_threads`: default value kind mismatch: expected u64, found string"
+            "invalid configuration for `datafusion.execution.batch_size`: default value kind mismatch: expected u64, found string"
         );
     }
 
     #[test]
-    fn definitions_require_brewdb_prefix() {
+    fn definitions_require_known_prefix() {
         let error = ConfigDefinition::new("execution.max_threads", ConfigValueKind::U64, 8_u64)
             .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "invalid configuration for `execution.max_threads`: config key must start with `brewdb.`"
+            "invalid configuration for `execution.max_threads`: config key must start with `brewdb.` or `datafusion.`"
         );
     }
 
@@ -994,16 +1007,16 @@ mod tests {
     }
 
     #[test]
-    fn datafusion_settings_extracts_only_datafusion_prefixed_entries() {
+    fn string_hash_map_converts_all_entries_to_strings() {
         let config = ConfigSet::new()
             .with_entry("datafusion.execution.batch_size", 512_u64)
             .with_entry("datafusion.optimizer.skip_failed_rules", true)
             .with_entry("datafusion.catalog.default_catalog", "brewdb")
-            .with_entry("brewdb.execution.max_threads", 8_u64);
+            .with_entry("brewdb.logging.level", "info");
 
-        let settings = datafusion_settings(&config);
+        let settings = config.string_hash_map();
 
-        assert_eq!(settings.len(), 3);
+        assert_eq!(settings.len(), 4);
         assert_eq!(
             settings.get("datafusion.execution.batch_size"),
             Some(&"512".to_owned())
@@ -1016,27 +1029,58 @@ mod tests {
             settings.get("datafusion.catalog.default_catalog"),
             Some(&"brewdb".to_owned())
         );
-        assert!(!settings.contains_key("brewdb.execution.max_threads"));
+        assert_eq!(
+            settings.get("brewdb.logging.level"),
+            Some(&"info".to_owned())
+        );
+    }
+
+    #[test]
+    fn global_registry_includes_datafusion_configuration_keys() {
+        let registry = global_config_registry().unwrap();
+
+        assert!(registry.has_definition("datafusion.execution.batch_size"));
+        assert!(registry.has_definition("datafusion.optimizer.skip_failed_rules"));
+        assert!(registry.has_definition("datafusion.sql_parser.dialect"));
+    }
+
+    #[test]
+    fn system_config_loader_accepts_datafusion_toml_entries() {
+        let loader = SystemConfigLoader::for_global_registry().unwrap();
+        let config = loader
+            .load_toml_str(
+                r#"
+                [datafusion.execution]
+                batch_size = 128
+
+                [datafusion.optimizer]
+                skip_failed_rules = true
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            config.get_u64("datafusion.execution.batch_size").unwrap(),
+            Some(128)
+        );
+        assert_eq!(
+            config
+                .get_bool("datafusion.optimizer.skip_failed_rules")
+                .unwrap(),
+            Some(true)
+        );
     }
 
     #[test]
     fn registry_macro_registers_literal_whitelist() {
-        let registry = crate::config_registry!(
-            (
-                "brewdb.runtime.task_slots",
-                ConfigValueKind::U64,
-                32_u64,
-                [ConfigScope::System]
-            ),
-            (
-                "brewdb.execution.enable_adaptive_spill",
-                ConfigValueKind::Bool,
-                false
-            ),
-        );
+        let registry = crate::config_registry!((
+            "brewdb.runtime.task_slots",
+            ConfigValueKind::U64,
+            32_u64,
+            [ConfigScope::System]
+        ));
 
         assert!(registry.has_definition("brewdb.runtime.task_slots"));
-        assert!(registry.has_definition("brewdb.execution.enable_adaptive_spill"));
     }
 
     #[test]

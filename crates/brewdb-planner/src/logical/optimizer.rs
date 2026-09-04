@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::common::config::datafusion_settings;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::LogicalPlan as DataFusionLogicalPlan;
@@ -14,9 +13,9 @@ use crate::common::context::QueryContext;
 use crate::planner::logical::plan::LogicalPlanNode;
 
 pub(crate) fn optimizer_context(query_context: &QueryContext) -> Result<OptimizerContext> {
-    let config = datafusion::prelude::SessionConfig::from_string_hash_map(&datafusion_settings(
-        &query_context.settings,
-    ))?;
+    let config = datafusion::prelude::SessionConfig::from_string_hash_map(
+        &query_context.settings.string_hash_map(),
+    )?;
     Ok(OptimizerContext::new_with_config_options(Arc::new(
         config.options().as_ref().clone(),
     )))
